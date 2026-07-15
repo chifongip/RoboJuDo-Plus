@@ -1,3 +1,5 @@
+from pydantic import Field, model_validator
+
 from robojudo.config import ASSETS_DIR, Config
 
 
@@ -161,3 +163,23 @@ class TwistRedisCtrlCfg(CtrlCfg):
     redis_key: str = "action_mimic_g1"  # key to get command data from redis
 
     buffer_size: int = 5  # size of the data buffer to store recent commands
+
+
+class UpperBodyZmqCtrlCfg(CtrlCfg):
+    """Named upper-body joint targets received from a ZMQ publisher."""
+
+    ctrl_type: str = "UpperBodyZmqCtrl"
+    endpoint: str = "tcp://127.0.0.1:8559"
+    joint_names: list[str] = []
+    timeout_s: float = Field(default=0.25, gt=0.0)
+    ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
+
+    @model_validator(mode="after")
+    def validate_upper_body_zmq(self):
+        if not self.endpoint.startswith("tcp://"):
+            raise ValueError("Upper-body ZMQ endpoint must use tcp://")
+        if not self.joint_names:
+            raise ValueError("Upper-body ZMQ joint_names must not be empty")
+        if len(self.joint_names) != len(set(self.joint_names)):
+            raise ValueError("Upper-body ZMQ joint_names must be unique")
+        return self

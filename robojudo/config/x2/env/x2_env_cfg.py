@@ -167,7 +167,7 @@ class X2JointDefaultDoF(DoFConfig):
 
 
 class X2EnvCfg(EnvCfg):
-    xml: str = (ASSETS_DIR / "robots/x2/x2.xml").as_posix()
+    xml: str = (ASSETS_DIR / "robots/x2/x2_simplified.xml").as_posix()
     dof: DoFConfig = X2_31DoF()
     forward_kinematic: ForwardKinematicCfg | None = ForwardKinematicCfg(
         xml_path=xml,

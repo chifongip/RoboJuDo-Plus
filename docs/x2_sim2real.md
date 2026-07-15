@@ -5,6 +5,12 @@ RoboJuDo reorders joint state by name before constructing the `1x151` observatio
 back to the robot-native order. The two head joints are not policy-driven; position control actively holds them at their
 configured defaults.
 
+The additional `x2_locomanipulation` and `x2_locomanipulation_real` configurations run the X2 locomanipulation policy.
+That policy observes 29 joints with a five-frame `1x430` history and controls the 12 leg plus three waist joints. The
+remaining arm and head joints hold the defaults recorded with the training run unless the optional arm-only ZMQ
+override is enabled. Its PD gains, effort limits, action scales, and default pose come from the run's saved
+`params/env.yaml`; rounded ONNX metadata is used only as a consistency check.
+
 ## Prerequisites
 
 Initialize and build the pinned AimDK SDK, then install the ROS 2 extension with the managed installer:
@@ -54,12 +60,78 @@ The `x2` MuJoCo configuration starts with a virtual tension band attached to `to
 
 The settings are defined by `elastic_band` in `X2MujocoEnvCfg`. Set `visualize=False` to hide the geometry while retaining the force, or adjust `visual_radius`, `visual_rgba`, and `anchor_radius` to change its appearance. The band is simulation-only; `x2_real` does not register these keyboard controls or apply an external force.
 
+The locomanipulation policy uses the left stick for planar velocity, the right stick for yaw, D-pad up/down for body
+height, and D-pad left/right for waist yaw. Keyboard controls are `W/S`, `A/D`, and `Q/E` for velocity, `R/F` for
+height, `Z/C` for waist yaw, and `X` to reset commands. Its deployment command limits are x `[-0.5, 1.0]`, y
+`[-0.5, 0.5]`, yaw `[-1.0, 1.0]`, height `[0.40, 0.66]`, and waist yaw `[-1.5708, 1.5708]`.
+
+## Locomanipulation Upper-Body ZMQ Control
+
+The two locomanipulation presets subscribe to `tcp://127.0.0.1:8559` for optional arm targets. The publisher must bind
+that endpoint and send JSON objects in radians using the following envelope:
+
+```json
+{
+  "positions": {
+    "left_shoulder_pitch_joint": 0.35,
+    "right_elbow_joint": -0.87
+  }
+}
+```
+
+Updates may contain any non-empty subset of the 14 arm joints: shoulder pitch/roll/yaw, elbow, and wrist yaw/pitch/roll
+for the left and right sides. Values from earlier partial updates remain active while messages are fresh. Waist joints
+remain policy-controlled, and the head remains at its configured default pose. Unknown joints, malformed envelopes,
+and non-finite values cause the complete message to be rejected.
+
+External arm control starts disabled. Press joystick `Start` in `RL_DEFAULT`, or release keyboard `T` in simulation, to
+toggle it. Targets are clamped to the X2 joint limits and filtered at 50 Hz with an EMA alpha of `0.95`. If no valid
+message arrives for `0.25 s`, or external control is disabled, the arms smoothly return to the recorded locomanipulation
+pose. A fresh message resumes control after a timeout without another toggle. Leaving `RL_DEFAULT`, resetting the
+simulation, or entering a safety mode disables the override.
+
+Use the interactive predefined-pose publisher to exercise the interface:
+
+```bash
+python scripts/test_upper_body_zmq.py
+```
+
+Press `0`–`5` to select the default, forward, raised, wide, carrying, or left-wave pose, and press `q` to stop. Run
+`python scripts/test_upper_body_zmq.py --help` for endpoint, frequency, and initial-pose options. A minimal custom
+publisher is:
+
+```python
+import time
+
+import zmq
+
+context = zmq.Context()
+publisher = context.socket(zmq.PUB)
+publisher.bind("tcp://127.0.0.1:8559")
+time.sleep(0.2)  # Allow the subscriber connection to settle.
+publisher.send_json(
+    {
+        "positions": {
+            "left_shoulder_pitch_joint": 0.35,
+            "right_shoulder_pitch_joint": 0.35,
+        }
+    }
+)
+```
+
 ## Startup Sequence
 
 Run the real configuration only with the robot supported and an operator holding the emergency stop:
 
 ```bash
 python scripts/run_pipeline.py -c x2_real
+```
+
+Use the corresponding locomanipulation presets for this policy:
+
+```bash
+python scripts/run_pipeline.py -c x2_locomanipulation
+python scripts/run_pipeline.py -c x2_locomanipulation_real
 ```
 
 With the robot supported, select `JOINT_DEFAULT` and wait for the completion log. Then select `RL_DEFAULT`. ONNX time does not advance in passive, damping, or joint-preparation modes.
