@@ -7,6 +7,7 @@ import numpy as np
 
 from robojudo.environment import Environment, env_registry
 from robojudo.environment.env_cfgs import MujocoEnvCfg
+from robojudo.environment.utils.elastic_band import ElasticBand
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 from robojudo.utils.util_func import quat_rotate_inverse_np, quatToEuler
 
@@ -19,6 +20,7 @@ class MujocoEnv(Environment):
 
     def __init__(self, cfg_env: MujocoEnvCfg, device="cpu"):
         super().__init__(cfg_env=cfg_env, device=device)
+        self._control_mask = np.ones(self.num_dofs, dtype=bool)
 
         self.sim_duration = cfg_env.sim_duration
         self.sim_dt = cfg_env.sim_dt
@@ -27,9 +29,14 @@ class MujocoEnv(Environment):
 
         self.model = mujoco.MjModel.from_xml_path(cfg_env.xml)  # pyright: ignore[reportAttributeAccessIssue]
         self.model.opt.timestep = self.sim_dt
+        self._dof_actuator_indices = self._resolve_actuator_indices(self.model, self.joint_names)
         self.data = mujoco.MjData(self.model)  # pyright: ignore[reportAttributeAccessIssue]
-        # mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
+        if self.model.nkey > 0:
+            mujoco.mj_resetDataKeyframe(self.model, self.data, 0)  # pyright: ignore[reportAttributeAccessIssue]
         mujoco.mj_step(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
+        self.elastic_band = (
+            ElasticBand(cfg_env.elastic_band, self.model, self.data) if cfg_env.elastic_band is not None else None
+        )
 
         self.viewer = mujoco_viewer.MujocoViewer(
             self.model,
@@ -56,6 +63,25 @@ class MujocoEnv(Environment):
 
         self.update()  # get initial state
 
+    @staticmethod
+    def _resolve_actuator_indices(model, joint_names) -> np.ndarray:
+        joint_to_actuator = {}
+        for actuator_id in range(model.nu):
+            if model.actuator_trntype[actuator_id] != mujoco.mjtTrn.mjTRN_JOINT:
+                continue
+            joint_id = int(model.actuator_trnid[actuator_id, 0])
+            joint_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+            if joint_name not in joint_names:
+                continue
+            if joint_name in joint_to_actuator:
+                raise ValueError(f"Multiple MuJoCo actuators found for joint '{joint_name}'")
+            joint_to_actuator[joint_name] = actuator_id
+
+        missing = [name for name in joint_names if name not in joint_to_actuator]
+        if missing:
+            raise ValueError(f"No MuJoCo actuator found for joints: {missing}")
+        return np.asarray([joint_to_actuator[name] for name in joint_names], dtype=np.int32)
+
     def _apply_random_heading(self):
         """Rotate the root body by a random yaw if random_heading is enabled."""
         if not self.random_heading:
@@ -75,11 +101,18 @@ class MujocoEnv(Environment):
             self.data.qvel[:] = 0.0
             self.data.ctrl[:] = 0.0
         else:
-            mujoco.mj_resetDataKeyframe(self.model, self.data, 0)  # pyright: ignore[reportAttributeAccessIssue]
+            if self.model.nkey > 0:
+                mujoco.mj_resetDataKeyframe(self.model, self.data, 0)  # pyright: ignore[reportAttributeAccessIssue]
+            else:
+                mujoco.mj_resetData(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
             self._apply_random_heading()
         mujoco.mj_forward(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
+        if self.elastic_band is not None:
+            self.elastic_band.reset()
 
     def reset(self):
+        if self.elastic_band is not None:
+            self.elastic_band.reset()
         if self.born_place_align:  # TODO: merge
             self.born_place_align = False  # disable during reset
             self.update()
@@ -91,6 +124,30 @@ class MujocoEnv(Environment):
         assert len(stiffness) == self.num_dofs and len(damping) == self.num_dofs
         self.stiffness = np.asarray(stiffness)
         self.damping = np.asarray(damping)
+
+    def set_control_joint_names(self, joint_names):
+        unknown = [name for name in joint_names if name not in self.joint_names]
+        if unknown:
+            raise ValueError(f"Control joints missing from MuJoCo environment: {unknown}")
+        selected = set(joint_names)
+        self._control_mask = np.asarray([name in selected for name in self.joint_names], dtype=bool)
+
+    def arm_position_control(self):
+        return
+
+    def _get_elastic_band(self) -> ElasticBand:
+        if self.elastic_band is None:
+            raise RuntimeError("ElasticBand is not configured for this MuJoCo environment")
+        return self.elastic_band
+
+    def toggle_elastic_band(self) -> bool:
+        return self._get_elastic_band().toggle()
+
+    def lower_elastic_band(self) -> float:
+        return self._get_elastic_band().lower()
+
+    def lift_elastic_band(self) -> float:
+        return self._get_elastic_band().lift()
 
     def self_check(self):
         pass
@@ -136,25 +193,45 @@ class MujocoEnv(Environment):
             self._torso_quat = fk_info[self._torso_name]["quat"]
             self._torso_pos = fk_info[self._torso_name]["pos"]
 
+    def _render(self):
+        self.viewer.cam.lookat = self.data.qpos.astype(np.float32)[:3]
+        if self.viewer.is_alive:
+            if self.elastic_band is not None:
+                self.elastic_band.update_visualization(self.viewer)
+            self.viewer.render()
+
+    def _simulate_torque(self, torque_fn):
+        self._render()
+        for _ in range(self.sim_decimation):
+            torque = np.asarray(torque_fn(), dtype=np.float64)
+            torque = np.clip(torque, -self.torque_limits, self.torque_limits)
+            self.data.ctrl[:] = 0.0
+            self.data.ctrl[self._dof_actuator_indices] = torque
+            if self.elastic_band is not None:
+                self.elastic_band.apply()
+            mujoco.mj_step(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
+            self.update(simple=True)
+        self.update(simple=False)
+
+    def command_passive(self):
+        self._simulate_torque(lambda: np.zeros(self.num_dofs, dtype=np.float64))
+
+    def command_damping(self, damping=5.0):
+        if damping < 0.0:
+            raise ValueError("Damping must be non-negative")
+        self._simulate_torque(lambda: -self.dof_vel * damping)
+
     def step(self, pd_target, hand_pose=None):
         assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"
 
         if hand_pose is not None:
             logger.info("Hand pose-->", hand_pose)
 
-        self.viewer.cam.lookat = self.data.qpos.astype(np.float32)[:3]
-        if self.viewer.is_alive:
-            self.viewer.render()
-
-        for _ in range(self.sim_decimation):
+        def pd_torque():
             torque = (pd_target - self.dof_pos) * self.stiffness - self.dof_vel * self.damping
-            torque = np.clip(torque, -self.torque_limits, self.torque_limits)
+            return np.where(self._control_mask, torque, 0.0)
 
-            self.data.ctrl = torque
-
-            mujoco.mj_step(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
-            self.update(simple=True)
-        self.update(simple=False)
+        self._simulate_torque(pd_torque)
 
     def shutdown(self):
         self.viewer.close()

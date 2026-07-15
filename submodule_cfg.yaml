@@ -19,6 +19,14 @@ unitree_cpp:
   path: packages/unitree_cpp
 
 
+# AgiBot X2 SDK and RoboJuDo pybind backend
+# requires a sourced ROS 2 environment and an active Conda environment
+aimdk:
+  install: false
+  path: third_party/aimdk
+  installer: scripts/install_aimdk.py
+
+
 # For OmniH2O, motionlib controller
 phc:
   install: false
@@ -39,4 +47,3 @@ phc:
 zed_proxy:
   install: false
   path: packages/zed_proxy
-

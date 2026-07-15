@@ -14,3 +14,6 @@
 	path = packages/unitree_cpp
 	url = https://github.com/HansZ8/unitree_cpp
 	ignore = dirty
+[submodule "third_party/aimdk"]
+	path = third_party/aimdk
+	url = https://github.com/chifongip/aimdk.git

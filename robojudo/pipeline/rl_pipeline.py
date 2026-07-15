@@ -25,6 +25,16 @@ class PolicyWrapper:
     def __init__(self, cfg_policy: PolicyCfg, env_dof_cfg: DoFConfig, device: str):
         self.env_dof_cfg = env_dof_cfg
 
+        self._validate_joint_names("environment", env_dof_cfg.joint_names)
+        self._validate_joint_names("policy observation", cfg_policy.obs_dof.joint_names)
+        self._validate_joint_names("policy action", cfg_policy.action_dof.joint_names)
+        self._require_joint_subset(
+            "policy observation", cfg_policy.obs_dof.joint_names, env_dof_cfg.joint_names
+        )
+        self._require_joint_subset(
+            "policy action", cfg_policy.action_dof.joint_names, env_dof_cfg.joint_names
+        )
+
         policy_type = cfg_policy.policy_type
         policy_name = policy_type
         if hasattr(cfg_policy, "policy_name"):
@@ -37,6 +47,24 @@ class PolicyWrapper:
         self.policy: Policy = policy_class(cfg_policy=cfg_policy, device=device)
         self.obs_adapter = DoFAdapter(env_dof_cfg.joint_names, self.policy.cfg_obs_dof.joint_names)
         self.actions_adapter = DoFAdapter(self.policy.cfg_action_dof.joint_names, env_dof_cfg.joint_names)
+
+        action_mapping = {
+            name: env_dof_cfg.joint_names.index(name)
+            for name in self.policy.cfg_action_dof.joint_names
+        }
+        logger.info("Policy-to-environment joint mapping: %s", action_mapping)
+
+    @staticmethod
+    def _validate_joint_names(label: str, joint_names: list[str]):
+        duplicates = sorted({name for name in joint_names if joint_names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"Duplicate {label} joint names: {duplicates}")
+
+    @staticmethod
+    def _require_joint_subset(label: str, joint_names: list[str], environment_joint_names: list[str]):
+        missing = [name for name in joint_names if name not in environment_joint_names]
+        if missing:
+            raise ValueError(f"{label} joints missing from environment: {missing}")
 
     def get_observation(self, env_data: Box, ctrl_data: Box):
         env_data_adapted = env_data.copy()
@@ -80,6 +108,8 @@ class RlPipeline(Pipeline):
         )
 
         self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
+        if hasattr(self.env, "set_control_joint_names"):
+            self.env.set_control_joint_names(self.policy.cfg_action_dof.joint_names)
         self.visualizer = self.env.visualizer
 
         self.freq = self.cfg.policy.freq
@@ -376,10 +406,9 @@ class RlPipeline(Pipeline):
             pbar.update()
         pbar.close()
 
-        # ── Phase 3: Hold default pose — wait for R to start motion ──
-        # Stay in default-pose mode. Motion starts when [MOTION_RESET] is
-        # received (user presses R), which calls _set_default_pose_mode(False).
-        logger.warning("prepare done — holding default pose, press R to start motion")
+        # Phase 3: hold the default pose until the configured controller sends
+        # [MOTION_RESET], which calls _set_default_pose_mode(False).
+        logger.warning("prepare done — holding default pose; send [MOTION_RESET] to start motion")
 
 
 if __name__ == "__main__":

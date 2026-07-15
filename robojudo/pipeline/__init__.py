@@ -27,3 +27,4 @@ def __getattr__(name: str) -> type[Pipeline]:
 pipeline_registry.add("RlPipeline", ".rl_pipeline")
 pipeline_registry.add("RlMultiPolicyPipeline", ".rl_multi_policy_pipeline")
 pipeline_registry.add("RlLocoMimicPipeline", ".rl_loco_mimic_pipeline")
+pipeline_registry.add("X2DeployPipeline", ".x2_deploy_pipeline")

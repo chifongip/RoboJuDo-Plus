@@ -2,8 +2,6 @@ import time
 from queue import Queue
 from threading import Thread
 
-from pynput import keyboard  # TODO: fix DISPLAY error on Linux without GUI
-
 
 class KeyboardThread(Thread):
     def __init__(self, event_queue: Queue):
@@ -11,6 +9,8 @@ class KeyboardThread(Thread):
         self.event_queue = event_queue
 
     def run(self):
+        from pynput import keyboard
+
         def on_press(key):
             key_name = self.get_key_name(key)
             event = {

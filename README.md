@@ -195,6 +195,7 @@ python submodule_install.py
 
 # Or specify modules to install with args
 # python submodule_install.py unitree_cpp
+# python submodule_install.py aimdk  # AgiBot X2; source ROS 2 first
 ```
 
 # 📖Quick Start

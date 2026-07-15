@@ -50,7 +50,7 @@ def main():
         pipeline._set_default_pose_mode(True)
         logger.warning("Sim mode — holding default pose, press R to start motion")
 
-    while True:
+    while not getattr(pipeline, "should_exit", False):
         time_start = time.time()
         pipeline.step()
         time_end = time.time()

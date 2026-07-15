@@ -5,8 +5,6 @@ from collections import deque
 from threading import Thread
 
 import numpy as np
-import redis  # TODO: add requirements
-from redis.exceptions import RedisError
 
 from robojudo.controller import Controller, ctrl_registry
 from robojudo.controller.ctrl_cfgs import TwistRedisCtrlCfg
@@ -46,6 +44,8 @@ class TwistRedisCtrl(Controller):
 
     def redis_worker(self):
         """worker: try connect, subscribe or poll, auto-reconnect"""
+        from redis.exceptions import RedisError
+
         redis_client = None
         while not self._stop:
             if redis_client is None:
@@ -71,6 +71,8 @@ class TwistRedisCtrl(Controller):
             time.sleep(0.01)
 
     def _connect_redis(self):
+        import redis
+
         while not self._stop:
             try:
                 redis_client = redis.Redis(

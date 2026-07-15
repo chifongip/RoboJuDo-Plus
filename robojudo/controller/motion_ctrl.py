@@ -8,9 +8,6 @@ from threading import Lock, Thread, Timer
 import numpy as np
 import torch
 from box import Box
-from phc.utils.motion_lib_base import FixHeightMode
-from phc.utils.motion_lib_real import MotionLibReal
-from poselib.poselib.skeleton.skeleton3d import SkeletonTree
 
 from robojudo.controller import Controller, ctrl_registry
 from robojudo.controller.ctrl_cfgs import MotionCtrlCfg
@@ -27,6 +24,13 @@ class MotionCtrl(Controller):
 
     def __init__(self, cfg_ctrl, env, device="cpu"):
         super().__init__(cfg_ctrl=cfg_ctrl, env=env, device=device)
+        try:
+            from phc.utils.motion_lib_base import FixHeightMode
+            from phc.utils.motion_lib_real import MotionLibReal
+            from poselib.poselib.skeleton.skeleton3d import SkeletonTree
+        except ImportError as e:
+            raise ImportError("MotionCtrl requires optional PHC/poselib dependencies.") from e
+
         self.enable_gui = self.cfg_ctrl.motion_ctrl_gui
         self.motion_path = self.cfg_ctrl.motion_path
 

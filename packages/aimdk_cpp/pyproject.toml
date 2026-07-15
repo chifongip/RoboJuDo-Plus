@@ -1,0 +1,13 @@
+[build-system]
+requires = ["scikit-build-core", "pybind11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "aimdk_cpp"
+version = "0.1.0"
+description = "Pybind11 backend for AgiBot AimDK ROS 2 communication"
+requires-python = ">=3.10"
+
+[tool.scikit-build]
+cmake.version = ">=3.16"
+cmake.build-type = "Release"

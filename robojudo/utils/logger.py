@@ -44,13 +44,18 @@ def setup_logger(name: str = "robojudo") -> logging.Logger:
     logger.addHandler(console_handler)
 
     log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    file_handler = logging.FileHandler(log_dir / f"{name}.log", encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-    file_formatter = logging.Formatter(
-        "%(asctime)s.%(msecs)03d [%(levelname)s] [%(name)s] %(message)s", "%m-%d %H:%M:%S"
-    )
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
+    try:
+        log_dir.mkdir(exist_ok=True)
+        file_handler = logging.FileHandler(log_dir / f"{name}.log", encoding="utf-8")
+    except OSError:
+        file_handler = None
+
+    if file_handler is not None:
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter(
+            "%(asctime)s.%(msecs)03d [%(levelname)s] [%(name)s] %(message)s", "%m-%d %H:%M:%S"
+        )
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
 
     return logger
