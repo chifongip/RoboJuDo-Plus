@@ -139,7 +139,7 @@ class TestX2Integration(unittest.TestCase):
         self.assertTrue(pipeline._joint_default_complete)
 
         self.assertTrue(pipeline._enter_mode(X2ControlMode.RL_DEFAULT))
-        self.assertEqual(pipeline.env.control_joint_names, ["joint_a"])
+        self.assertEqual(pipeline.env.control_joint_names, ["joint_a", "joint_b"])
         self.assertEqual(pipeline.policy.reset_count, 1)
         self.assertFalse(pipeline.policy.default_pose_mode)
 
@@ -176,6 +176,58 @@ class TestX2Integration(unittest.TestCase):
             PolicyWrapper._validate_joint_names("policy action", ["joint_a", "joint_a"])
         with self.assertRaisesRegex(ValueError, "missing from environment"):
             PolicyWrapper._require_joint_subset("policy action", ["joint_b"], ["joint_a"])
+
+    def test_partial_policy_target_holds_environment_default_pose(self):
+        from robojudo.pipeline.rl_pipeline import PolicyWrapper
+        from robojudo.tools.dof import DoFAdapter
+
+        wrapper = PolicyWrapper.__new__(PolicyWrapper)
+        wrapper.env_dof_cfg = type("EnvDof", (), {"default_pos": [0.1, 0.2, 0.3]})()
+        wrapper.policy = type(
+            "Policy",
+            (),
+            {
+                "default_pos": np.array([1.0]),
+                "get_action": lambda self, obs: np.array([0.5]),
+            },
+        )()
+        wrapper.actions_adapter = DoFAdapter(["lower_joint"], ["lower_joint", "upper_a", "upper_b"])
+
+        target = wrapper.get_pd_target(obs=None)
+
+        np.testing.assert_allclose(target, np.array([1.5, 0.2, 0.3]))
+
+    def test_multi_policy_switch_restores_full_joint_control(self):
+        from robojudo.pipeline.rl_multi_policy_pipeline import PolicyManager
+
+        class FakeEnv:
+            joint_names = ["lower_joint", "upper_joint"]
+
+            def __init__(self):
+                self.control_joint_names = None
+                self.override_cfg = None
+
+            def reset(self):
+                return
+
+            def update_dof_cfg(self, override_cfg):
+                self.override_cfg = override_cfg
+
+            def set_control_joint_names(self, joint_names):
+                self.control_joint_names = list(joint_names)
+
+        action_dof = type("ActionDof", (), {"joint_names": ["lower_joint"]})()
+        policy = type("Policy", (), {"cfg_action_dof": action_dof, "name": "lower_body"})()
+        manager = PolicyManager.__new__(PolicyManager)
+        manager.env = FakeEnv()
+        manager.policies = [policy]
+        manager._current_policy_id = 0
+        manager.warmup_policy_indices = {0}
+
+        manager.set_policy(0)
+
+        self.assertIs(manager.env.override_cfg, action_dof)
+        self.assertEqual(manager.env.control_joint_names, manager.env.joint_names)
 
     def test_x2_policy_inference_shape(self):
         from robojudo.config.x2.policy.x2_deploy_policy_cfg import X2DeployPolicyCfg
@@ -372,6 +424,12 @@ class TestX2Integration(unittest.TestCase):
         env.step(np.array([0.2, 0.4, -0.1]))
         expected_pd = np.array([0.0, 0.0, -21.0])
         np.testing.assert_allclose(captured[-1], expected_pd)
+
+        env.joint_names = ["joint_a", "joint_b", "joint_c"]
+        env.set_control_joint_names(env.joint_names)
+        env.step(np.array([0.2, 0.4, -0.1]))
+        expected_full_pd = np.array([0.0, 16.0, -21.0])
+        np.testing.assert_allclose(captured[-1], expected_full_pd)
 
     def test_elastic_band_config_rejects_invalid_values(self):
         from pydantic import ValidationError

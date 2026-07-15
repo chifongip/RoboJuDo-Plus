@@ -6,7 +6,7 @@ from robojudo.controller import CtrlManager
 from robojudo.environment import Environment
 from robojudo.pipeline import Pipeline, pipeline_registry
 from robojudo.pipeline.pipeline_cfgs import RlMultiPolicyPipelineCfg
-from robojudo.pipeline.rl_pipeline import PolicyWrapper, RlPipeline
+from robojudo.pipeline.rl_pipeline import PolicyWrapper, RlPipeline, _set_full_joint_control
 from robojudo.policy import PolicyCfg
 from robojudo.utils.step_timer import StepTimer
 
@@ -62,6 +62,7 @@ class PolicyManager:
         # refresh env
         self.env.reset()
         self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
+        _set_full_joint_control(self.env)
         logger.warning(f"Switched to policy: {policy_id}: {self.policy.name}")
 
     def switch_policy(self, policy_id: int):
@@ -104,6 +105,7 @@ class RlMultiPolicyPipeline(RlPipeline):
             device=self.device,
         )
         self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
+        _set_full_joint_control(self.env)
         self.visualizer = self.env.visualizer
 
         self.freq = self.cfg.policies[0].freq

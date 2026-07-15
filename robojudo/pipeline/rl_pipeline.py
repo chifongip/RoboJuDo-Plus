@@ -19,6 +19,12 @@ from robojudo.utils.util_func import get_gravity_orientation
 logger = logging.getLogger(__name__)
 
 
+def _set_full_joint_control(env: Environment):
+    """Select every environment joint when a full PD target is commanded."""
+    if hasattr(env, "set_control_joint_names"):
+        env.set_control_joint_names(env.joint_names)
+
+
 class PolicyWrapper:
     """A wrapper for Policy to handle observation and action adaptation."""
 
@@ -108,8 +114,7 @@ class RlPipeline(Pipeline):
         )
 
         self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
-        if hasattr(self.env, "set_control_joint_names"):
-            self.env.set_control_joint_names(self.policy.cfg_action_dof.joint_names)
+        _set_full_joint_control(self.env)
         self.visualizer = self.env.visualizer
 
         self.freq = self.cfg.policy.freq

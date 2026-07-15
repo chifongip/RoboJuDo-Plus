@@ -10,7 +10,7 @@ from robojudo.environment import Environment
 from robojudo.pipeline import Pipeline, pipeline_registry
 from robojudo.pipeline.pipeline_cfgs import RlLocoMimicPipelineCfg
 from robojudo.pipeline.rl_multi_policy_pipeline import PolicyManager, RlMultiPolicyPipeline
-from robojudo.pipeline.rl_pipeline import PolicyWrapper
+from robojudo.pipeline.rl_pipeline import PolicyWrapper, _set_full_joint_control
 from robojudo.policy import PolicyCfg
 from robojudo.utils.progress import ProgressBar
 
@@ -198,6 +198,7 @@ class RlLocoMimicPipeline(RlMultiPolicyPipeline):
             device=self.device,
         )
         self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
+        _set_full_joint_control(self.env)
         self.visualizer = self.env.visualizer
 
         self.freq = self.cfg.loco_policy.freq

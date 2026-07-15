@@ -1,6 +1,9 @@
 # X2 Sim2Real Deployment
 
-The `x2_real` configuration runs the 29-joint X2 ONNX policy through the 31-joint AimDK robot interface. RoboJuDo reorders joint state by name before constructing the `1x151` observation, then maps the `1x29` policy output back to the robot-native order. The two head joints remain at their configured defaults and are not controlled by the policy.
+The `x2_real` configuration runs the 29-joint X2 ONNX policy through the 31-joint AimDK robot interface.
+RoboJuDo reorders joint state by name before constructing the `1x151` observation, then maps the `1x29` policy output
+back to the robot-native order. The two head joints are not policy-driven; position control actively holds them at their
+configured defaults.
 
 ## Prerequisites
 

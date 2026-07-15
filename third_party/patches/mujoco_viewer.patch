@@ -1,3 +1,16 @@
+diff --git a/mujoco_viewer/callbacks.py b/mujoco_viewer/callbacks.py
+index 39ce6a7..b2cc498 100644
+--- a/mujoco_viewer/callbacks.py
++++ b/mujoco_viewer/callbacks.py
+@@ -300,7 +300,7 @@ class Callbacks:
+                 if selbody >= 0:
+                     # record selection
+                     self.pert.select = selbody
+-                    self.pert.skinselect = selskin
++                    self.pert.skinselect = int(selskin.item())
+                     # compute localpos
+                     vec = selpnt.flatten() - self.data.xpos[selbody]
+                     mat = self.data.xmat[selbody].reshape(3, 3)
 diff --git a/mujoco_viewer/mujoco_viewer.py b/mujoco_viewer/mujoco_viewer.py
 index a86a1d6..d1bcc61 100644
 --- a/mujoco_viewer/mujoco_viewer.py

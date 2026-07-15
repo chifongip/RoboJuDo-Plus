@@ -89,7 +89,7 @@ class X2DeployPipeline(RlPipeline):
             self.env.set_gains(self._joint_default_stiffness, self._joint_default_damping)
             self.env.arm_position_control()
         elif requested == X2ControlMode.RL_DEFAULT:
-            self.env.set_control_joint_names(self.policy.cfg_action_dof.joint_names)
+            self.env.set_control_joint_names(self.env.joint_names)
             self.env.set_gains(self._rl_stiffness, self._rl_damping)
             self.env.arm_position_control()
             self.policy.reset()
