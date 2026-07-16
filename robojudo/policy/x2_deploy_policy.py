@@ -4,6 +4,7 @@ import numpy as np
 import onnxruntime as ort
 
 from robojudo.policy import Policy, policy_registry
+from robojudo.utils.progress import ProgressBar
 from robojudo.utils.util_func import get_gravity_orientation
 
 logger = logging.getLogger(__name__)
@@ -18,20 +19,34 @@ class X2DeployPolicy(Policy):
         self.obs_scales = self.cfg_policy.obs_scales
         self.obs_clip = self.cfg_policy.obs_clip
         self.warmup_frames = self.cfg_policy.warmup_frames
+        self.max_timestep = self.cfg_policy.max_timestep
         self._default_pose_mode = False
         self._validate_onnx_io()
         self.reset()
 
     def reset(self):
+        self.close_progress()
         self.heart_count = self.cfg_policy.phase_start_count - 1.0
         self.mimic_ref_pos = np.zeros(self.num_dofs, dtype=np.float32)
         self.mimic_ref_vel = np.zeros(self.num_dofs, dtype=np.float32)
         self.last_action = np.zeros(self.num_actions, dtype=np.float32)
         self._needs_warmup = self.warmup_frames > 0
         self._use_warmup_action = False
+        self.flag_motion_done = False
+        self.pbar = (
+            ProgressBar(f"X2Deploy {self.cfg_policy.policy_name}", self.max_timestep)
+            if self.max_timestep > 0
+            else None
+        )
 
     def post_step_callback(self, commands=None):
-        return
+        if "[POLICY_LOCO]" in (commands or []):
+            self.close_progress()
+
+    def close_progress(self):
+        if getattr(self, "pbar", None) is not None:
+            self.pbar.close()
+            self.pbar = None
 
     def set_default_pose_mode(self, enabled: bool):
         enabled = bool(enabled)
@@ -50,7 +65,8 @@ class X2DeployPolicy(Policy):
                 self._run_inference(obs)
                 obs = self._build_observation(env_data)
             self._use_warmup_action = True
-        return obs, {}
+        extras = {"CALLBACK": ["[MOTION_DONE]"] if self.flag_motion_done else []}
+        return obs, extras
 
     def _build_observation(self, env_data):
         gravity_orientation = get_gravity_orientation(env_data.base_quat)
@@ -90,7 +106,12 @@ class X2DeployPolicy(Policy):
         if obs.shape != (1, self.cfg_policy.num_obs):
             raise ValueError(f"X2DeployPolicy ONNX obs shape {obs.shape} != (1, {self.cfg_policy.num_obs})")
 
-        self.heart_count = min(self.heart_count + 1.0, self.cfg_policy.phase_end_count)
+        phase_limit = self.cfg_policy.phase_end_count
+        if self.max_timestep > 0:
+            phase_limit = min(phase_limit, float(self.max_timestep))
+        self.heart_count = min(self.heart_count + 1.0, phase_limit)
+        if self.pbar is not None:
+            self.pbar.set(self.heart_count)
         outputs = self.session.run(
             None,
             {
@@ -120,6 +141,10 @@ class X2DeployPolicy(Policy):
                 if not np.isfinite(mimic_ref_vel).all():
                     raise FloatingPointError("X2 policy produced non-finite joint_vel")
                 self.mimic_ref_vel = mimic_ref_vel
+
+        if 0 < self.max_timestep <= self.heart_count:
+            self.flag_motion_done = True
+            self.close_progress()
 
         return raw_action
 

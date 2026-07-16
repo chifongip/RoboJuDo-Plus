@@ -1,3 +1,5 @@
+from pydantic import model_validator
+
 from robojudo.config import ASSETS_DIR
 from robojudo.policy.policy_cfgs import PolicyCfg
 from robojudo.tools.tool_cfgs import DoFConfig
@@ -156,6 +158,7 @@ class X2DeployPolicyCfg(PolicyCfg):
     warmup_frames: int = 5
     phase_start_count: float = 1.0
     phase_end_count: float = 2820.0
+    max_timestep: int = -1
 
     obs_scales: dict[str, float] = {
         "ang_vel": 0.25,
@@ -167,3 +170,12 @@ class X2DeployPolicyCfg(PolicyCfg):
     @property
     def policy_file(self) -> str:
         return (ASSETS_DIR / f"models/x2/x2_rl_deploy/{self.policy_name}.onnx").as_posix()
+
+    @model_validator(mode="after")
+    def validate_max_timestep(self):
+        if self.max_timestep != -1 and not self.phase_start_count <= self.max_timestep <= self.phase_end_count:
+            raise ValueError(
+                "max_timestep must be -1 or within "
+                f"[{self.phase_start_count}, {self.phase_end_count}]"
+            )
+        return self

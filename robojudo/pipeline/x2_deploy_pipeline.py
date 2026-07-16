@@ -26,9 +26,12 @@ ELASTIC_BAND_COMMANDS = {
 }
 
 
-@pipeline_registry.register
-class X2DeployPipeline(RlPipeline):
-    """Four-mode X2 deployment pipeline matching the standalone controller."""
+class X2ModePipelineMixin:
+    """Reusable X2 mode, safety, and upper-body control around an RL pipeline."""
+
+    @staticmethod
+    def _initial_policy_cfg(cfg):
+        return cfg.policy
 
     def __init__(self, cfg):
         self.mode = X2ControlMode.PASSIVE_DEFAULT
@@ -41,7 +44,7 @@ class X2DeployPipeline(RlPipeline):
         self._joint_default_target = np.asarray(self._joint_default_dof.default_pos, dtype=np.float32)
         self._joint_default_stiffness = np.asarray(self._joint_default_dof.stiffness, dtype=np.float32)
         self._joint_default_damping = np.asarray(self._joint_default_dof.damping, dtype=np.float32)
-        self._joint_default_steps = max(1, round(cfg.joint_default_duration * cfg.policy.freq))
+        self._joint_default_steps = max(1, round(cfg.joint_default_duration * self._initial_policy_cfg(cfg).freq))
         self._default_damping = float(cfg.default_damping)
         self._upper_body_cfg = next(
             (ctrl_cfg for ctrl_cfg in cfg.ctrl if isinstance(ctrl_cfg, UpperBodyZmqCtrlCfg)),
@@ -61,13 +64,19 @@ class X2DeployPipeline(RlPipeline):
         self._configure_upper_body_override()
         self._enter_mode(X2ControlMode.PASSIVE_DEFAULT, force=True)
 
+    def _upper_body_action_joint_names(self) -> list[str]:
+        return self.cfg.policy.action_dof.joint_names
+
+    def _upper_body_control_available(self) -> bool:
+        return True
+
     def _configure_upper_body_override(self):
         if self._upper_body_cfg is None:
             return
         missing = [name for name in self._upper_body_cfg.joint_names if name not in self.env.joint_names]
         if missing:
             raise ValueError(f"Upper-body ZMQ joints missing from X2 environment: {missing}")
-        action_joints = set(self.cfg.policy.action_dof.joint_names)
+        action_joints = set(self._upper_body_action_joint_names())
         overlap = sorted(action_joints.intersection(self._upper_body_cfg.joint_names))
         if overlap:
             raise ValueError(f"Upper-body ZMQ joints overlap policy actions: {overlap}")
@@ -113,6 +122,8 @@ class X2DeployPipeline(RlPipeline):
             return False
 
         previous = self.mode
+        if previous == X2ControlMode.RL_DEFAULT and requested != X2ControlMode.RL_DEFAULT:
+            self._on_leave_rl()
         self.mode = requested
         if requested in (X2ControlMode.PASSIVE_DEFAULT, X2ControlMode.DAMPING_DEFAULT):
             self._set_upper_body_enabled(False)
@@ -130,16 +141,27 @@ class X2DeployPipeline(RlPipeline):
             self.env.set_control_joint_names(self.env.joint_names)
             self.env.set_gains(self._rl_stiffness, self._rl_damping)
             self.env.arm_position_control()
-            self.policy.reset()
-            inner = self._inner_policy()
-            if hasattr(inner, "set_default_pose_mode"):
-                inner.set_default_pose_mode(False)
+            self._on_enter_rl()
             if getattr(self, "_upper_body_indices", np.asarray([])).size:
                 self._upper_body_filtered = self.env.dof_pos[self._upper_body_indices].astype(np.float32)
                 self._upper_body_stream_was_fresh = False
 
         logger.warning("X2 mode: %s -> %s", previous.value, requested.value)
         return True
+
+    def _on_enter_rl(self):
+        self.policy.reset()
+        inner = self._inner_policy()
+        if hasattr(inner, "set_default_pose_mode"):
+            inner.set_default_pose_mode(False)
+
+    def _on_leave_rl(self):
+        self._set_upper_body_enabled(False)
+        if hasattr(self.policy, "close_progress"):
+            self.policy.close_progress()
+
+    def _reset_policy_state(self):
+        self.policy.reset()
 
     def _force_damping(self, reason: str):
         logger.error("Forcing DAMPING_DEFAULT: %s", reason)
@@ -161,6 +183,8 @@ class X2DeployPipeline(RlPipeline):
             self._set_upper_body_enabled(False)
         elif self.mode != X2ControlMode.RL_DEFAULT:
             logger.warning("Ignored upper-body enable outside RL_DEFAULT")
+        elif not self._upper_body_control_available():
+            logger.warning("Ignored upper-body enable while the active policy controls the arms")
         else:
             self._set_upper_body_enabled(True)
 
@@ -174,7 +198,7 @@ class X2DeployPipeline(RlPipeline):
         if "[SIM_REBORN]" in commands and hasattr(self.env, "reborn"):
             self._set_upper_body_enabled(False)
             self.env.reborn()
-            self.policy.reset()
+            self._reset_policy_state()
             self._enter_mode(X2ControlMode.PASSIVE_DEFAULT, force=True)
             return
 
@@ -243,6 +267,30 @@ class X2DeployPipeline(RlPipeline):
             logger.warning("JOINT_DEFAULT interpolation complete; RL_DEFAULT is now enabled")
         return target
 
+    def _step_rl_policy(self, env_data, ctrl_data, dry_run: bool):
+        obs, extras = self.policy.get_observation(env_data, ctrl_data)
+        pd_target = self.policy.get_pd_target(obs)
+        pd_target = self._apply_upper_body_override(pd_target, ctrl_data)
+        if not dry_run:
+            self.env.step(pd_target, extras.get("hand_pose"))
+        return pd_target, extras
+
+    def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
+        commands = ctrl_data.get("COMMANDS", [])
+        self.timestep += 1
+        self.ctrl_manager.post_step_callback(ctrl_data)
+        self.policy.post_step_callback(commands)
+        if self.visualizer is not None and rl_active:
+            self.policy.debug_viz(self.visualizer, env_data, ctrl_data, extras)
+        if self.cfg.debug.log_obs:
+            self.debug_logger.log(
+                env_data=env_data,
+                ctrl_data=ctrl_data,
+                extras=extras,
+                pd_target=pd_target,
+                timestep=self.timestep,
+            )
+
     def step(self, dry_run=False):
         try:
             self.env.update()
@@ -260,32 +308,28 @@ class X2DeployPipeline(RlPipeline):
         extras = {}
         pd_target = self.env.dof_pos
         try:
-            if not dry_run and not self._shutdown_requested:
-                if self.mode == X2ControlMode.PASSIVE_DEFAULT:
+            if not self._shutdown_requested:
+                if self.mode == X2ControlMode.PASSIVE_DEFAULT and not dry_run:
                     self.env.command_passive()
-                elif self.mode == X2ControlMode.DAMPING_DEFAULT:
+                elif self.mode == X2ControlMode.DAMPING_DEFAULT and not dry_run:
                     self.env.command_damping(self._default_damping)
-                elif self.mode == X2ControlMode.JOINT_DEFAULT:
+                elif self.mode == X2ControlMode.JOINT_DEFAULT and not dry_run:
                     pd_target = self._step_joint_default()
                 elif self.mode == X2ControlMode.RL_DEFAULT:
-                    obs, extras = self.policy.get_observation(env_data, ctrl_data)
-                    pd_target = self.policy.get_pd_target(obs)
-                    pd_target = self._apply_upper_body_override(pd_target, ctrl_data)
-                    self.env.step(pd_target, extras.get("hand_pose"))
+                    pd_target, extras = self._step_rl_policy(env_data, ctrl_data, dry_run)
         except (FloatingPointError, RuntimeError, ValueError) as exc:
             if not dry_run:
                 self._force_damping(str(exc))
 
-        self.timestep += 1
-        self.ctrl_manager.post_step_callback(ctrl_data)
-        self.policy.post_step_callback(commands)
-        if self.visualizer is not None and self.mode == X2ControlMode.RL_DEFAULT:
-            self.policy.debug_viz(self.visualizer, env_data, ctrl_data, extras)
-        if self.cfg.debug.log_obs:
-            self.debug_logger.log(
-                env_data=env_data,
-                ctrl_data=ctrl_data,
-                extras=extras,
-                pd_target=pd_target,
-                timestep=self.timestep,
-            )
+        self._post_mode_step(
+            env_data,
+            ctrl_data,
+            extras,
+            pd_target,
+            rl_active=self.mode == X2ControlMode.RL_DEFAULT,
+        )
+
+
+@pipeline_registry.register
+class X2DeployPipeline(X2ModePipelineMixin, RlPipeline):
+    """Four-mode X2 deployment pipeline matching the standalone controller."""

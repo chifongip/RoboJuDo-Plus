@@ -52,15 +52,15 @@ class PolicyManager:
             raise ValueError(f"Policy id {policy_id} out of range [0, {self.num_policies})")
         return self.policies[policy_id]
 
-    def set_policy(self, policy_id: int):
-        """Instantly set the policy as policy_id."""
+    def set_policy(self, policy_id: int, reset_env: bool = True):
+        """Instantly select a policy and refresh its DoF configuration."""
         if not (0 <= policy_id < self.num_policies):
             raise ValueError(f"Policy id {policy_id} out of range [0, {self.num_policies})")
         self.warmup_policy_indices.discard(policy_id)
 
         self._current_policy_id = policy_id
-        # refresh env
-        self.env.reset()
+        if reset_env:
+            self.env.reset()
         self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
         _set_full_joint_control(self.env)
         logger.warning(f"Switched to policy: {policy_id}: {self.policy.name}")

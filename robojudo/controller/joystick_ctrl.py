@@ -24,6 +24,7 @@ class JoystickCtrl(Controller):
     def reset(self):
         self.combination_init_buttons = self.cfg_ctrl.combination_init_buttons
         self.onhold_buttons = set()
+        self.used_combination_buttons = set()
         while not self.state_queue.empty():
             try:
                 self.state_queue.get_nowait()
@@ -75,13 +76,22 @@ class JoystickCtrl(Controller):
         if len(self.triggers) == 0:
             return ctrl_data, commands
 
+        triggered_events = []
         for event in ctrl_data["button_event"]:
             if event["type"] == "button":
                 if event["name"] in self.combination_init_buttons:
                     if event["pressed"]:
                         self.onhold_buttons.add(event["name"])
+                        self.used_combination_buttons.discard(event["name"])
                     else:
                         self.onhold_buttons.discard(event["name"])
+                        if event["name"] in self.used_combination_buttons:
+                            self.used_combination_buttons.discard(event["name"])
+                        else:
+                            command = self.triggers.get(event["name"], None)
+                            if command is not None:
+                                commands.append(command)
+                                triggered_events.append(event)
                 else:
                     if event["pressed"]:
                         command = None
@@ -92,8 +102,11 @@ class JoystickCtrl(Controller):
                             command = self.triggers.get(event_combination, None)
                         if command is not None:
                             commands.append(command)
-                            # remove event after triggered
-                            ctrl_data["button_event"].remove(event)
+                            self.used_combination_buttons.update(self.onhold_buttons)
+                            triggered_events.append(event)
+
+        for event in triggered_events:
+            ctrl_data["button_event"].remove(event)
 
         return ctrl_data, commands
 

@@ -73,6 +73,12 @@ X2 simulation also enables a configurable `ElasticBand` on `torso_link`. `Mujoco
 
 The X2 policy controls 29 joints. The X2 environment has 31 DoFs, including two head joints. `PolicyWrapper` maps the 29 policy joints into the 31-DoF environment target. Passive, damping, and joint-default modes address all 31 joints; RL mode restricts position commands to the policy's 29-joint sequence.
 
+The `x2_locomimic` and `x2_locomimic_real` presets use `X2LocoMimicPipeline` to place the existing interpolation manager
+inside the same X2 mode state machine. Locomanipulation supplies the 15-joint loco policy and optional ZMQ arm targets;
+`x2_rl_deploy` supplies the 29-joint test mimic. Switching and policy time advance only in `RL_DEFAULT`, and leaving RL
+cancels any transition and restores loco for the next prepared entry. Reaching the mimic's configured ONNX phase limit
+also emits `MOTION_DONE` and starts the normal return-to-loco interpolation.
+
 For sim2real, `x2_real` uses `AgiBotCppEnv`, which wraps the `aimdk_cpp` C++ extension. Python calls `AimdkController.get_robot_state()` during `update()` and `AimdkController.step(pd_target)` during `step()`.
 
 ```mermaid

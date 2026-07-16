@@ -44,6 +44,8 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(sim_cfg.env.dof.num_dofs, 31)
         self.assertEqual(sim_cfg.policy.action_dof.num_dofs, 29)
         self.assertEqual(sim_cfg.policy.num_obs, 151)
+        self.assertEqual(sim_cfg.policy.max_timestep, -1)
+        self.assertEqual(real_cfg.policy.max_timestep, -1)
         self.assertEqual(real_cfg.env.env_type, "AgiBotCppEnv")
         self.assertEqual(real_cfg.env.aimdk.control_dt, 0.02)
         self.assertEqual(real_cfg.env.aimdk.publish_dt, 0.002)
@@ -250,6 +252,7 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(obs.shape, (151,))
         self.assertEqual(action.shape, (29,))
         self.assertEqual(policy.heart_count, cfg.phase_start_count - 1.0 + cfg.warmup_frames)
+        self.assertIsNone(policy.pbar)
         self.assertTrue(np.isfinite(action).all())
 
     def test_x2_policy_onnx_io_contract(self):
@@ -382,6 +385,59 @@ class TestX2Integration(unittest.TestCase):
         first_action = policy.get_action(obs)
         self.assertEqual(policy.heart_count, cfg.phase_start_count - 1.0 + cfg.warmup_frames)
         self.assertTrue(np.isfinite(first_action).all())
+
+    def test_x2_policy_emits_motion_done_at_max_timestep(self):
+        from robojudo.config.x2.policy.x2_deploy_policy_cfg import X2DeployPolicyCfg
+        from robojudo.policy.x2_deploy_policy import X2DeployPolicy
+
+        cfg = X2DeployPolicyCfg(warmup_frames=0, max_timestep=3)
+        progress_patcher = patch("robojudo.policy.x2_deploy_policy.ProgressBar")
+        progress_cls = progress_patcher.start()
+        self.addCleanup(progress_patcher.stop)
+        policy = X2DeployPolicy(cfg, "cpu")
+        progress = progress_cls.return_value
+        progress_cls.assert_called_once_with("X2Deploy kuailechongbai", 3)
+        env_data = Box(
+            {
+                "base_quat": np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+                "base_ang_vel": np.zeros(3, dtype=np.float32),
+                "dof_pos": np.asarray(cfg.obs_dof.default_pos, dtype=np.float32),
+                "dof_vel": np.zeros(cfg.obs_dof.num_dofs, dtype=np.float32),
+            }
+        )
+
+        for expected_count in (1.0, 2.0, 3.0):
+            obs, extras = policy.get_observation(env_data, Box({}))
+            self.assertEqual(extras["CALLBACK"], [])
+            policy.get_action(obs)
+            self.assertEqual(policy.heart_count, expected_count)
+
+        obs, extras = policy.get_observation(env_data, Box({}))
+        self.assertEqual(extras["CALLBACK"], ["[MOTION_DONE]"])
+        policy.get_action(obs)
+        self.assertEqual(policy.heart_count, 3.0)
+        self.assertEqual([entry.args[0] for entry in progress.set.call_args_list], [1.0, 2.0, 3.0])
+        progress.close.assert_called_once()
+
+        policy.reset()
+        self.assertEqual(progress_cls.call_count, 2)
+        policy.set_default_pose_mode(True)
+        for _ in range(5):
+            obs, extras = policy.get_observation(env_data, Box({}))
+            policy.get_action(obs)
+            self.assertEqual(extras["CALLBACK"], [])
+        self.assertEqual(policy.heart_count, cfg.phase_start_count - 1.0)
+        self.assertFalse(policy.flag_motion_done)
+
+    def test_x2_policy_rejects_unreachable_max_timestep(self):
+        from pydantic import ValidationError
+
+        from robojudo.config.x2.policy.x2_deploy_policy_cfg import X2DeployPolicyCfg
+
+        with self.assertRaises(ValidationError):
+            X2DeployPolicyCfg(max_timestep=2821)
+        with self.assertRaises(ValidationError):
+            X2DeployPolicyCfg(max_timestep=0)
 
     def test_x2_mujoco_actuators_are_mapped_by_joint_name(self):
         from robojudo.config.x2.env.x2_mujuco_env_cfg import X2MujocoEnvCfg

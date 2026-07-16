@@ -134,6 +134,24 @@ python scripts/run_pipeline.py -c x2_locomanipulation
 python scripts/run_pipeline.py -c x2_locomanipulation_real
 ```
 
+To test interpolated switching from locomanipulation locomotion to the `x2_rl_deploy` mimic policy, use:
+
+```bash
+python scripts/run_pipeline.py -c x2_locomimic
+python scripts/run_pipeline.py -c x2_locomimic_real
+```
+
+The loco-mimic presets retain the four X2 control modes. Enter `JOINT_DEFAULT`, wait for completion, and then enter
+`RL_DEFAULT`; policy inference and switch timers remain stopped in every other mode. Joystick `Back` selects loco,
+`Start` selects mimic, and left-stick click `L` toggles streamed upper-body targets while loco is idle. Release the
+right bumper (`RB`/physical R1) to select the next mimic policy or the left bumper (`LB`/physical L1) to select the
+previous one while loco is active and interpolation is idle. Bumpers used in a recognized chord do not also change the
+selected policy, so `LB+RB+A` remains dedicated to shutdown. In simulation,
+keyboard `]`, `[`, and `T` provide the same controls. Starting a mimic transition or leaving `RL_DEFAULT` disables
+upper-body streaming. After returning to loco, explicitly toggle it back on. At its configured ONNX phase limit of
+2820, each test mimic reports `MOTION_DONE` and the pipeline automatically starts the return-to-loco interpolation. A
+manual return remains available through joystick `Back` or keyboard `]`.
+
 With the robot supported, select `JOINT_DEFAULT` and wait for the completion log. Then select `RL_DEFAULT`. ONNX time does not advance in passive, damping, or joint-preparation modes.
 
 The policy runs at 50 Hz. `aimdk_cpp` republishes the active mode at 500 Hz, matching the standalone X2 controller. If position commands stop for 100 ms, the backend latches damping. Position control cannot resume until a new mode transition explicitly re-arms it. Stale state, a non-finite target, excessive tilt, and shutdown also force damping.

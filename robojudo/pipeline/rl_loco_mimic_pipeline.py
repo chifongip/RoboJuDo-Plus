@@ -55,6 +55,28 @@ class PolicyInterpManager(PolicyManager):
         self.loco_dof_pos = loco_dof_pos if loco_dof_pos is not None else self.env.default_pos.copy()
         self.override_dof_pos = self.loco_dof_pos.copy()
 
+    def cancel_interpolation(self):
+        """Cancel pending interpolation work without changing the active policy."""
+        self.timer.clear()
+        if self.interp_pbar is not None:
+            self.interp_pbar.close()
+            self.interp_pbar = None
+        self.interp_state = self.InterpState.IDLE
+        self.interp_timestep = 0
+        self.interp_callback_start = None
+        self.interp_callback_end = None
+
+    def reset_to_loco(self, refresh_env: bool = True):
+        """Return to a deterministic locomotion state, cancelling any switch in flight."""
+        self.cancel_interpolation()
+        self._current_policy_id = self.policy_loco_id
+        self.warmup_policy_indices.clear()
+        self.policy.reset()
+        self.override_dof_pos = self.loco_dof_pos.copy()
+        if refresh_env:
+            self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
+            _set_full_joint_control(self.env)
+
     def _interpolate_init(
         self,
         get_target_pos: Callable[[], np.ndarray],
@@ -119,6 +141,9 @@ class PolicyInterpManager(PolicyManager):
             self.interp_state = self.InterpState.END
 
     def toggle_mimic_policy(self, delta: int):
+        if self.interp_state != self.InterpState.IDLE:
+            logger.warning("Cannot select a mimic policy while interpolation is in progress.")
+            return
         # only switch mimic policy if current policy is locomotion
         if self.current_policy_id != self.policy_loco_id:
             logger.warning("Cannot switch mimic policy when policy is mimic.")
@@ -130,30 +155,38 @@ class PolicyInterpManager(PolicyManager):
         logger.info(f"Switch mimic policy to {self.policy_mimic_idx}: {policy_name}")
 
     def switch_to_loco(self):
+        if self.interp_state != self.InterpState.IDLE:
+            logger.warning("Cannot switch policy while interpolation is in progress.")
+            return False
         if self.current_policy_id == self.policy_loco_id and self.interp_state == self.InterpState.IDLE:
             logger.warning("Already in locomotion policy.")
-            return
+            return False
         if self.current_policy_id != self.policy_loco_id:
             self.policy_by_id(self.policy_loco_id).reset()
             self.warmup_policy_indices.add(self.policy_loco_id)
         self._interpolate_init(
             get_target_pos=lambda: self.loco_dof_pos,
             durations=self.DURATIONS_MIMIC_LOCO,
-            callback_start=lambda: self.set_policy(self.policy_loco_id),
+            callback_start=lambda: self.set_policy(self.policy_loco_id, reset_env=False),
         )
+        return True
 
     def switch_to_mimic(self):
+        if self.interp_state != self.InterpState.IDLE:
+            logger.warning("Cannot switch policy while interpolation is in progress.")
+            return False
         if self.current_policy_id != self.policy_loco_id:
             logger.warning("Already in mimic policy.")
-            return
+            return False
         policy_mimic_id = self.policy_mimic_ids[self.policy_mimic_idx]
         self.policy_by_id(policy_mimic_id).reset()
         self.warmup_policy_indices.add(policy_mimic_id)
         self._interpolate_init(
             get_target_pos=lambda: self.policy_by_id(policy_mimic_id).get_init_dof_pos(),
             durations=self.DURATIONS_LOCO_MIMIC,
-            callback_end=lambda: self.set_policy(policy_mimic_id),
+            callback_end=lambda: self.set_policy(policy_mimic_id, reset_env=False),
         )
+        return True
 
     def step(self, env_data, ctrl_data):
         super().step(env_data, ctrl_data)
@@ -209,6 +242,24 @@ class RlLocoMimicPipeline(RlMultiPolicyPipeline):
         self.self_check()
         self.reset()
 
+    def reset(self):
+        if hasattr(self, "policy_manager"):
+            self.policy_manager.reset_to_loco(refresh_env=True)
+            self.policy_locomotion_mimic_flag = 0
+        super().reset()
+
+    def _get_policy_step(self, env_data, ctrl_data):
+        """Compute one loco-mimic target from already collected environment/controller data."""
+        if self.policy_manager.current_policy_id == self.policy_manager.policy_loco_id:
+            ctrl_data["ref_dof_pos"] = self.policy.obs_adapter.fit(self.policy_manager.override_dof_pos)
+
+        obs, extras = self.policy.get_observation(env_data, ctrl_data)
+        pd_target = self.policy.get_pd_target(obs)
+
+        if self.policy_manager.current_policy_id == self.policy_manager.policy_loco_id:
+            pd_target[self.override_dof_indices] = self.policy_manager.override_dof_pos[self.override_dof_indices]
+        return pd_target, extras
+
     def post_step_callback(self, env_data, ctrl_data, extras, pd_target):
         self.timestep += 1
 
@@ -238,11 +289,11 @@ class RlLocoMimicPipeline(RlMultiPolicyPipeline):
                     elif switch_target == "LAST":
                         self.policy_manager.toggle_mimic_policy(-1)
                 case "[POLICY_LOCO]":
-                    self.policy_locomotion_mimic_flag = 0
-                    self.policy_manager.switch_to_loco()
+                    if self.policy_manager.switch_to_loco():
+                        self.policy_locomotion_mimic_flag = 0
                 case "[POLICY_MIMIC]":
-                    self.policy_locomotion_mimic_flag = 1
-                    self.policy_manager.switch_to_mimic()
+                    if self.policy_manager.switch_to_mimic():
+                        self.policy_locomotion_mimic_flag = 1
 
         self.ctrl_manager.post_step_callback(ctrl_data)
 
@@ -272,15 +323,7 @@ class RlLocoMimicPipeline(RlMultiPolicyPipeline):
         if len(commands) > 0:
             logger.info(f"{'=' * 10} COMMANDS {'=' * 10}\n{commands}")
 
-        if self.policy_manager.current_policy_id == self.policy_manager.policy_loco_id:
-            ctrl_data["ref_dof_pos"] = self.policy.obs_adapter.fit(self.policy_manager.override_dof_pos)
-
-        obs, extras = self.policy.get_observation(env_data, ctrl_data)
-
-        pd_target = self.policy.get_pd_target(obs)
-
-        if self.policy_manager.current_policy_id == self.policy_manager.policy_loco_id:
-            pd_target[self.override_dof_indices] = self.policy_manager.override_dof_pos[self.override_dof_indices]
+        pd_target, extras = self._get_policy_step(env_data, ctrl_data)
 
         if not dry_run:
             self.env.step(pd_target, extras.get("hand_pose", None))
