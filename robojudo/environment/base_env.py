@@ -78,6 +78,18 @@ class Environment(ABC):
     def reset(self):
         raise NotImplementedError
 
+    def reset_alignment(self):
+        """Refresh the born-place frame without resetting unrelated environment state."""
+        if not self.born_place_align:
+            return
+        self.born_place_align = False
+        try:
+            self.update()
+        finally:
+            self.born_place_align = True
+        self.set_born_place()
+        self.update()
+
     @abstractmethod
     def update(self):
         raise NotImplementedError

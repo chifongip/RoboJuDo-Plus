@@ -113,12 +113,7 @@ class MujocoEnv(Environment):
     def reset(self):
         if self.elastic_band is not None:
             self.elastic_band.reset()
-        if self.born_place_align:  # TODO: merge
-            self.born_place_align = False  # disable during reset
-            self.update()
-            self.born_place_align = True  # enable after reset
-            self.set_born_place()
-            self.update()
+        self.reset_alignment()
 
     def set_gains(self, stiffness, damping):
         assert len(stiffness) == self.num_dofs and len(damping) == self.num_dofs

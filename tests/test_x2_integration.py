@@ -58,6 +58,10 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(
             sim_cfg.ctrl[1].triggers,
             {
+                "k": "[PASSIVE_DEFAULT]",
+                "l": "[DAMPING_DEFAULT]",
+                "i": "[JOINT_DEFAULT]",
+                "j": "[RL_DEFAULT]",
                 "7": "[ELASTIC_BAND_LOWER]",
                 "8": "[ELASTIC_BAND_LIFT]",
                 "9": "[ELASTIC_BAND_TOGGLE]",
@@ -147,6 +151,76 @@ class TestX2Integration(unittest.TestCase):
 
         pipeline._enter_mode(X2ControlMode.DAMPING_DEFAULT)
         self.assertFalse(pipeline._joint_default_complete)
+
+    def test_four_mode_dry_run_infers_while_passive_without_robot_commands(self):
+        from robojudo.pipeline.x2_deploy_pipeline import X2ControlMode, X2DeployPipeline
+
+        calls = []
+
+        class FakeEnv:
+            dof_pos = np.zeros(2, dtype=np.float32)
+
+            def update(self):
+                calls.append("update")
+
+            def get_data(self):
+                return Box({})
+
+            def command_passive(self):
+                calls.append("passive")
+
+            def command_damping(self, damping):
+                calls.append(("damping", damping))
+
+            def step(self, target):
+                calls.append(("step", target))
+
+        pipeline = X2DeployPipeline.__new__(X2DeployPipeline)
+        pipeline.mode = X2ControlMode.PASSIVE_DEFAULT
+        pipeline.env = FakeEnv()
+        pipeline.ctrl_manager = SimpleNamespace(
+            get_ctrl_data=lambda env_data: Box({"COMMANDS": []}),
+            post_step_callback=lambda ctrl_data: calls.append("ctrl_post"),
+        )
+        pipeline.policy = SimpleNamespace(post_step_callback=lambda commands: calls.append("policy_post"))
+        pipeline.cfg = SimpleNamespace(debug=SimpleNamespace(log_obs=False))
+        pipeline.visualizer = None
+        pipeline.timestep = 0
+        pipeline.do_safety_check = False
+        pipeline._shutdown_requested = False
+        pipeline._step_rl_policy = lambda env_data, ctrl_data, dry_run: (
+            calls.append(("inference", dry_run)) or np.zeros(2, dtype=np.float32),
+            {},
+        )
+
+        pipeline.step(dry_run=True)
+
+        self.assertIn(("inference", True), calls)
+        self.assertNotIn("passive", calls)
+        self.assertFalse(any(isinstance(call, tuple) and call[0] in {"damping", "step"} for call in calls))
+
+    def test_four_mode_dry_run_propagates_inference_errors_without_forcing_damping(self):
+        from robojudo.pipeline.x2_deploy_pipeline import X2ControlMode, X2DeployPipeline
+
+        pipeline = X2DeployPipeline.__new__(X2DeployPipeline)
+        pipeline.mode = X2ControlMode.PASSIVE_DEFAULT
+        pipeline.env = SimpleNamespace(
+            dof_pos=np.zeros(2, dtype=np.float32),
+            update=lambda: None,
+            get_data=lambda: Box({}),
+        )
+        pipeline.ctrl_manager = SimpleNamespace(get_ctrl_data=lambda env_data: Box({"COMMANDS": []}))
+        pipeline.do_safety_check = False
+        pipeline._shutdown_requested = False
+
+        def fail_inference(env_data, ctrl_data, dry_run):
+            raise ValueError("invalid policy observation")
+
+        pipeline._step_rl_policy = fail_inference
+        pipeline._force_damping = lambda reason: self.fail(f"unexpected damping fallback: {reason}")
+
+        with self.assertRaisesRegex(ValueError, "invalid policy observation"):
+            pipeline.step(dry_run=True)
 
     def test_x2_policy_and_environment_joint_orders_round_trip(self):
         from robojudo.config.x2.env.x2_env_cfg import X2_31DoF

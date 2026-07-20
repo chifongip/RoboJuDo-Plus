@@ -73,7 +73,7 @@ class TestX2Locomanipulation(unittest.TestCase):
                 },
             }
         }
-        result = pipeline._apply_upper_body_override(policy_target, command)
+        result = pipeline._apply_pd_target_override(policy_target, command)
 
         left_shoulder = cfg.env.dof.joint_names.index("left_shoulder_pitch_joint")
         right_elbow = cfg.env.dof.joint_names.index("right_elbow_joint")
@@ -83,14 +83,14 @@ class TestX2Locomanipulation(unittest.TestCase):
         np.testing.assert_array_equal(result[-2:], policy_target[-2:])
 
         command["UpperBodyZmqCtrl"]["joint_positions"] = {"right_shoulder_roll_joint": 100.0}
-        clamped = pipeline._apply_upper_body_override(policy_target, command)
+        clamped = pipeline._apply_pd_target_override(policy_target, command)
         right_shoulder_roll = cfg.env.dof.joint_names.index("right_shoulder_roll_joint")
         self.assertAlmostEqual(clamped[right_shoulder_roll], 0.061)
 
         pipeline._upper_body_cfg = cfg.ctrl[-1]
         pipeline._upper_body_stream_was_fresh = True
         before_timeout = pipeline._upper_body_filtered.copy()
-        returned = pipeline._apply_upper_body_override(policy_target, {"UpperBodyZmqCtrl": {"fresh": False}})
+        returned = pipeline._apply_pd_target_override(policy_target, {"UpperBodyZmqCtrl": {"fresh": False}})
         expected = 0.95 * before_timeout + 0.05 * pipeline._upper_body_default
         np.testing.assert_allclose(returned[pipeline._upper_body_indices], expected, rtol=1e-6)
 

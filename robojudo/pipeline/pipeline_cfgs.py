@@ -64,6 +64,9 @@ class RlLocoMimicPipelineCfg(PipelineCfg):
     mimic_policies: list[PolicyCfg | Any] = []
     """MotionMimic policies, can be switched to"""
 
+    realign_on_policy_switch: bool = False
+    """Refresh the environment's born-place frame when a loco-mimic transition activates a policy."""
+
     # ===== Upper body override Config =====
     upper_dof_num: int = 0
     upper_dof_pos_default: list[float] | None = []

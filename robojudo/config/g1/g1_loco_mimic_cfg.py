@@ -3,7 +3,9 @@ from robojudo.controller.ctrl_cfgs import (
     JoystickCtrlCfg,  # noqa: F401
     KeyboardCtrlCfg,  # noqa: F401
     UnitreeCtrlCfg,  # noqa: F401
+    UpperBodyZmqCtrlCfg,
 )
+from robojudo.environment.env_cfgs import ElasticBandCfg
 from robojudo.pipeline.pipeline_cfgs import (
     RlLocoMimicPipelineCfg,  # noqa: F401
     RlMultiPolicyPipelineCfg,  # noqa: F401
@@ -20,18 +22,213 @@ from .ctrl.g1_motion_ctrl_cfg import (  # noqa: F401
 from .ctrl.g1_twist_redis_ctrl_cfg import G1TwistRedisCtrlCfg  # noqa: F401
 from .env.g1_dummy_env_cfg import G1DummyEnvCfg  # noqa: F401
 from .env.g1_mujuco_env_cfg import G1_12MujocoEnvCfg, G1_23MujocoEnvCfg, G1MujocoEnvCfg  # noqa: F401
-from .env.g1_real_env_cfg import G1RealEnvCfg, G1UnitreeCfg  # noqa: F401
-from .pipeline.g1_locomimic_pipeline_cfg import G1RlLocoMimicPipelineCfg  # noqa: F401
+from .env.g1_real_env_cfg import G1_23RealEnvCfg, G1RealEnvCfg, G1UnitreeCfg  # noqa: F401
+from .pipeline.g1_loco_mimic_pipeline_cfg import (
+    G1Locomanipulation23LocoMimicPipelineCfg,
+    G1Locomanipulation29LocoMimicPipelineCfg,
+    G1RlLocoMimicPipelineCfg,
+)
 from .policy.g1_amo_policy_cfg import G1AmoPolicyCfg  # noqa: F401
 from .policy.g1_asap_policy_cfg import G1AsapLocoPolicyCfg, G1AsapPolicyCfg  # noqa: F401
 from .policy.g1_beyondmimic_policy_cfg import G1BeyondMimicPolicyCfg  # noqa: F401
 from .policy.g1_h2h_policy_cfg import G1H2HPolicyCfg  # noqa: F401
 from .policy.g1_kungfubot_policy_cfg import G1KungfuBotGeneralPolicyCfg, G1KungfuBotPolicyCfg  # noqa: F401
+from .policy.g1_locomanipulation_policy_cfg import (
+    G1Locomanipulation23ObsDoF,
+    G1Locomanipulation23PolicyCfg,
+    G1Locomanipulation29ObsDoF,
+    G1Locomanipulation29PolicyCfg,
+)
 from .policy.g1_smooth_policy_cfg import G1SmoothPolicyCfg  # noqa: F401
 from .policy.g1_twist_policy_cfg import G1TwistPolicyCfg  # noqa: F401
 from .policy.g1_unitree_policy_cfg import G1UnitreePolicyCfg, G1UnitreeWoGaitPolicyCfg  # noqa: F401
 
 # ================= LocoMotion + MotionMimic Policy Switch Configs ================= #
+
+
+def _g1_locomanipulation_mimic_policies(pad_missing_dofs: bool):
+    return [
+        G1BeyondMimicPolicyCfg(
+            policy_name="Jump_wose",
+            without_state_estimator=True,
+            max_timestep=140,
+            pad_missing_dofs=pad_missing_dofs,
+        ),
+        G1BeyondMimicPolicyCfg(
+            policy_name="Dance_wose",
+            without_state_estimator=True,
+            max_timestep=6574,
+            pad_missing_dofs=pad_missing_dofs,
+        ),
+    ]
+
+
+def _g1_locomanipulation_locomimic_sim_ctrl(joint_names: list[str]):
+    return [
+        JoystickCtrlCfg(
+            triggers={
+                "A": "[PASSIVE_DEFAULT]",
+                "B": "[DAMPING_DEFAULT]",
+                "Y": "[JOINT_DEFAULT]",
+                "X": "[RL_DEFAULT]",
+                "Back": "[POLICY_LOCO]",
+                "Start": "[POLICY_MIMIC]",
+                "RB": "[POLICY_SWITCH],NEXT",
+                "LB": "[POLICY_SWITCH],LAST",
+                "L": "[UPPER_BODY_TOGGLE]",
+                "LB+RB+A": "[SHUTDOWN]",
+                "LB+RB+Y": "[SIM_REBORN]",
+            }
+        ),
+        KeyboardCtrlCfg(
+            triggers_extra={
+                "k": "[PASSIVE_DEFAULT]",
+                "l": "[DAMPING_DEFAULT]",
+                "i": "[JOINT_DEFAULT]",
+                "j": "[RL_DEFAULT]",
+                "]": "[POLICY_LOCO]",
+                "[": "[POLICY_MIMIC]",
+                ";": "[POLICY_SWITCH],NEXT",
+                "'": "[POLICY_SWITCH],LAST",
+                "t": "[UPPER_BODY_TOGGLE]",
+                "7": "[ELASTIC_BAND_LOWER]",
+                "8": "[ELASTIC_BAND_LIFT]",
+                "9": "[ELASTIC_BAND_TOGGLE]",
+            }
+        ),
+        UpperBodyZmqCtrlCfg(joint_names=joint_names),
+    ]
+
+
+def _g1_locomanipulation_locomimic_real_ctrl(joint_names: list[str]):
+    return [
+        UnitreeCtrlCfg(
+            combination_init_buttons=["L1", "R1"],
+            triggers={
+                "A": "[PASSIVE_DEFAULT]",
+                "B": "[DAMPING_DEFAULT]",
+                "Y": "[JOINT_DEFAULT]",
+                "X": "[RL_DEFAULT]",
+                "Select": "[POLICY_LOCO]",
+                "Start": "[POLICY_MIMIC]",
+                "R1": "[POLICY_SWITCH],NEXT",
+                "L1": "[POLICY_SWITCH],LAST",
+                "L2": "[UPPER_BODY_TOGGLE]",
+                "L1+R1+A": "[SHUTDOWN]",
+            },
+        ),
+        UpperBodyZmqCtrlCfg(joint_names=joint_names),
+    ]
+
+
+@cfg_registry.register
+class g1_23_locomanipulation_locomimic(G1Locomanipulation23LocoMimicPipelineCfg):
+    """23-DOF Locomanipulation with Jump and Dance BeyondMimic policies, Sim2Sim."""
+
+    env: G1_23MujocoEnvCfg = G1_23MujocoEnvCfg(
+        dof=G1Locomanipulation23ObsDoF.from_preset("stiff"),
+        sim_dt=0.005,
+        sim_decimation=4,
+        elastic_band=ElasticBandCfg(body_name="torso_link"),
+    )
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg] = (
+        _g1_locomanipulation_locomimic_sim_ctrl(G1Locomanipulation23ObsDoF().joint_names[13:])
+    )
+    loco_policy: G1Locomanipulation23PolicyCfg = G1Locomanipulation23PolicyCfg()
+    mimic_policies: list[G1BeyondMimicPolicyCfg] = _g1_locomanipulation_mimic_policies(True)
+
+
+@cfg_registry.register
+class g1_23_locomanipulation_default_locomimic(g1_23_locomanipulation_locomimic):
+    """23-DOF default-gain Locomanipulation with BeyondMimic policies, Sim2Sim."""
+
+    env: G1_23MujocoEnvCfg = G1_23MujocoEnvCfg(
+        dof=G1Locomanipulation23ObsDoF.from_preset("default"),
+        sim_dt=0.005,
+        sim_decimation=4,
+        elastic_band=ElasticBandCfg(body_name="torso_link"),
+    )
+    loco_policy: G1Locomanipulation23PolicyCfg = G1Locomanipulation23PolicyCfg(
+        policy_name="policy_23dof_default",
+        pd_gain_preset="default",
+    )
+    joint_default_dof: G1Locomanipulation23ObsDoF = G1Locomanipulation23ObsDoF.from_preset("default")
+    upper_dof_num: int = 10
+    upper_dof_pos_default: list[float] = joint_default_dof.default_pos[-upper_dof_num:]
+
+
+@cfg_registry.register
+class g1_29_locomanipulation_locomimic(G1Locomanipulation29LocoMimicPipelineCfg):
+    """29-DOF Locomanipulation with Jump and Dance BeyondMimic policies, Sim2Sim."""
+
+    env: G1MujocoEnvCfg = G1MujocoEnvCfg(
+        dof=G1Locomanipulation29ObsDoF.from_preset("stiff"),
+        sim_dt=0.005,
+        sim_decimation=4,
+        elastic_band=ElasticBandCfg(body_name="torso_link"),
+    )
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg] = (
+        _g1_locomanipulation_locomimic_sim_ctrl(G1Locomanipulation29ObsDoF().joint_names[15:])
+    )
+    loco_policy: G1Locomanipulation29PolicyCfg = G1Locomanipulation29PolicyCfg()
+    mimic_policies: list[G1BeyondMimicPolicyCfg] = _g1_locomanipulation_mimic_policies(False)
+
+
+@cfg_registry.register
+class g1_23_locomanipulation_locomimic_real(g1_23_locomanipulation_locomimic):
+    """23-DOF Locomanipulation loco-mimic configuration for a real G1."""
+
+    env: G1_23RealEnvCfg = G1_23RealEnvCfg(
+        dof=G1Locomanipulation23ObsDoF.from_preset("stiff"),
+        unitree=G1UnitreeCfg(
+            net_if="eth0",
+            command_timeout=0.1,
+            state_timeout=0.1,
+            shutdown_damping=5.0,
+        ),
+    )
+    ctrl: list[UnitreeCtrlCfg | UpperBodyZmqCtrlCfg] = _g1_locomanipulation_locomimic_real_ctrl(
+        G1Locomanipulation23ObsDoF().joint_names[13:]
+    )
+    do_safety_check: bool = True
+
+
+@cfg_registry.register
+class g1_23_locomanipulation_default_locomimic_real(g1_23_locomanipulation_default_locomimic):
+    """23-DOF default-gain Locomanipulation loco-mimic configuration for a real G1."""
+
+    env: G1_23RealEnvCfg = G1_23RealEnvCfg(
+        dof=G1Locomanipulation23ObsDoF.from_preset("default"),
+        unitree=G1UnitreeCfg(
+            net_if="eth0",
+            command_timeout=0.1,
+            state_timeout=0.1,
+            shutdown_damping=5.0,
+        ),
+    )
+    ctrl: list[UnitreeCtrlCfg | UpperBodyZmqCtrlCfg] = _g1_locomanipulation_locomimic_real_ctrl(
+        G1Locomanipulation23ObsDoF().joint_names[13:]
+    )
+    do_safety_check: bool = True
+
+
+@cfg_registry.register
+class g1_29_locomanipulation_locomimic_real(g1_29_locomanipulation_locomimic):
+    """29-DOF Locomanipulation loco-mimic configuration for a real G1."""
+
+    env: G1RealEnvCfg = G1RealEnvCfg(
+        dof=G1Locomanipulation29ObsDoF.from_preset("stiff"),
+        unitree=G1UnitreeCfg(
+            net_if="eth0",
+            command_timeout=0.1,
+            state_timeout=0.1,
+            shutdown_damping=5.0,
+        ),
+    )
+    ctrl: list[UnitreeCtrlCfg | UpperBodyZmqCtrlCfg] = _g1_locomanipulation_locomimic_real_ctrl(
+        G1Locomanipulation29ObsDoF().joint_names[15:]
+    )
+    do_safety_check: bool = True
 
 
 @cfg_registry.register

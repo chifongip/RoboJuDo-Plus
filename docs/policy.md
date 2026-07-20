@@ -17,6 +17,7 @@ We provide the following policies:
 - [ASAPPolicy](#policy--asappolicy)
 - [KungfuBotGeneralPolicy](#policy--kungfubotgeneralpolicy)
 - [TwistPolicy](#policy--twistpolicy)
+- [LocomanipulationPolicy](#policy--locomanipulationpolicy)
 - [ProtoMotionsTrackerPolicy](#policy--protomotionstrackerpolicy)
 
 ## [Policy](#policy) > [UnitreePolicy](#policy--unitreepolicy)
@@ -204,6 +205,119 @@ For TwistPolicy, we implement two motion source controllers:
 
 You can refer to `g1_twist` config in [g1_cfg.py](../robojudo/config/g1/g1_cfg.py) for test and details.
 
+## [Policy](#policy) > [LocomanipulationPolicy](#policy--locomanipulationpolicy)
+
+`LocomanipulationPolicy` deploys locomotion policies whose learned actions control the lower body while an optional
+named-joint ZMQ stream controls the remaining upper-body joints. G1 simulation presets are provided for the supplied
+23-DOF and 29-DOF exports:
+
+```bash
+python scripts/run_pipeline.py -c g1_23_locomanipulation_default
+python scripts/run_pipeline.py -c g1_23_locomanipulation_stiff
+python scripts/run_pipeline.py -c g1_29_locomanipulation_stiff
+```
+
+Each preset starts in `PASSIVE_DEFAULT` and uses the same guarded four-mode sequence as X2:
+
+| Mode | Joystick | Behavior |
+| --- | --- | --- |
+| `PASSIVE_DEFAULT` | `A` | Apply zero torque. Use only while the simulated robot is supported. |
+| `DAMPING_DEFAULT` | `B` | Apply damping `5.0` to every joint. |
+| `JOINT_DEFAULT` | `Y` | Interpolate all joints to the checkpoint's recorded pose over 1.5 seconds. |
+| `RL_DEFAULT` | `X` | Restore the recorded policy gains, reset policy state, and run inference. |
+
+`RL_DEFAULT` is rejected until `JOINT_DEFAULT` completes. Entering passive or damping invalidates preparation, so the
+joint-default interpolation must complete again before RL can restart. Upper-body streaming is available only in
+`RL_DEFAULT` and is disabled whenever that mode is left.
+
+These presets also start with a simulation-only elastic band attached to `torso_link`. It uses the X2 defaults: a
+`[0, 0, 3]` world anchor, `200 N/m` stiffness, `100 Ns/m` damping, and zero rest length. Keyboard controls are `7` to
+lower the robot, `8` to lift it, and `9` to release or reactivate the band. Control-mode switching does not change the
+band state; respawning the simulation resets it to active with zero rest length.
+
+The 23-DOF policy produces 13 learned actions and exposes 10 arm joints to the upper-body stream. The 29-DOF policy
+produces 15 learned actions, including the two additional waist joints, and exposes 14 arm joints. Each preset uses the
+PD gains and per-joint action scales recorded in its ONNX export; do not mix a checkpoint with a different preset.
+
+Joystick controls:
+
+- Left stick: forward/backward and lateral velocity
+- Right stick X: yaw velocity
+- D-pad Up/Down: body height
+- D-pad Left/Right: waist yaw command
+- Back/Select: reset locomotion commands
+- Start: enable or disable the upper-body stream
+- LB+RB+A: stop the simulation
+- LB+RB+Y: respawn the simulated robot
+
+Keyboard controls use `w/s`, `a/d`, and `q/e` for velocity, `r/f` for height, `z/c` for waist yaw, and `x` to reset
+commands. Press `t` to toggle the upper-body stream, `o` to stop, and `i` to respawn.
+
+The upper-body controller subscribes to `tcp://127.0.0.1:8559` by default and accepts partial named-joint updates:
+
+```json
+{"positions": {"left_shoulder_pitch_joint": 0.8}}
+```
+
+Unknown joints and non-finite values are rejected. Targets are clamped to joint limits, smoothed, and returned toward
+the default pose if messages become stale. The stream starts disabled and affects only joints outside the policy action
+set.
+
+Native Unitree real-robot variants are also registered:
+
+```bash
+python scripts/run_pipeline.py -c g1_23_locomanipulation_default_real
+python scripts/run_pipeline.py -c g1_23_locomanipulation_stiff_real
+python scripts/run_pipeline.py -c g1_29_locomanipulation_stiff_real
+```
+
+Use `python scripts/test_upper_body_zmq.py --robot g1-23` or `--robot g1-29` to publish the matching predefined
+upper-body test poses.
+
+The 23-DOF variants keep a logical 23-joint policy/environment layout while using the standard 29-slot Unitree motor
+transport. Logical joints map to motor indices `[0..12, 15..19, 22..26]`; targets and gains for the six omitted slots
+are zero, and feedback is selected through the same mapping. The 29-DOF variants use the transport directly.
+Real variants use the wireless remote, with `A/B/Y/X` selecting the four modes, `Start` toggling upper-body streaming,
+and `L1+R1+A` shutting down. They enable joint-limit clipping, low-state freshness checks, and a 100 ms C++ command
+watchdog that enters damping if position commands stop. Existing G1 real configurations retain their previous timeout
+behavior unless these Unitree timeout options are explicitly enabled.
+Rebuild the optional binding with `python submodule_install.py unitree_cpp` before using these real configurations.
+
+G1 Locomanipulation can also act as the locomotion half of the four-mode loco-mimic pipeline. The included test
+presets pair it with two 29-DOF BeyondMimic exports that do not require a state estimator: `Jump_wose` and
+`Dance_wose`.
+
+```bash
+# MuJoCo
+python scripts/run_pipeline.py -c g1_23_locomanipulation_default_locomimic
+python scripts/run_pipeline.py -c g1_23_locomanipulation_locomimic
+python scripts/run_pipeline.py -c g1_29_locomanipulation_locomimic
+
+# Real G1
+python scripts/run_pipeline.py -c g1_23_locomanipulation_default_locomimic_real
+python scripts/run_pipeline.py -c g1_23_locomanipulation_locomimic_real
+python scripts/run_pipeline.py -c g1_29_locomanipulation_locomimic_real
+```
+
+The logical 23-DOF presets explicitly enable the missing-DOF adapter. The six 29-DOF-only joints use the mimic
+model's default positions and zero velocities in observations, and their output actions are discarded. Other policy
+and environment combinations remain strict unless `pad_missing_dofs=True` is set on that policy config.
+
+In simulation, `Back`/`Start` select loco/mimic, `LB`/`RB` select the previous/next mimic, and `L` toggles upper-body
+ZMQ while idle in loco. Keyboard equivalents are `]`/`[`, `'`/`;`, and `t`. On the Unitree remote, use
+`Select`/`Start`, `L1`/`R1`, and `L2`, respectively. Upper-body ZMQ is disabled during interpolation and mimic, then
+resynchronized to the current loco target before it becomes available again. When the mimic reaches its configured
+maximum timestep, the pipeline automatically interpolates back to loco. Only the upper non-locomotion joints are
+interpolated or overridden during policy switching; the lower body remains under Locomanipulation until mimic becomes
+active.
+
+Both G1 loco-mimic variants refresh their born-place position and heading frame when a transition activates the loco or
+mimic policy. This alignment-only refresh intentionally preserves the elastic band's active state and rest length.
+BeyondMimic startup also checks `observation_names` metadata against `without_state_estimator`: exports without the
+state estimator omit `motion_anchor_pos_b` and `base_lin_vel` but continue to use IMU orientation and angular velocity.
+
+script: [locomanipulation_policy.py](../robojudo/policy/locomanipulation_policy.py)
+
 ## [Policy](#policy) > [ProtoMotionsTrackerPolicy](#policy--protomotionstrackerpolicy)
 
 > Thanks to [NVLabs](https://github.com/NVlabs) for ProtoMotions, and to [Chen Tessler](https://github.com/tesslerc) and [Yifeng Jiang](https://github.com/jyf588) for contributing this RoboJuDo integration.
@@ -258,5 +372,3 @@ To test your own exported tracker, add:
 ```bash
 --onnx-path /path/to/unified_pipeline.onnx
 ```
-
-

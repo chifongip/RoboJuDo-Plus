@@ -34,6 +34,7 @@ class PolicyInterpManager(PolicyManager):
         env: Environment,
         loco_dof_pos: np.ndarray | None = None,
         device: str = "cpu",
+        realign_on_policy_switch: bool = False,
     ):
         cfg_policies_all = [cfg_policy_loco] + cfg_policies
         super().__init__(cfg_policies_all, env, device)
@@ -43,6 +44,7 @@ class PolicyInterpManager(PolicyManager):
         assert self.policy_mimic_num > 0, "At least one mimic policy is required for switching."
         self.policy_mimic_ids = list(range(1, self.policy_mimic_num + 1))
         self.policy_mimic_idx = 0
+        self.realign_on_policy_switch = realign_on_policy_switch
 
         # Interpolation variables
         self.interp_state = self.InterpState.IDLE
@@ -54,6 +56,11 @@ class PolicyInterpManager(PolicyManager):
 
         self.loco_dof_pos = loco_dof_pos if loco_dof_pos is not None else self.env.default_pos.copy()
         self.override_dof_pos = self.loco_dof_pos.copy()
+
+    def _activate_policy(self, policy_id: int):
+        if self.realign_on_policy_switch:
+            self.env.reset_alignment()
+        self.set_policy(policy_id, reset_env=False)
 
     def cancel_interpolation(self):
         """Cancel pending interpolation work without changing the active policy."""
@@ -167,7 +174,7 @@ class PolicyInterpManager(PolicyManager):
         self._interpolate_init(
             get_target_pos=lambda: self.loco_dof_pos,
             durations=self.DURATIONS_MIMIC_LOCO,
-            callback_start=lambda: self.set_policy(self.policy_loco_id, reset_env=False),
+            callback_start=lambda: self._activate_policy(self.policy_loco_id),
         )
         return True
 
@@ -184,7 +191,7 @@ class PolicyInterpManager(PolicyManager):
         self._interpolate_init(
             get_target_pos=lambda: self.policy_by_id(policy_mimic_id).get_init_dof_pos(),
             durations=self.DURATIONS_LOCO_MIMIC,
-            callback_end=lambda: self.set_policy(policy_mimic_id, reset_env=False),
+            callback_end=lambda: self._activate_policy(policy_mimic_id),
         )
         return True
 
@@ -229,6 +236,7 @@ class RlLocoMimicPipeline(RlMultiPolicyPipeline):
             env=self.env,
             loco_dof_pos=self.loco_dof_pos,
             device=self.device,
+            realign_on_policy_switch=self.cfg.realign_on_policy_switch,
         )
         self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
         _set_full_joint_control(self.env)

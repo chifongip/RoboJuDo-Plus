@@ -2,6 +2,8 @@ from robojudo.config import ASSETS_DIR
 from robojudo.environment.env_cfgs import EnvCfg
 from robojudo.tools.tool_cfgs import DoFConfig, ForwardKinematicCfg
 
+G1_23_DOF_INDICES = [*range(13), *range(15, 20), *range(22, 27)]
+
 
 class G1_29DoF(DoFConfig):
     # num_dofs as 29
@@ -116,40 +118,7 @@ class G1_29DoF(DoFConfig):
 class G1_23DoF(G1_29DoF):
     # num_dofs as 23
     _subset: bool = True  # if True, simplely inheritance & pick
-
-    _subset_joint_names: list[str] | None = [
-        *[
-            "left_hip_pitch_joint",
-            "left_hip_roll_joint",
-            "left_hip_yaw_joint",
-            "left_knee_joint",
-            "left_ankle_pitch_joint",
-            "left_ankle_roll_joint",
-        ],
-        *[
-            "right_hip_pitch_joint",
-            "right_hip_roll_joint",
-            "right_hip_yaw_joint",
-            "right_knee_joint",
-            "right_ankle_pitch_joint",
-            "right_ankle_roll_joint",
-        ],
-        *["waist_yaw_joint"],
-        *[
-            "left_shoulder_pitch_joint",
-            "left_shoulder_roll_joint",
-            "left_shoulder_yaw_joint",
-            "left_elbow_joint",
-            "left_wrist_roll_joint",
-        ],
-        *[
-            "right_shoulder_pitch_joint",
-            "right_shoulder_roll_joint",
-            "right_shoulder_yaw_joint",
-            "right_elbow_joint",
-            "right_wrist_roll_joint",
-        ],
-    ]
+    _subset_joint_names: list[str] | None = [G1_29DoF().joint_names[index] for index in G1_23_DOF_INDICES]
 
 
 class G1_12DoF(G1_29DoF):

@@ -11,7 +11,7 @@ from .policy.x2_locomanipulation_policy_cfg import (
     X2LocomanipulationPolicyCfg,
 )
 
-_X2_LOCOMIMIC_ENV_DOF = X2LocomanipulationEnvDoF()
+_X2_LOCO_MIMIC_ENV_DOF = X2LocomanipulationEnvDoF()
 
 
 class X2RlLocoMimicPipelineCfg(RlLocoMimicPipelineCfg):
@@ -19,16 +19,16 @@ class X2RlLocoMimicPipelineCfg(RlLocoMimicPipelineCfg):
 
     robot: str = "x2"
     pipeline_type: str = "X2LocoMimicPipeline"
-    joint_default_dof: X2LocomanipulationEnvDoF = _X2_LOCOMIMIC_ENV_DOF
+    joint_default_dof: X2LocomanipulationEnvDoF = _X2_LOCO_MIMIC_ENV_DOF
     joint_default_duration: float = 1.5
     default_damping: float = 5.0
 
     # The locomanipulation policy controls the first 15 joints. Its 14 recorded
     # arm defaults and the two head defaults make up the final 16 environment DoFs.
     upper_dof_num: int = 16
-    upper_dof_pos_default: list[float] = _X2_LOCOMIMIC_ENV_DOF.default_pos[-upper_dof_num:]
+    upper_dof_pos_default: list[float] = _X2_LOCO_MIMIC_ENV_DOF.default_pos[-upper_dof_num:]
     upper_dof_override_indices: list[int] = [
-        _X2_LOCOMIMIC_ENV_DOF.joint_names.index(name) - _X2_LOCOMIMIC_ENV_DOF.num_dofs
+        _X2_LOCO_MIMIC_ENV_DOF.joint_names.index(name) - _X2_LOCO_MIMIC_ENV_DOF.num_dofs
         for name in X2_ARM_JOINT_NAMES
     ]
 
@@ -56,6 +56,10 @@ class x2(RlPipelineCfg):
         ),
         KeyboardCtrlCfg(
             triggers={
+                "k": "[PASSIVE_DEFAULT]",
+                "l": "[DAMPING_DEFAULT]",
+                "i": "[JOINT_DEFAULT]",
+                "j": "[RL_DEFAULT]",
                 "7": "[ELASTIC_BAND_LOWER]",
                 "8": "[ELASTIC_BAND_LIFT]",
                 "9": "[ELASTIC_BAND_TOGGLE]",
@@ -114,6 +118,10 @@ class x2_locomanipulation(x2):
         ),
         KeyboardCtrlCfg(
             triggers={
+                "k": "[PASSIVE_DEFAULT]",
+                "l": "[DAMPING_DEFAULT]",
+                "i": "[JOINT_DEFAULT]",
+                "j": "[RL_DEFAULT]",
                 "7": "[ELASTIC_BAND_LOWER]",
                 "8": "[ELASTIC_BAND_LIFT]",
                 "9": "[ELASTIC_BAND_TOGGLE]",
@@ -172,6 +180,10 @@ class x2_locomimic(X2RlLocoMimicPipelineCfg):
         ),
         KeyboardCtrlCfg(
             triggers_extra={
+                "k": "[PASSIVE_DEFAULT]",
+                "l": "[DAMPING_DEFAULT]",
+                "i": "[JOINT_DEFAULT]",
+                "j": "[RL_DEFAULT]",
                 "]": "[POLICY_LOCO]",
                 "[": "[POLICY_MIMIC]",
                 ";": "[POLICY_SWITCH],NEXT",

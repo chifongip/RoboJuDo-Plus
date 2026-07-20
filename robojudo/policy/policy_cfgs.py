@@ -20,6 +20,13 @@ class PolicyCfg(Config):
 
     obs_dof: DoFConfig
     action_dof: DoFConfig
+    pad_missing_dofs: bool = False
+    """Allow a policy with extra joints to run on an environment with fewer joints.
+
+    Missing observation positions use the policy defaults, missing velocities use zero,
+    and policy outputs for unavailable joints are discarded. Subset validation remains
+    strict unless this option is explicitly enabled.
+    """
 
     # action post processing
     action_scale: float = 1.0

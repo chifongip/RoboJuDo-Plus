@@ -166,12 +166,7 @@ class UnitreeEnv(Environment):
         # logger.debug("Observation test done!")
 
     def reset(self):
-        if self.born_place_align:  # TODO: merge
-            self.born_place_align = False  # disable during reset
-            self.update()
-            self.born_place_align = True  # enable after reset
-            self.set_born_place()
-            self.update()
+        self.reset_alignment()
 
     def set_born_place(self, quat: np.ndarray | None = None, pos: np.ndarray | None = None):
         quat_ = self.base_quat if quat is None else quat

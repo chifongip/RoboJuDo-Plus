@@ -14,6 +14,14 @@ from robojudo.utils.util_func import matrix_from_quat, subtract_frame_transforms
 logger = logging.getLogger(__name__)
 
 
+def _parse_metadata_strings(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _parse_metadata_floats(value: str) -> list[float]:
+    return [float(item) for item in _parse_metadata_strings(value)]
+
+
 @policy_registry.register
 class BeyondMimicPolicy(Policy):
     cfg_policy: BeyondMimicPolicyCfg
@@ -41,41 +49,34 @@ class BeyondMimicPolicy(Policy):
 
         self.input_names = [i.name for i in self.session.get_inputs()]
         self.output_names = [o.name for o in self.session.get_outputs()]
+        obs_shape = self.session.get_inputs()[0].shape
+        self.expected_observation_size = obs_shape[-1] if isinstance(obs_shape[-1], int) else None
         self.motion_anchor_body_index = -1
+        modelmeta_dict = self.session.get_modelmeta().custom_metadata_map
+        self.observation_names = _parse_metadata_strings(modelmeta_dict.get("observation_names", ""))
+        self.model_joint_count = len(_parse_metadata_strings(modelmeta_dict.get("joint_names", "")))
+        self._validate_observation_contract(cfg_policy)
 
         cfg_policy_new = cfg_policy.model_copy()
         if cfg_policy_new.use_modelmeta_config:
             logger.info("[BeyondMimicPolicy] Using modelmeta as config ...")
-            modelmeta = self.session.get_modelmeta()  # all str,
-            modelmeta_dict = modelmeta.custom_metadata_map
 
             # dict_keys(['joint_names', 'run_path', 'command_names', 'joint_stiffness', 'joint_damping',
             # 'default_joint_pos', 'action_scale', 'observation_names', 'anchor_body_name', 'body_names'])
-            def parse_floats(s):
-                return [float(item) for item in s.split(",")]
-
-            def parse_strings(s):
-                return [item for item in s.split(",")]
-
             dof_config = DoFConfig(
-                joint_names=parse_strings(modelmeta_dict["joint_names"]),
-                default_pos=parse_floats(modelmeta_dict["default_joint_pos"]),
-                stiffness=parse_floats(modelmeta_dict["joint_stiffness"]),
-                damping=parse_floats(modelmeta_dict["joint_damping"]),
+                joint_names=_parse_metadata_strings(modelmeta_dict["joint_names"]),
+                default_pos=_parse_metadata_floats(modelmeta_dict["default_joint_pos"]),
+                stiffness=_parse_metadata_floats(modelmeta_dict["joint_stiffness"]),
+                damping=_parse_metadata_floats(modelmeta_dict["joint_damping"]),
             )
-            action_scales = parse_floats(modelmeta_dict["action_scale"])
 
             anchor_body_name = modelmeta_dict["anchor_body_name"]
-            body_names = parse_strings(modelmeta_dict["body_names"])
+            body_names = _parse_metadata_strings(modelmeta_dict["body_names"])
             self.motion_anchor_body_index = body_names.index(anchor_body_name)
-
-            # command_names = parse_strings(modelmeta_dict["command_names"])
-            # observation_names = parse_strings(modelmeta_dict["observation_names"])
 
             cfg_policy_new.action_dof = dof_config
             cfg_policy_new.obs_dof = dof_config
-
-            cfg_policy_new.action_scales = action_scales
+            cfg_policy_new.action_scales = _parse_metadata_floats(modelmeta_dict["action_scale"])
 
         super().__init__(cfg_policy=cfg_policy_new, device=device)
         self.action_scales = np.asarray(self.cfg_policy.action_scales)
@@ -100,12 +101,56 @@ class BeyondMimicPolicy(Policy):
                 quat=anchor_quat_w_init, pos=anchor_pos_w_init, yaw_only=True, xy_only=True
             )
 
+    def _validate_observation_contract(self, cfg_policy: BeyondMimicPolicyCfg):
+        if not self.observation_names:
+            logger.warning(
+                "BeyondMimic model %s has no observation_names metadata; state-estimator mode cannot be validated",
+                cfg_policy.policy_name,
+            )
+            return
+
+        has_anchor_position = "motion_anchor_pos_b" in self.observation_names
+        has_base_linear_velocity = "base_lin_vel" in self.observation_names
+        if has_anchor_position != has_base_linear_velocity:
+            raise ValueError(
+                f"BeyondMimic model {cfg_policy.policy_name!r} has an incomplete state-estimator observation contract: "
+                "motion_anchor_pos_b and base_lin_vel must either both be present or both be absent"
+            )
+
+        model_without_state_estimator = not has_anchor_position
+        if cfg_policy.without_state_estimator != model_without_state_estimator:
+            mode = "without" if model_without_state_estimator else "with"
+            raise ValueError(
+                f"BeyondMimic model {cfg_policy.policy_name!r} was exported {mode} state-estimator observations, "
+                f"but without_state_estimator={cfg_policy.without_state_estimator}"
+            )
+
+        observation_sizes = {
+            "command": 2 * self.model_joint_count,
+            "motion_anchor_pos_b": 3,
+            "motion_anchor_ori_b": 6,
+            "base_lin_vel": 3,
+            "base_ang_vel": 3,
+            "joint_pos": self.model_joint_count,
+            "joint_vel": self.model_joint_count,
+            "actions": self.model_joint_count,
+        }
+        unknown_observations = sorted(set(self.observation_names).difference(observation_sizes))
+        if self.model_joint_count and not unknown_observations:
+            metadata_observation_size = sum(observation_sizes[name] for name in self.observation_names)
+            if self.expected_observation_size != metadata_observation_size:
+                raise ValueError(
+                    f"BeyondMimic model {cfg_policy.policy_name!r} declares observation_names totaling "
+                    f"{metadata_observation_size} values, but its ONNX input expects {self.expected_observation_size}"
+                )
+
     def _prepare_policy(self):
         obs_shape = self.session.get_inputs()[0].shape  # e.g. [1, 154]
         obs = np.zeros(obs_shape[1], dtype=np.float32)
         self.get_action(obs)
 
     def reset(self):
+        self.close_progress()
         self.timestep: float = self.cfg_policy.start_timestep
         if self.use_motion_from_model:
             self.pbar = ProgressBar(f"Beyondmimic {self.cfg_policy.policy_name}", self.max_timestep)
@@ -115,6 +160,12 @@ class BeyondMimicPolicy(Policy):
         self.flag_motion_done = False
         self._prepare_policy()
 
+    def close_progress(self):
+        pbar = getattr(self, "pbar", None)
+        if pbar is not None:
+            pbar.close()
+            self.pbar = None
+
     def post_step_callback(self, commands: list[str] | None = None):
         self.timestep += 1 * self.play_speed
         if self.pbar:
@@ -123,6 +174,7 @@ class BeyondMimicPolicy(Policy):
         if 0 < self.max_timestep <= self.timestep:
             self.play_speed = 0.0
             self.flag_motion_done = True
+            self.close_progress()
 
         for command in commands or []:
             match command:
@@ -132,6 +184,8 @@ class BeyondMimicPolicy(Policy):
                     self.play_speed = 1.0
                 case "[MOTION_FADE_OUT]":
                     self.play_speed = 0.0
+                case "[POLICY_LOCO]":
+                    self.close_progress()
 
     def _get_command(self, env_data, ctrl_data):
         if not self.use_motion_from_model:
@@ -224,6 +278,14 @@ class BeyondMimicPolicy(Policy):
         return obs, extras
 
     def get_action(self, obs: np.ndarray) -> np.ndarray:
+        obs = np.asarray(obs)
+        if self.expected_observation_size is not None and obs.shape != (self.expected_observation_size,):
+            raise ValueError(
+                f"BeyondMimic model {self.cfg_policy.policy_name!r} expects observation shape "
+                f"({self.expected_observation_size},), got {obs.shape}; "
+                f"without_state_estimator={self.without_state_estimator}, "
+                f"observation_names={self.observation_names}"
+            )
         ort_inputs = {
             "obs": np.expand_dims(obs, axis=0).astype(np.float32),
             "time_step": np.expand_dims(np.array([int(self.timestep)]), axis=0).astype(np.float32),
@@ -267,6 +329,18 @@ class BeyondMimicPolicy(Policy):
             return self.default_dof_pos.copy()
 
     def debug_viz(self, visualizer: MujocoVisualizer, env_data, ctrl_data, extras):
+        required = {
+            "robot_anchor_pos_w",
+            "robot_anchor_quat_w",
+            "anchor_pos_w",
+            "anchor_quat_w",
+            "pos",
+        }
+        missing = required.difference(extras)
+        if missing:
+            logger.debug("Skip BeyondMimic debug visualization; missing extras: %s", sorted(missing))
+            return
+
         robot_anchor_pos_w = extras["robot_anchor_pos_w"]
         robot_anchor_quat_w = extras["robot_anchor_quat_w"]
         anchor_pos_w = extras["anchor_pos_w"]

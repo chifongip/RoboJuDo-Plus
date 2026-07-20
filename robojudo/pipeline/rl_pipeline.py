@@ -30,16 +30,18 @@ class PolicyWrapper:
 
     def __init__(self, cfg_policy: PolicyCfg, env_dof_cfg: DoFConfig, device: str):
         self.env_dof_cfg = env_dof_cfg
+        self.pad_missing_dofs = cfg_policy.pad_missing_dofs
 
         self._validate_joint_names("environment", env_dof_cfg.joint_names)
         self._validate_joint_names("policy observation", cfg_policy.obs_dof.joint_names)
         self._validate_joint_names("policy action", cfg_policy.action_dof.joint_names)
-        self._require_joint_subset(
-            "policy observation", cfg_policy.obs_dof.joint_names, env_dof_cfg.joint_names
-        )
-        self._require_joint_subset(
-            "policy action", cfg_policy.action_dof.joint_names, env_dof_cfg.joint_names
-        )
+        if not self.pad_missing_dofs:
+            self._require_joint_subset(
+                "policy observation", cfg_policy.obs_dof.joint_names, env_dof_cfg.joint_names
+            )
+            self._require_joint_subset(
+                "policy action", cfg_policy.action_dof.joint_names, env_dof_cfg.joint_names
+            )
 
         policy_type = cfg_policy.policy_type
         policy_name = policy_type
@@ -51,14 +53,29 @@ class PolicyWrapper:
 
         policy_class: type[Policy] = getattr(robojudo.policy, policy_type)
         self.policy: Policy = policy_class(cfg_policy=cfg_policy, device=device)
+        self._validate_joint_names("policy observation", self.policy.cfg_obs_dof.joint_names)
+        self._validate_joint_names("policy action", self.policy.cfg_action_dof.joint_names)
+        if not self.pad_missing_dofs:
+            self._require_joint_subset(
+                "policy observation", self.policy.cfg_obs_dof.joint_names, env_dof_cfg.joint_names
+            )
+            self._require_joint_subset(
+                "policy action", self.policy.cfg_action_dof.joint_names, env_dof_cfg.joint_names
+            )
         self.obs_adapter = DoFAdapter(env_dof_cfg.joint_names, self.policy.cfg_obs_dof.joint_names)
         self.actions_adapter = DoFAdapter(self.policy.cfg_action_dof.joint_names, env_dof_cfg.joint_names)
 
         action_mapping = {
             name: env_dof_cfg.joint_names.index(name)
             for name in self.policy.cfg_action_dof.joint_names
+            if name in env_dof_cfg.joint_names
         }
         logger.info("Policy-to-environment joint mapping: %s", action_mapping)
+        omitted_actions = [
+            name for name in self.policy.cfg_action_dof.joint_names if name not in env_dof_cfg.joint_names
+        ]
+        if omitted_actions:
+            logger.warning("Policy action joints omitted by the environment adapter: %s", omitted_actions)
 
     @staticmethod
     def _validate_joint_names(label: str, joint_names: list[str]):
@@ -72,10 +89,19 @@ class PolicyWrapper:
         if missing:
             raise ValueError(f"{label} joints missing from environment: {missing}")
 
+    def _adapt_observation_dofs(self, dof_pos: np.ndarray, dof_vel: np.ndarray):
+        position_template = self.policy.default_dof_pos if self.pad_missing_dofs else None
+        velocity_template = np.zeros_like(self.policy.default_dof_pos) if self.pad_missing_dofs else None
+        return (
+            self.obs_adapter.fit(dof_pos, template=position_template),
+            self.obs_adapter.fit(dof_vel, template=velocity_template),
+        )
+
     def get_observation(self, env_data: Box, ctrl_data: Box):
         env_data_adapted = env_data.copy()
-        env_data_adapted.dof_pos = self.obs_adapter.fit(env_data_adapted.dof_pos)
-        env_data_adapted.dof_vel = self.obs_adapter.fit(env_data_adapted.dof_vel)
+        env_data_adapted.dof_pos, env_data_adapted.dof_vel = self._adapt_observation_dofs(
+            env_data_adapted.dof_pos, env_data_adapted.dof_vel
+        )
         return self.policy.get_observation(env_data_adapted, ctrl_data)
 
     def get_action(self, obs):
@@ -132,6 +158,11 @@ class RlPipeline(Pipeline):
     def _inner_policy(self):
         """Return the unwrapped inner Policy (e.g. ProtoMotionsTrackerPolicy)."""
         return getattr(self.policy, "policy", self.policy)
+
+    def _apply_pd_target_override(self, pd_target, ctrl_data):
+        """Allow specialized pipelines to modify the final runtime PD target."""
+        del ctrl_data
+        return pd_target
 
     @property
     def _has_default_pose_mode(self) -> bool:
@@ -270,6 +301,8 @@ class RlPipeline(Pipeline):
             alpha = min(self._blend_out_step / max(self._blend_out_duration, 1), 1.0)
             pd_target = (1 - alpha) * pd_target + alpha * self._init_dof_pos
             self._blend_out_step += 1
+
+        pd_target = self._apply_pd_target_override(pd_target, ctrl_data)
 
         if not dry_run:
             self.env.step(pd_target, extras.get("hand_pose", None))

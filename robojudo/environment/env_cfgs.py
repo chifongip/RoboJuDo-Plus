@@ -101,16 +101,27 @@ class UnitreeEnvCfg(RobotEnvCfg):
         control_dt: float = 0.02
         """control command dt"""
 
+        command_timeout: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+        """Position-command watchdog in seconds; zero disables it."""
+
+        state_timeout: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+        """Low-state freshness timeout in seconds; zero disables it."""
+
+        shutdown_damping: float = Field(default=5.0, ge=0.0, allow_inf_nan=False)
+        """Damping used by watchdog and shutdown commands."""
+
     env_type: str = "UnitreeEnv"  # For unitree_sdk2py
     # env_type: str = "UnitreeCppEnv" # For unitree_cpp
     """UnitreeEnv for unitree_sdk2py, UnitreeCppEnv for unitree_cpp, check README for more details"""
 
     unitree: UnitreeCfg
 
-    odometry_type: Literal["NONE", "DUMMY", "UNITREE", "ZED"] = "DUMMY"  # pyright: ignore[reportIncompatibleVariableOverride]
+    odometry_type: Literal["NONE", "DUMMY", "UNITREE", "ZED"] = "DUMMY"  # pyright: ignore
 
     joint2motor_idx: list[int] | None = None
     """Mapping from env dof to motor index, None for direct mapping"""
+    motor_dof_count: int | None = Field(default=None, gt=0)
+    """Number of slots in the physical motor transport, if different from the logical env DOFs."""
     weak_motor: list[int] = []
 
     hand_retarget: None = None  # TODO
@@ -119,6 +130,15 @@ class UnitreeEnvCfg(RobotEnvCfg):
     def check_joint2motor_idx(self):
         if self.joint2motor_idx is not None and len(self.joint2motor_idx) != self.dof.num_dofs:
             raise ValueError("joint2motor_idx length must match dof.num_dofs")
+        if self.motor_dof_count is not None:
+            if self.joint2motor_idx is None:
+                if self.motor_dof_count != self.dof.num_dofs:
+                    raise ValueError("joint2motor_idx is required when motor_dof_count differs from dof.num_dofs")
+            else:
+                if len(set(self.joint2motor_idx)) != len(self.joint2motor_idx):
+                    raise ValueError("joint2motor_idx entries must be unique")
+                if any(idx < 0 or idx >= self.motor_dof_count for idx in self.joint2motor_idx):
+                    raise ValueError("joint2motor_idx entries must be within motor_dof_count")
         return self
 
 
