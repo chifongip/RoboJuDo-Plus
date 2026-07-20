@@ -41,7 +41,7 @@ Our framework highlights:
 
 - **Multi-policy switching**: Seamlessly switch between different policies during a task. Try this: [Multi-Policy Switching](#multi-policy-switch).
 
-- **Light-Weight**: Our framework is lightweight, after 5 minutes of setup, it runs smoothly onboard. By [UnitreeCpp](https://github.com/HansZ8/unitree_cpp), RoboJuDo runs on Unitree G1 without the need for an Ethernet cable.
+- **Light-Weight**: Our framework is lightweight, after 5 minutes of setup, it runs smoothly onboard. By [UnitreeCpp](https://github.com/chifongip/unitree_cpp), RoboJuDo runs on Unitree G1 without the need for an Ethernet cable.
 
 
 # 📓Content

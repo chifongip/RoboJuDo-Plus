@@ -12,7 +12,7 @@
 	ignore = dirty
 [submodule "packages/unitree_cpp"]
 	path = packages/unitree_cpp
-	url = https://github.com/HansZ8/unitree_cpp
+	url = https://github.com/chifongip/unitree_cpp.git
 	ignore = dirty
 [submodule "third_party/aimdk"]
 	path = third_party/aimdk
