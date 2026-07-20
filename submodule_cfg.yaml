@@ -27,6 +27,14 @@ aimdk:
   installer: scripts/install_aimdk.py
 
 
+# XR-based arm and dexterous-hand teleoperation
+# installs Conda and pip dependencies into the currently active Conda environment
+dex_teleop:
+  install: false
+  path: third_party/dex_teleop
+  installer: scripts/install_dex_teleop.py
+
+
 # For OmniH2O, motionlib controller
 phc:
   install: false

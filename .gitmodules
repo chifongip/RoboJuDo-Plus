@@ -17,3 +17,6 @@
 [submodule "third_party/aimdk"]
 	path = third_party/aimdk
 	url = https://github.com/chifongip/aimdk.git
+[submodule "third_party/dex_teleop"]
+	path = third_party/dex_teleop
+	url = https://github.com/wrfbreeze/dex_teleop.git
