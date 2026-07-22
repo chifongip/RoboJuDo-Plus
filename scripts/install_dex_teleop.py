@@ -76,8 +76,6 @@ def detect_current_conda_environment(conda: str) -> tuple[str, Path]:
 
 
 def main():
-    if not (DEX_TELEOP_DIR / "pyproject.toml").is_file():
-        raise RuntimeError(f"dex_teleop submodule is incomplete: {DEX_TELEOP_DIR}")
     if not REQUIREMENTS_FILE.is_file():
         raise RuntimeError(f"dex_teleop requirements file was not found: {REQUIREMENTS_FILE}")
 
