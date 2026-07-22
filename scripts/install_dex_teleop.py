@@ -84,6 +84,11 @@ def main():
     print(f"Using current Conda environment: {environment_name} ({environment_prefix})")
 
     run(
+        [sys.executable, "-m", "pip", "install", "-r", REQUIREMENTS_FILE.name],
+        cwd=DEX_TELEOP_DIR,
+    )
+    
+    run(
         [
             conda,
             "install",
@@ -96,10 +101,7 @@ def main():
         ],
         cwd=DEX_TELEOP_DIR,
     )
-    run(
-        [sys.executable, "-m", "pip", "install", "-r", REQUIREMENTS_FILE.name],
-        cwd=DEX_TELEOP_DIR,
-    )
+    
     print(f"dex_teleop installation complete in Conda environment: {environment_name}")
 
 
