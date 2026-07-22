@@ -74,13 +74,13 @@ class TestInstallDexTeleop(unittest.TestCase):
                     prefix.as_posix(),
                     "--yes",
                     "pinocchio=3.1.0",
-                    "numpy=1.26.4",
                     "--channel",
                     "conda-forge",
                 ],
                 cwd=install_dex_teleop.DEX_TELEOP_DIR,
             ),
         )
+        self.assertEqual(len(run.call_args_list), 2)
         self.assertEqual(
             run.call_args_list[1],
             call(

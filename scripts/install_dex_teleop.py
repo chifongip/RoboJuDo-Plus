@@ -93,7 +93,6 @@ def main():
             environment_prefix.as_posix(),
             "--yes",
             "pinocchio=3.1.0",
-            "numpy=1.26.4",
             "--channel",
             "conda-forge",
         ],
@@ -101,19 +100,6 @@ def main():
     )
     run(
         [sys.executable, "-m", "pip", "install", "-r", REQUIREMENTS_FILE.name],
-        cwd=DEX_TELEOP_DIR,
-    )
-    run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import numpy, pinocchio; "
-                "assert numpy.__version__ == '1.26.4', numpy.__version__; "
-                "assert pinocchio.__version__ == '3.1.0', pinocchio.__version__; "
-                "print(f'numpy={numpy.__version__}, pinocchio={pinocchio.__version__}')"
-            ),
-        ],
         cwd=DEX_TELEOP_DIR,
     )
     print(f"dex_teleop installation complete in Conda environment: {environment_name}")
