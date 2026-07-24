@@ -180,6 +180,7 @@ class Environment(ABC):
             "base_lin_acc": self.base_lin_acc,
             "base_pos": self.base_pos,
             "base_lin_vel": self.base_lin_vel,
+            # Following usually required by Beyondmimic
             "torso_pos": self.torso_pos,
             "torso_quat": self.torso_quat,
             "torso_ang_vel": self.torso_ang_vel,

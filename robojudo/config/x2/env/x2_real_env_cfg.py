@@ -23,8 +23,6 @@ class X2AimdkCfg(AgiBotEnvCfg.AimdkCfg):
 class X2RealEnvCfg(X2EnvCfg, AgiBotEnvCfg):
     env_type: str = "AgiBotCppEnv"
     aimdk: AgiBotEnvCfg.AimdkCfg = X2AimdkCfg()
-    forward_kinematic: ForwardKinematicCfg | None = None
-    update_with_fk: bool = False
 
     leg_joint_names: list[str] = X2_LEG_JOINT_NAMES
     waist_joint_names: list[str] = X2_WAIST_JOINT_NAMES
