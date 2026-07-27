@@ -108,8 +108,8 @@ script: [hugwbc_policy.py](../robojudo/policy/hugwbc_policy.py)
 
 `BeyondMimicPolicyBase` is the shared ONNX runtime for BeyondMimic-style motion tracking exports. Robot-specific
 entry points are implemented by `G1BeyondMimicPolicy` and `X2BeyondMimicPolicy`, following the same split as the
-locomanipulation policies. Joint order, default position, PD gains, action scale, observation order, and anchor body
-are loaded from ONNX metadata and validated before inference.
+locomanipulation policies. Joint order, default position, PD gains, action scale, and anchor body are loaded from ONNX
+metadata. The fixed BeyondMimic observation layout is validated against the ONNX metadata before inference.
 
 The bundled motion can be read directly from the ONNX model. G1 also supports an external `BeyondMimicCtrl` with an
 NPZ motion by setting `use_motion_from_model=False`.
@@ -137,8 +137,8 @@ python scripts/run_pipeline.py -c x2_beyondmimic
 ```
 
 The X2 presets require a `No-State-Estimation` export. The policy controls 29 joints; the two head joints remain at
-the X2 environment defaults. On real X2 hardware, motion-anchor orientation falls back to the torso IMU quaternion,
-so FK and base linear velocity are not required by this policy variant. Real presets are
+the X2 environment defaults. On real X2 hardware, FK supplies the `torso_quat` used for motion-anchor orientation;
+the no-state model does not consume a base linear-velocity observation. Real presets are
 `g1_23_beyondmimic_real` and `x2_beyondmimic_real`.
 
 ## [Policy](#policy) > [AsapPolicy](#policy--asappolicy)

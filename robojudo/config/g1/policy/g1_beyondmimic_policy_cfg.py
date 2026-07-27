@@ -90,7 +90,7 @@ class G1_23BeyondMimicDoF(G1_23DoF):
 
 
 class G1_23BeyondMimicPolicyCfg(G1BeyondMimicPolicyCfg):
-    policy_name: str = "tracking_23dof"
+    policy_name: str = "Kneel_wose_23dof"
     obs_dof: DoFConfig = G1_23BeyondMimicDoF()
     action_dof: DoFConfig = obs_dof
     # Bootstrap value; replaced by ONNX action_scale metadata at runtime.

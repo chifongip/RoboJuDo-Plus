@@ -204,6 +204,22 @@ class BeyondMimicPolicyBase(Policy):
                 f"but without_state_estimator={cfg_policy.without_state_estimator}"
             )
 
+        expected_observation_names = [
+            "command",
+            *([] if model_without_state_estimator else ["motion_anchor_pos_b"]),
+            "motion_anchor_ori_b",
+            *([] if model_without_state_estimator else ["base_lin_vel"]),
+            "base_ang_vel",
+            "joint_pos",
+            "joint_vel",
+            "actions",
+        ]
+        if self.observation_names != expected_observation_names:
+            raise ValueError(
+                f"BeyondMimic model {cfg_policy.policy_name!r} declares observation_names "
+                f"{self.observation_names}, expected {expected_observation_names}"
+            )
+
         observation_sizes = {
             "command": 2 * self.model_joint_count,
             "motion_anchor_pos_b": 3,

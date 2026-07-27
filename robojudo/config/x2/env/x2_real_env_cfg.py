@@ -1,5 +1,4 @@
 from robojudo.environment.env_cfgs import AgiBotEnvCfg
-from robojudo.tools.tool_cfgs import ForwardKinematicCfg
 
 from .x2_env_cfg import (
     X2_ARM_JOINT_NAMES,

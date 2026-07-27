@@ -84,16 +84,6 @@ class _FakeTrackingSession:
 
 
 class TestBeyondMimicCrossRobot(unittest.TestCase):
-    state_observations = [
-        "command",
-        "motion_anchor_pos_b",
-        "motion_anchor_ori_b",
-        "base_lin_vel",
-        "base_ang_vel",
-        "joint_pos",
-        "joint_vel",
-        "actions",
-    ]
     no_state_observations = [
         "command",
         "motion_anchor_ori_b",
@@ -118,7 +108,7 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
 
         self.assertEqual(g1_sim.policy.policy_type, "G1BeyondMimicPolicy")
         self.assertEqual(g1_sim.policy.obs_dof.num_dofs, 23)
-        self.assertFalse(g1_sim.policy.without_state_estimator)
+        self.assertTrue(g1_sim.policy.without_state_estimator)
         self.assertEqual(g1_real.env.env_type, "UnitreeCppEnv")
         self.assertTrue(g1_real.do_safety_check)
 
@@ -126,6 +116,7 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
         self.assertEqual(x2_sim.policy.policy_type, "X2BeyondMimicPolicy")
         self.assertEqual(x2_sim.policy.obs_dof.num_dofs, 29)
         self.assertEqual(x2_sim.env.dof.num_dofs, 31)
+        self.assertEqual(x2_sim.policy.policy_name, "Walk1_subject1_wose")
         self.assertTrue(x2_sim.policy.without_state_estimator)
         self.assertTrue(set(X2_HEAD_JOINT_NAMES).isdisjoint(x2_sim.policy.obs_dof.joint_names))
         self.assertEqual(x2_real.env.env_type, "AgiBotCppEnv")
@@ -139,12 +130,12 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
         self.assertTrue(issubclass(G1BeyondMimicPolicy, BeyondMimicPolicyBase))
         self.assertTrue(issubclass(X2BeyondMimicPolicy, BeyondMimicPolicyBase))
 
-    def test_g1_23_state_estimator_contract_and_inference(self):
+    def test_g1_23_no_state_contract_and_inference(self):
         from robojudo.config.g1.policy.g1_beyondmimic_policy_cfg import G1_23BeyondMimicPolicyCfg
         from robojudo.policy.g1_beyondmimic_policy import G1BeyondMimicPolicy
 
         cfg = G1_23BeyondMimicPolicyCfg()
-        session = _FakeTrackingSession(cfg.obs_dof.joint_names, self.state_observations)
+        session = _FakeTrackingSession(cfg.obs_dof.joint_names, self.no_state_observations)
         with patch("robojudo.policy.beyondmimic_policy.ort.InferenceSession", return_value=session):
             policy = G1BeyondMimicPolicy(cfg, "cpu")
 
@@ -161,46 +152,54 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
         obs, _ = policy.get_observation(env_data, Box({}))
         action = policy.get_action(obs)
 
-        self.assertEqual(obs.shape, (130,))
+        self.assertEqual(obs.shape, (124,))
         self.assertEqual(action.shape, (23,))
         self.assertTrue(np.isfinite(obs).all())
         policy.close_progress()
 
-    def test_x2_no_state_uses_base_quaternion_and_metadata_order(self):
+    def test_x2_no_state_uses_torso_quaternion(self):
         from robojudo.config.x2.policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
         from robojudo.policy.x2_beyondmimic_policy import X2BeyondMimicPolicy
 
         cfg = X2BeyondMimicPolicyCfg()
-        observation_names = [
-            "base_ang_vel",
-            "command",
-            "motion_anchor_ori_b",
-            "joint_pos",
-            "joint_vel",
-            "actions",
-        ]
-        session = _FakeTrackingSession(cfg.obs_dof.joint_names, observation_names)
+        session = _FakeTrackingSession(cfg.obs_dof.joint_names, self.no_state_observations)
         with patch("robojudo.policy.beyondmimic_policy.ort.InferenceSession", return_value=session):
             policy = X2BeyondMimicPolicy(cfg, "cpu")
 
         env_data = Box(
             {
                 "base_ang_vel": np.asarray([1.0, 2.0, 3.0], dtype=np.float32),
-                "base_quat": np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
                 "base_lin_vel": None,
                 "dof_pos": np.zeros(29, dtype=np.float32),
                 "dof_vel": np.zeros(29, dtype=np.float32),
                 "torso_pos": None,
-                "torso_quat": None,
+                "torso_quat": np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
             }
         )
         obs, _ = policy.get_observation(env_data, Box({}))
         action = policy.get_action(obs)
 
         self.assertEqual(obs.shape, (154,))
-        np.testing.assert_array_equal(obs[:3], env_data.base_ang_vel)
+        np.testing.assert_array_equal(obs[:58], np.zeros(58, dtype=np.float32))
         self.assertEqual(action.shape, (29,))
         policy.close_progress()
+
+    def test_rejects_noncanonical_observation_order(self):
+        from robojudo.config.x2.policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
+        from robojudo.policy.x2_beyondmimic_policy import X2BeyondMimicPolicy
+
+        cfg = X2BeyondMimicPolicyCfg()
+        session = _FakeTrackingSession(
+            cfg.obs_dof.joint_names,
+            [
+                self.no_state_observations[2],
+                *self.no_state_observations[:2],
+                *self.no_state_observations[3:],
+            ],
+        )
+        with patch("robojudo.policy.beyondmimic_policy.ort.InferenceSession", return_value=session):
+            with self.assertRaisesRegex(ValueError, "declares observation_names"):
+                X2BeyondMimicPolicy(cfg, "cpu")
 
     def test_x2_policy_wrapper_holds_head_defaults(self):
         from robojudo.config.x2.env.x2_env_cfg import X2_31DoF
@@ -217,12 +216,11 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
         env_data = Box(
             {
                 "base_ang_vel": np.zeros(3, dtype=np.float32),
-                "base_quat": np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
                 "base_lin_vel": None,
                 "dof_pos": np.asarray(env_dof.default_pos, dtype=np.float32),
                 "dof_vel": np.zeros(31, dtype=np.float32),
                 "torso_pos": None,
-                "torso_quat": None,
+                "torso_quat": np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
             }
         )
         obs, _ = wrapper.get_observation(env_data, Box({}))

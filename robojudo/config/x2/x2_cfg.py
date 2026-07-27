@@ -299,7 +299,7 @@ class x2_locomimic_beyondmimic(X2RlLocoMimicPipelineCfg):
     ]
     loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg()
     mimic_policies: list[X2BeyondMimicPolicyCfg] = [
-        X2BeyondMimicPolicyCfg(max_timestep=1800, policy_name="walk1_subject1_wo", without_state_estimator=True),
+        X2BeyondMimicPolicyCfg(max_timestep=1800, policy_name="Walk1_subject1_wose", without_state_estimator=True),
     ]
 
 @cfg_registry.register

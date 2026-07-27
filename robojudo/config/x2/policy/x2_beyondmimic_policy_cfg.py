@@ -19,19 +19,14 @@ class X2BeyondMimicDoF(X2_31DoF):
 class X2BeyondMimicPolicyCfg(BeyondMimicPolicyCfg):
     policy_type: str = "X2BeyondMimicPolicy"
     robot: str = "x2"
-    policy_name: str = "walk1_subject1"
+    policy_name: str = "Walk1_subject1_wose"
 
     obs_dof: DoFConfig = X2BeyondMimicDoF()
     action_dof: DoFConfig = obs_dof
     # Bootstrap value; replaced by ONNX action_scale metadata at runtime.
-    action_scales: list[float] = [0.75, 0.75, 1., 0.375, 0.225, 0.3,   
-                                  0.75, 0.75, 1., 0.375, 0.225, 0.3,
-                                  1.5, 0.6, 0.6, 
-                                  0.45, 0.45, 0.3, 0.3, 0.3, 0.06,
-                                  0.06, 0.45, 0.45, 0.3, 0.3, 0.3,   
-                                  0.06, 0.06]
+    action_scales: list[float] = [1.0] * 29
 
-    without_state_estimator: bool = False
+    without_state_estimator: bool = True
     override_robot_anchor_pos: bool = True
     use_modelmeta_config: bool = True
     use_motion_from_model: bool = True
