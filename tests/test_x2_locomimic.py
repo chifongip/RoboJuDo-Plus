@@ -52,6 +52,7 @@ class TestX2LocoMimic(unittest.TestCase):
         self.assertEqual(sim_cfg.upper_dof_num, 16)
         self.assertEqual(len(sim_cfg.upper_dof_pos_default), 16)
         self.assertEqual(sim_cfg.upper_dof_override_indices, list(range(-16, -2)))
+        self.assertTrue(sim_cfg.realign_on_policy_switch)
         self.assertEqual(sim_cfg.ctrl[-1].joint_names, X2_ARM_JOINT_NAMES)
         self.assertEqual(sim_cfg.ctrl[0].triggers["Back"], "[POLICY_LOCO]")
         self.assertEqual(sim_cfg.ctrl[0].triggers["Start"], "[POLICY_MIMIC]")
@@ -61,6 +62,7 @@ class TestX2LocoMimic(unittest.TestCase):
         self.assertEqual(sim_cfg.ctrl[1].triggers_extra["["], "[POLICY_MIMIC]")
         self.assertEqual(real_cfg.env.env_type, "AgiBotCppEnv")
         self.assertTrue(real_cfg.do_safety_check)
+        self.assertTrue(real_cfg.realign_on_policy_switch)
         self.assertEqual(real_cfg.ctrl[0].triggers["Back"], "[POLICY_LOCO]")
         self.assertEqual(real_cfg.ctrl[0].triggers["RB"], "[POLICY_SWITCH],NEXT")
         self.assertEqual(real_cfg.ctrl[0].triggers["LB"], "[POLICY_SWITCH],LAST")
@@ -270,6 +272,7 @@ class TestX2LocoMimic(unittest.TestCase):
             policy=SimpleNamespace(
                 post_step_callback=lambda commands: setattr(calls, "policy_post", calls.policy_post + 1)
             ),
+            warmup_policy_indices=set(),
             step=lambda env_data, ctrl_data: setattr(calls, "manager_step", calls.manager_step + 1),
         )
         pipeline.ctrl_manager = SimpleNamespace(
@@ -281,8 +284,13 @@ class TestX2LocoMimic(unittest.TestCase):
         pipeline._post_mode_step(env_data, ctrl_data, {}, np.zeros(31), rl_active=False)
         self.assertEqual((calls.policy_post, calls.manager_step, calls.ctrl_post), (0, 0, 1))
 
+        pipeline.policy_manager.warmup_policy_indices = {0, 1}
+        pipeline._post_mode_step(env_data, ctrl_data, {}, np.zeros(31), rl_active=False)
+        self.assertEqual((calls.policy_post, calls.manager_step, calls.ctrl_post), (0, 1, 2))
+
+        pipeline.policy_manager.warmup_policy_indices.clear()
         pipeline._post_mode_step(env_data, ctrl_data, {}, np.zeros(31), rl_active=True)
-        self.assertEqual((calls.policy_post, calls.manager_step, calls.ctrl_post), (1, 1, 2))
+        self.assertEqual((calls.policy_post, calls.manager_step, calls.ctrl_post), (1, 2, 3))
 
     def test_motion_done_callback_starts_return_to_loco(self):
         from robojudo.pipeline.x2_loco_mimic_pipeline import X2LocoMimicPipeline

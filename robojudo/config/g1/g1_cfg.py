@@ -365,7 +365,6 @@ class g1_beyondmimic(RlPipelineCfg):
 class g1_23_beyondmimic(RlPipelineCfg):
     """Native 23-DoF G1 motion tracking policy, Sim2Sim."""
 
-    realign_on_policy_switch: bool = True
     robot: str = "g1"
     env: G1_23MujocoEnvCfg = G1_23MujocoEnvCfg()
     ctrl: list[KeyboardCtrlCfg] = [
@@ -377,7 +376,7 @@ class g1_23_beyondmimic(RlPipelineCfg):
 @cfg_registry.register
 class g1_23_beyondmimic_real(g1_23_beyondmimic):
     """Native 23-DoF G1 motion tracking policy, Sim2Real."""
-    realign_on_policy_switch: bool = True
+
     env: G1_23RealEnvCfg = G1_23RealEnvCfg()
     ctrl: list[UnitreeCtrlCfg] = [
         UnitreeCtrlCfg()

@@ -23,6 +23,7 @@ class X2RlLocoMimicPipelineCfg(RlLocoMimicPipelineCfg):
     joint_default_dof: X2LocomanipulationEnvDoF = _X2_LOCO_MIMIC_ENV_DOF
     joint_default_duration: float = 1.5
     default_damping: float = 5.0
+    realign_on_policy_switch: bool = True
 
     # The locomanipulation policy controls the first 15 joints. Its 14 recorded
     # arm defaults and the two head defaults make up the final 16 environment DoFs.
@@ -257,7 +258,7 @@ class x2_locomimic_real(x2_locomimic):
 @cfg_registry.register
 class x2_locomimic_beyondmimic(X2RlLocoMimicPipelineCfg):
     """X2 locomanipulation locomotion with x2_rl_deploy as the test mimic, Sim2Sim."""
-    realign_on_policy_switch: bool = True
+
     env: X2MujocoEnvCfg = X2MujocoEnvCfg(
         dof=X2LocomanipulationEnvDoF(),
         sim_dt=0.005,
