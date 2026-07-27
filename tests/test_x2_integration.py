@@ -51,8 +51,8 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(real_cfg.env.aimdk.publish_dt, 0.002)
         self.assertEqual(real_cfg.env.aimdk.command_timeout, 0.1)
         self.assertEqual(real_cfg.env.aimdk.state_timeout, 0.1)
-        self.assertFalse(real_cfg.env.update_with_fk)
-        self.assertIsNone(real_cfg.env.forward_kinematic)
+        self.assertTrue(real_cfg.env.update_with_fk)
+        self.assertIsNotNone(real_cfg.env.forward_kinematic)
         self.assertEqual(sim_cfg.env.elastic_band.body_name, "torso_link")
         self.assertTrue(sim_cfg.env.elastic_band.active)
         self.assertEqual(

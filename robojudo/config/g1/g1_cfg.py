@@ -25,7 +25,10 @@ from .env.g1_mujuco_env_cfg import G1_12MujocoEnvCfg, G1_23MujocoEnvCfg, G1Mujoc
 from .env.g1_real_env_cfg import G1_23RealEnvCfg, G1RealEnvCfg, G1UnitreeCfg  # noqa: F401
 from .policy.g1_amo_policy_cfg import G1AmoPolicyCfg  # noqa: F401
 from .policy.g1_asap_policy_cfg import G1AsapLocoPolicyCfg, G1AsapPolicyCfg  # noqa: F401
-from .policy.g1_beyondmimic_policy_cfg import G1BeyondMimicPolicyCfg  # noqa: F401
+from .policy.g1_beyondmimic_policy_cfg import (  # noqa: F401
+    G1_23BeyondMimicPolicyCfg,
+    G1BeyondMimicPolicyCfg,
+)
 from .policy.g1_h2h_policy_cfg import G1H2HPolicyCfg  # noqa: F401
 from .policy.g1_kungfubot_policy_cfg import G1KungfuBotGeneralPolicyCfg, G1KungfuBotPolicyCfg  # noqa: F401
 from .policy.g1_locomanipulation_policy_cfg import (
@@ -356,6 +359,29 @@ class g1_beyondmimic(RlPipelineCfg):
         use_motion_from_model=True,  # use motion from onnx model
         max_timestep=140,
     )
+
+
+@cfg_registry.register
+class g1_23_beyondmimic(RlPipelineCfg):
+    """Native 23-DoF G1 motion tracking policy, Sim2Sim."""
+
+    robot: str = "g1"
+    env: G1_23MujocoEnvCfg = G1_23MujocoEnvCfg()
+    ctrl: list[KeyboardCtrlCfg] = [
+        KeyboardCtrlCfg()
+    ]
+    policy: G1_23BeyondMimicPolicyCfg = G1_23BeyondMimicPolicyCfg()
+
+
+@cfg_registry.register
+class g1_23_beyondmimic_real(g1_23_beyondmimic):
+    """Native 23-DoF G1 motion tracking policy, Sim2Real."""
+
+    env: G1_23RealEnvCfg = G1_23RealEnvCfg()
+    ctrl: list[UnitreeCtrlCfg] = [
+        UnitreeCtrlCfg()
+    ]
+    do_safety_check: bool = True
 
 
 @cfg_registry.register

@@ -1,6 +1,8 @@
 from robojudo.policy.policy_cfgs import BeyondMimicPolicyCfg
 from robojudo.tools.tool_cfgs import DoFConfig
 
+from ..env.g1_env_cfg import G1_23DoF
+
 
 class G1BeyondMimicDoF(DoFConfig):
     joint_names: list[str] = [
@@ -61,6 +63,7 @@ class G1BeyondMimicDoF(DoFConfig):
 
 
 class G1BeyondMimicPolicyCfg(BeyondMimicPolicyCfg):
+    policy_type: str = "G1BeyondMimicPolicy"
     robot: str = "g1"
 
     # policy_name: str = "Jump_wose"
@@ -80,3 +83,17 @@ class G1BeyondMimicPolicyCfg(BeyondMimicPolicyCfg):
         *[0.439, 0.439, 0.439, 0.439, 0.439, 0.439, 0.439, 0.439, 0.439, 0.439],
         *[0.439, 0.439, 0.439, 0.439, 0.075, 0.075, 0.075, 0.075],
     ]
+
+
+class G1_23BeyondMimicDoF(G1_23DoF):
+    """Bootstrap layout; ONNX metadata replaces its position and gain values."""
+
+
+class G1_23BeyondMimicPolicyCfg(G1BeyondMimicPolicyCfg):
+    policy_name: str = "Kneel_wose_23dof"
+    obs_dof: DoFConfig = G1_23BeyondMimicDoF()
+    action_dof: DoFConfig = obs_dof
+    # Bootstrap value; replaced by ONNX action_scale metadata at runtime.
+    action_scales: list[float] = [1.0] * 23
+    without_state_estimator: bool = True
+    override_robot_anchor_pos: bool = False

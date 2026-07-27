@@ -106,21 +106,40 @@ script: [hugwbc_policy.py](../robojudo/policy/hugwbc_policy.py)
 
 ## [Policy](#policy) > [BeyondMimicPolicy](#policy--beyondmimicpolicy)
 
-`BeyondMimicPolicy` is the policy that controls the robot using the [whole_body_tracking](https://github.com/HybridRobotics/whole_body_tracking).
+`BeyondMimicPolicyBase` is the shared ONNX runtime for BeyondMimic-style motion tracking exports. Robot-specific
+entry points are implemented by `G1BeyondMimicPolicy` and `X2BeyondMimicPolicy`, following the same split as the
+locomanipulation policies. Joint order, default position, PD gains, action scale, and anchor body are loaded from ONNX
+metadata. The fixed BeyondMimic observation layout is validated against the ONNX metadata before inference.
 
-We support both `G1FlatEnvCfg` and `G1FlatWoStateEstimationEnvCfg`. 
-For motion source, you could use the motion inside onnx policy, or use `BeyondmimicCtrl` with npz files.
+The bundled motion can be read directly from the ONNX model. G1 also supports an external `BeyondMimicCtrl` with an
+NPZ motion by setting `use_motion_from_model=False`.
 
-script: [beyondmimic_policy.py](../robojudo/policy/beyondmimic_policy.py)
+Model locations are selected by `policy_name`:
 
-[`BeyondMimicPolicyCfg`](../robojudo/policy/policy_cfgs.py): check example at [G1BeyondMimicPolicyCfg](../robojudo/config/g1/policy/g1_beyondmimic_policy_cfg.py):
- - `policy_name`: The name of the policy. We provive `Jump_wose` for test. You should put your policy in `assets/models/g1/beyondmimic`
- - `without_state_estimator`: Weather policy is `WoStateEstimation`. Default is `True`.
- - `use_modelmeta_config`: Whether to use modelmeta config. Default is `True`. If `False`, the policy will use config in your `BeyondMimicPolicyCfg`.
- - `use_motion_from_model`: Whether to use motion in the onnx model. Default is `True`. If `False`, you need to enable `BeyondMimicCtrl`.
-.
+- G1 and G1-23DoF: `assets/models/g1/beyondmimic/<policy_name>.onnx`
+- X2: `assets/models/x2/beyondmimic/<policy_name>.onnx`
 
- You can refer to `g1_beyondmimic` and `g1_beyondmimic_with_ctrl` in [g1_cfg.py](../robojudo/config/g1/g1_cfg.py) for details.
+[`BeyondMimicPolicyCfg`](../robojudo/policy/policy_cfgs.py) provides the shared options. Robot examples are in
+[g1_beyondmimic_policy_cfg.py](../robojudo/config/g1/policy/g1_beyondmimic_policy_cfg.py) and
+[x2_beyondmimic_policy_cfg.py](../robojudo/config/x2/policy/x2_beyondmimic_policy_cfg.py):
+
+- `policy_name`: model filename without `.onnx`.
+- `without_state_estimator`: must match `observation_names` in the ONNX metadata.
+- `use_modelmeta_config`: use joint parameters embedded by the mjlab exporter.
+- `use_motion_from_model`: use the reference motion embedded in the ONNX model.
+
+Run the robot-specific presets after placing the exported models at the paths above:
+
+```bash
+python scripts/run_pipeline.py -c g1_beyondmimic
+python scripts/run_pipeline.py -c g1_23_beyondmimic
+python scripts/run_pipeline.py -c x2_beyondmimic
+```
+
+The X2 presets require a `No-State-Estimation` export. The policy controls 29 joints; the two head joints remain at
+the X2 environment defaults. On real X2 hardware, FK supplies the `torso_quat` used for motion-anchor orientation;
+the no-state model does not consume a base linear-velocity observation. Real presets are
+`g1_23_beyondmimic_real` and `x2_beyondmimic_real`.
 
 ## [Policy](#policy) > [AsapPolicy](#policy--asappolicy)
 

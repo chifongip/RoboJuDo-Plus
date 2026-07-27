@@ -1,5 +1,7 @@
 from .x2_cfg import (
     x2,
+    x2_beyondmimic,
+    x2_beyondmimic_real,
     x2_locomanipulation,
     x2_locomanipulation_real,
     x2_locomimic,
@@ -9,6 +11,8 @@ from .x2_cfg import (
 
 __all__ = [
     "x2",
+    "x2_beyondmimic",
+    "x2_beyondmimic_real",
     "x2_locomanipulation",
     "x2_locomanipulation_real",
     "x2_locomimic",
