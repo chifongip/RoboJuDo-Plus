@@ -19,11 +19,11 @@ unitree_cpp:
   path: packages/unitree_cpp
 
 
-# AgiBot X2 SDK and RoboJuDo pybind backend
+# AgiBot X2 pybind backend and SDK
 # requires a sourced ROS 2 environment and an active Conda environment
 aimdk:
   install: false
-  path: third_party/aimdk
+  path: packages/aimdk_cpp
   installer: scripts/install_aimdk.py
 
 

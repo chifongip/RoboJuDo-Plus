@@ -46,9 +46,11 @@ def validate_environment():
 
 def main():
     validate_environment()
-    run(["git", "submodule", "update", "--init", "third_party/aimdk"])
+    run(["git", "submodule", "update", "--init", "third_party/aimdk", "packages/aimdk_cpp"])
     if not (AIMDK_DIR / "src" / "aimdk_msgs" / "package.xml").is_file():
         raise RuntimeError(f"AimDK submodule is incomplete: {AIMDK_DIR}")
+    if not (AIMDK_CPP_DIR / "pyproject.toml").is_file():
+        raise RuntimeError(f"AimDK C++ submodule is incomplete: {AIMDK_CPP_DIR}")
 
     run(
         [

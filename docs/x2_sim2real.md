@@ -22,10 +22,11 @@ python submodule_install.py aimdk
 source third_party/aimdk/install/setup.bash
 ```
 
-The installer builds only `aimdk_msgs`, installs the Python/CMake build tools into the active environment, and installs
-`aimdk_cpp` without PEP 517 build isolation. Source the generated AimDK setup file in every shell used for real X2
-deployment. Existing changes inside the AimDK submodule are preserved; use `python submodule_install.py --clean aimdk`
-only when you intentionally want to discard them.
+The installer initializes both the AimDK SDK and the `aimdk_cpp` backend submodules, builds only `aimdk_msgs`, installs
+the Python/CMake build tools into the active environment, and installs `aimdk_cpp` without PEP 517 build isolation.
+Source the generated AimDK setup file in every shell used for real X2 deployment. Existing changes inside the AimDK
+submodules are preserved; use `python submodule_install.py --clean aimdk` only when you intentionally want to discard
+them.
 
 Verify the native backend explicitly after installation:
 

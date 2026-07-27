@@ -20,3 +20,8 @@
 [submodule "third_party/dex_teleop"]
 	path = third_party/dex_teleop
 	url = https://github.com/wrfbreeze/dex_teleop.git
+[submodule "packages/aimdk_cpp"]
+	path = packages/aimdk_cpp
+	url = https://github.com/chifongip/aimdk_cpp.git
+	branch = main
+	ignore = dirty
