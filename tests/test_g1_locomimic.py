@@ -5,7 +5,7 @@ import numpy as np
 from box import Box
 
 
-class TestG1LocoMimic(unittest.TestCase):
+class TestG1LocomanipulationLocoMimic(unittest.TestCase):
     def test_configs_register_models_controls_and_safety(self):
         from robojudo.config.g1.g1_loco_mimic_cfg import (
             g1_23_locomanipulation_default_locomimic,
@@ -23,7 +23,7 @@ class TestG1LocoMimic(unittest.TestCase):
         ]
         for cfg, num_dofs, upper_dofs, padded, pd_gain_preset, policy_name in cases:
             with self.subTest(config=type(cfg).__name__):
-                self.assertEqual(cfg.pipeline_type, "G1LocoMimicPipeline")
+                self.assertEqual(cfg.pipeline_type, "G1LocomanipulationLocoMimicPipeline")
                 self.assertEqual(cfg.env.dof.num_dofs, num_dofs)
                 self.assertEqual(cfg.loco_policy.pd_gain_preset, pd_gain_preset)
                 self.assertEqual(cfg.loco_policy.policy_name, policy_name)
@@ -143,14 +143,21 @@ class TestG1LocoMimic(unittest.TestCase):
             PolicyWrapper(cfg, G1Locomanipulation23ObsDoF(), "cpu")
 
     def test_g1_uses_shared_transition_and_auto_return_behavior(self):
-        from robojudo.pipeline.g1_loco_mimic_pipeline import G1LocoMimicPipeline
+        from robojudo.pipeline.g1_locomanipulation_loco_mimic_pipeline import (
+            G1LocomanipulationLocoMimicPipeline,
+        )
+        from robojudo.pipeline.g1_locomanipulation_pipeline import G1FourModePipelineMixin
         from robojudo.pipeline.locomanipulation_loco_mimic_pipeline import (
             LocomanipulationLocoMimicPipelineMixin,
         )
-        from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager
+        from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager, RlLocoMimicPipeline
 
-        self.assertTrue(issubclass(G1LocoMimicPipeline, LocomanipulationLocoMimicPipelineMixin))
-        pipeline = G1LocoMimicPipeline.__new__(G1LocoMimicPipeline)
+        self.assertTrue(
+            issubclass(G1LocomanipulationLocoMimicPipeline, LocomanipulationLocoMimicPipelineMixin)
+        )
+        self.assertTrue(issubclass(G1LocomanipulationLocoMimicPipeline, G1FourModePipelineMixin))
+        self.assertTrue(issubclass(G1LocomanipulationLocoMimicPipeline, RlLocoMimicPipeline))
+        pipeline = G1LocomanipulationLocoMimicPipeline.__new__(G1LocomanipulationLocoMimicPipeline)
         manager = SimpleNamespace(
             current_policy_id=1,
             policy_loco_id=0,
@@ -169,7 +176,9 @@ class TestG1LocoMimic(unittest.TestCase):
         self.assertEqual(pipeline.policy_locomotion_mimic_flag, 0)
 
     def test_transition_frame_visualizes_with_the_policy_that_created_extras(self):
-        from robojudo.pipeline.g1_loco_mimic_pipeline import G1LocoMimicPipeline
+        from robojudo.pipeline.g1_locomanipulation_loco_mimic_pipeline import (
+            G1LocomanipulationLocoMimicPipeline,
+        )
 
         calls = []
         old_policy = SimpleNamespace(
@@ -186,7 +195,7 @@ class TestG1LocoMimic(unittest.TestCase):
             def step(self, env_data, ctrl_data):
                 self.policy = new_policy
 
-        pipeline = G1LocoMimicPipeline.__new__(G1LocoMimicPipeline)
+        pipeline = G1LocomanipulationLocoMimicPipeline.__new__(G1LocomanipulationLocoMimicPipeline)
         pipeline.timestep = 0
         pipeline.cfg = SimpleNamespace(debug=SimpleNamespace(log_obs=False))
         pipeline.visualizer = object()

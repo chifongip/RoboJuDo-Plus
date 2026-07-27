@@ -1,38 +1,17 @@
 from robojudo.config import cfg_registry
 from robojudo.controller.ctrl_cfgs import JoystickCtrlCfg, KeyboardCtrlCfg, UpperBodyZmqCtrlCfg
-from robojudo.pipeline.pipeline_cfgs import RlLocoMimicPipelineCfg, RlPipelineCfg
+from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 
 from .env.x2_env_cfg import X2_ARM_JOINT_NAMES, X2JointDefaultDoF
 from .env.x2_mujuco_env_cfg import X2MujocoEnvCfg
 from .env.x2_real_env_cfg import X2RealEnvCfg
+from .pipeline.x2_loco_mimic_pipeline_cfg import X2LocomanipulationLocoMimicPipelineCfg
 from .policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
 from .policy.x2_deploy_policy_cfg import X2DeployPolicyCfg
 from .policy.x2_locomanipulation_policy_cfg import (
     X2LocomanipulationEnvDoF,
     X2LocomanipulationPolicyCfg,
 )
-
-_X2_LOCO_MIMIC_ENV_DOF = X2LocomanipulationEnvDoF()
-
-
-class X2RlLocoMimicPipelineCfg(RlLocoMimicPipelineCfg):
-    """X2 loco-mimic configuration with the standard X2 deployment modes."""
-
-    robot: str = "x2"
-    pipeline_type: str = "X2LocoMimicPipeline"
-    joint_default_dof: X2LocomanipulationEnvDoF = _X2_LOCO_MIMIC_ENV_DOF
-    joint_default_duration: float = 1.5
-    default_damping: float = 5.0
-    realign_on_policy_switch: bool = True
-
-    # The locomanipulation policy controls the first 15 joints. Its 14 recorded
-    # arm defaults and the two head defaults make up the final 16 environment DoFs.
-    upper_dof_num: int = 16
-    upper_dof_pos_default: list[float] = _X2_LOCO_MIMIC_ENV_DOF.default_pos[-upper_dof_num:]
-    upper_dof_override_indices: list[int] = [
-        _X2_LOCO_MIMIC_ENV_DOF.joint_names.index(name) - _X2_LOCO_MIMIC_ENV_DOF.num_dofs
-        for name in X2_ARM_JOINT_NAMES
-    ]
 
 
 @cfg_registry.register
@@ -43,7 +22,7 @@ class x2(RlPipelineCfg):
     """
 
     robot: str = "x2"
-    pipeline_type: str = "X2DeployPipeline"
+    pipeline_type: str = "X2LocomanipulationPipeline"
     env: X2MujocoEnvCfg = X2MujocoEnvCfg()
     ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [
         JoystickCtrlCfg(
@@ -182,7 +161,7 @@ class x2_locomanipulation_real(x2_locomanipulation):
 
 
 @cfg_registry.register
-class x2_locomimic(X2RlLocoMimicPipelineCfg):
+class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
     """X2 locomanipulation locomotion with x2_rl_deploy as the test mimic, Sim2Sim."""
 
     env: X2MujocoEnvCfg = X2MujocoEnvCfg(
@@ -256,7 +235,7 @@ class x2_locomimic_real(x2_locomimic):
     do_safety_check: bool = True
 
 @cfg_registry.register
-class x2_locomimic_beyondmimic(X2RlLocoMimicPipelineCfg):
+class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
     """X2 locomanipulation locomotion with x2_rl_deploy as the test mimic, Sim2Sim."""
 
     env: X2MujocoEnvCfg = X2MujocoEnvCfg(

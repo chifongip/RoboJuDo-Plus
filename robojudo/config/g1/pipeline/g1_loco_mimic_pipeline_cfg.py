@@ -32,7 +32,7 @@ class G1LocomanipulationLocoMimicPipelineCfg(RlLocoMimicPipelineCfg):
     """Shared G1 Locomanipulation loco-mimic deployment settings."""
 
     robot: str = "g1"
-    pipeline_type: str = "G1LocoMimicPipeline"
+    pipeline_type: str = "G1LocomanipulationLocoMimicPipeline"
     joint_default_duration: float = 1.5
     default_damping: float = 5.0
     realign_on_policy_switch: bool = True

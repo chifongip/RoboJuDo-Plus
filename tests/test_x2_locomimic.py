@@ -26,15 +26,35 @@ class FakePolicyEnv:
         self.control_joint_names = list(joint_names)
 
 
-class TestX2LocoMimic(unittest.TestCase):
+class TestX2LocomanipulationLocoMimic(unittest.TestCase):
+    def test_pipeline_composes_locomanipulation_loco_mimic_and_four_mode_behavior(self):
+        from robojudo.pipeline.locomanipulation_loco_mimic_pipeline import (
+            LocomanipulationLocoMimicPipelineMixin,
+        )
+        from robojudo.pipeline.rl_loco_mimic_pipeline import RlLocoMimicPipeline
+        from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import (
+            X2LocomanipulationLocoMimicPipeline,
+        )
+        from robojudo.pipeline.x2_locomanipulation_pipeline import X2FourModePipelineMixin
+
+        self.assertTrue(
+            issubclass(X2LocomanipulationLocoMimicPipeline, LocomanipulationLocoMimicPipelineMixin)
+        )
+        self.assertTrue(issubclass(X2LocomanipulationLocoMimicPipeline, X2FourModePipelineMixin))
+        self.assertTrue(issubclass(X2LocomanipulationLocoMimicPipeline, RlLocoMimicPipeline))
+
     def test_configs_register_expected_policies_and_controls(self):
         from robojudo.config.x2 import x2_locomimic, x2_locomimic_real
         from robojudo.config.x2.env.x2_env_cfg import X2_ARM_JOINT_NAMES
+        from robojudo.config.x2.pipeline.x2_loco_mimic_pipeline_cfg import (
+            X2LocomanipulationLocoMimicPipelineCfg,
+        )
 
         sim_cfg = x2_locomimic()
         real_cfg = x2_locomimic_real()
 
-        self.assertEqual(sim_cfg.pipeline_type, "X2LocoMimicPipeline")
+        self.assertIsInstance(sim_cfg, X2LocomanipulationLocoMimicPipelineCfg)
+        self.assertEqual(sim_cfg.pipeline_type, "X2LocomanipulationLocoMimicPipeline")
         self.assertEqual(sim_cfg.env.env_type, "MujocoEnv")
         self.assertEqual(sim_cfg.env.sim_dt, 0.005)
         self.assertEqual(sim_cfg.env.sim_decimation, 4)
@@ -137,9 +157,11 @@ class TestX2LocoMimic(unittest.TestCase):
 
     def test_zmq_is_available_only_for_idle_loco_and_disables_on_mimic(self):
         from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager
-        from robojudo.pipeline.x2_loco_mimic_pipeline import X2LocoMimicPipeline
+        from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import (
+            X2LocomanipulationLocoMimicPipeline,
+        )
 
-        pipeline = X2LocoMimicPipeline.__new__(X2LocoMimicPipeline)
+        pipeline = X2LocomanipulationLocoMimicPipeline.__new__(X2LocomanipulationLocoMimicPipeline)
         manager = SimpleNamespace(
             current_policy_id=0,
             policy_loco_id=0,
@@ -164,9 +186,11 @@ class TestX2LocoMimic(unittest.TestCase):
 
     def test_zmq_filter_syncs_to_loco_target_after_mimic(self):
         from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager
-        from robojudo.pipeline.x2_loco_mimic_pipeline import X2LocoMimicPipeline
+        from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import (
+            X2LocomanipulationLocoMimicPipeline,
+        )
 
-        pipeline = X2LocoMimicPipeline.__new__(X2LocoMimicPipeline)
+        pipeline = X2LocomanipulationLocoMimicPipeline.__new__(X2LocomanipulationLocoMimicPipeline)
         manager = SimpleNamespace(
             current_policy_id=1,
             policy_loco_id=0,
@@ -209,9 +233,11 @@ class TestX2LocoMimic(unittest.TestCase):
 
     def test_disabling_zmq_during_loco_keeps_smooth_return_to_default(self):
         from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager
-        from robojudo.pipeline.x2_loco_mimic_pipeline import X2LocoMimicPipeline
+        from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import (
+            X2LocomanipulationLocoMimicPipeline,
+        )
 
-        pipeline = X2LocoMimicPipeline.__new__(X2LocoMimicPipeline)
+        pipeline = X2LocomanipulationLocoMimicPipeline.__new__(X2LocomanipulationLocoMimicPipeline)
         pipeline.policy_manager = SimpleNamespace(
             current_policy_id=0,
             policy_loco_id=0,
@@ -235,9 +261,11 @@ class TestX2LocoMimic(unittest.TestCase):
         self.assertTrue(pipeline._upper_body_override_was_available)
 
     def test_leaving_rl_resets_loco_and_cancels_policy_state(self):
-        from robojudo.pipeline.x2_loco_mimic_pipeline import X2LocoMimicPipeline
+        from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import (
+            X2LocomanipulationLocoMimicPipeline,
+        )
 
-        pipeline = X2LocoMimicPipeline.__new__(X2LocoMimicPipeline)
+        pipeline = X2LocomanipulationLocoMimicPipeline.__new__(X2LocomanipulationLocoMimicPipeline)
         progress = SimpleNamespace(close_calls=0)
         manager = SimpleNamespace(
             reset_to_loco_calls=[],
@@ -261,9 +289,11 @@ class TestX2LocoMimic(unittest.TestCase):
         self.assertFalse(pipeline._upper_body_override_was_available)
 
     def test_policy_time_and_switch_timer_advance_only_in_rl(self):
-        from robojudo.pipeline.x2_loco_mimic_pipeline import X2LocoMimicPipeline
+        from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import (
+            X2LocomanipulationLocoMimicPipeline,
+        )
 
-        pipeline = X2LocoMimicPipeline.__new__(X2LocoMimicPipeline)
+        pipeline = X2LocomanipulationLocoMimicPipeline.__new__(X2LocomanipulationLocoMimicPipeline)
         calls = SimpleNamespace(policy_post=0, manager_step=0, ctrl_post=0)
         pipeline.timestep = 0
         pipeline.cfg = SimpleNamespace(debug=SimpleNamespace(log_obs=False))
@@ -293,9 +323,11 @@ class TestX2LocoMimic(unittest.TestCase):
         self.assertEqual((calls.policy_post, calls.manager_step, calls.ctrl_post), (1, 2, 3))
 
     def test_motion_done_callback_starts_return_to_loco(self):
-        from robojudo.pipeline.x2_loco_mimic_pipeline import X2LocoMimicPipeline
+        from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import (
+            X2LocomanipulationLocoMimicPipeline,
+        )
 
-        pipeline = X2LocoMimicPipeline.__new__(X2LocoMimicPipeline)
+        pipeline = X2LocomanipulationLocoMimicPipeline.__new__(X2LocomanipulationLocoMimicPipeline)
         manager = SimpleNamespace(return_requested=False)
         manager.switch_to_loco = lambda: (setattr(manager, "return_requested", True), True)[1]
         pipeline.policy_manager = manager

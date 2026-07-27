@@ -396,7 +396,8 @@ class TestG1Locomanipulation(unittest.TestCase):
         np.testing.assert_array_equal(result[:13], target[:13])
 
     def test_four_mode_sequence_and_upper_body_synchronization(self):
-        from robojudo.pipeline.g1_locomanipulation_pipeline import G1ControlMode, G1LocomanipulationPipeline
+        from robojudo.pipeline.four_mode_pipeline import ControlMode
+        from robojudo.pipeline.g1_locomanipulation_pipeline import G1LocomanipulationPipeline
 
         class FakeEnv:
             def __init__(self):
@@ -431,7 +432,7 @@ class TestG1Locomanipulation(unittest.TestCase):
 
         pipeline = G1LocomanipulationPipeline.__new__(G1LocomanipulationPipeline)
         pipeline._mode_robot_name = "G1"
-        pipeline.mode = G1ControlMode.PASSIVE_DEFAULT
+        pipeline.mode = ControlMode.PASSIVE_DEFAULT
         pipeline.env = FakeEnv()
         pipeline.policy = FakePolicy()
         pipeline._joint_default_start = None
@@ -449,8 +450,8 @@ class TestG1Locomanipulation(unittest.TestCase):
         pipeline._upper_body_indices = np.asarray([1], dtype=np.int32)
         pipeline._upper_body_filtered = np.asarray([-1.0], dtype=np.float32)
 
-        self.assertFalse(pipeline._enter_mode(G1ControlMode.RL_DEFAULT))
-        self.assertTrue(pipeline._enter_mode(G1ControlMode.JOINT_DEFAULT))
+        self.assertFalse(pipeline._enter_mode(ControlMode.RL_DEFAULT))
+        self.assertTrue(pipeline._enter_mode(ControlMode.JOINT_DEFAULT))
         self.assertEqual(pipeline.env.control_joint_names, pipeline.env.joint_names)
         self.assertTrue(pipeline.env.position_armed)
         for _ in range(3):
@@ -458,7 +459,7 @@ class TestG1Locomanipulation(unittest.TestCase):
         np.testing.assert_allclose(pipeline.env.targets[-1], pipeline._joint_default_target)
         self.assertTrue(pipeline._joint_default_complete)
 
-        self.assertTrue(pipeline._enter_mode(G1ControlMode.RL_DEFAULT))
+        self.assertTrue(pipeline._enter_mode(ControlMode.RL_DEFAULT))
         self.assertEqual(pipeline.policy.reset_count, 1)
         np.testing.assert_array_equal(pipeline.env.stiffness, pipeline._rl_stiffness)
         np.testing.assert_array_equal(pipeline.env.damping, pipeline._rl_damping)
@@ -466,7 +467,7 @@ class TestG1Locomanipulation(unittest.TestCase):
         self.assertFalse(pipeline._upper_body_stream_was_fresh)
 
         pipeline._upper_body_enabled = True
-        pipeline._enter_mode(G1ControlMode.DAMPING_DEFAULT)
+        pipeline._enter_mode(ControlMode.DAMPING_DEFAULT)
         self.assertFalse(pipeline._upper_body_enabled)
         self.assertFalse(pipeline._joint_default_complete)
         self.assertFalse(pipeline.env.elastic_band.active)
@@ -474,24 +475,26 @@ class TestG1Locomanipulation(unittest.TestCase):
 
     def test_upper_body_toggle_requires_g1_rl_mode(self):
         from robojudo.config.g1.g1_cfg import g1_23_locomanipulation_stiff
-        from robojudo.pipeline.g1_locomanipulation_pipeline import G1ControlMode, G1LocomanipulationPipeline
+        from robojudo.pipeline.four_mode_pipeline import ControlMode
+        from robojudo.pipeline.g1_locomanipulation_pipeline import G1LocomanipulationPipeline
 
         pipeline = G1LocomanipulationPipeline.__new__(G1LocomanipulationPipeline)
         pipeline._upper_body_cfg = g1_23_locomanipulation_stiff().ctrl[-1]
         pipeline._upper_body_enabled = False
         pipeline._upper_body_stream_was_fresh = False
-        pipeline.mode = G1ControlMode.JOINT_DEFAULT
+        pipeline.mode = ControlMode.JOINT_DEFAULT
         pipeline._toggle_upper_body()
         self.assertFalse(pipeline._upper_body_enabled)
 
-        pipeline.mode = G1ControlMode.RL_DEFAULT
+        pipeline.mode = ControlMode.RL_DEFAULT
         pipeline._toggle_upper_body()
         self.assertTrue(pipeline._upper_body_enabled)
         pipeline._toggle_upper_body()
         self.assertFalse(pipeline._upper_body_enabled)
 
     def test_reborn_and_shutdown_return_to_safe_modes(self):
-        from robojudo.pipeline.g1_locomanipulation_pipeline import G1ControlMode, G1LocomanipulationPipeline
+        from robojudo.pipeline.four_mode_pipeline import ControlMode
+        from robojudo.pipeline.g1_locomanipulation_pipeline import G1LocomanipulationPipeline
 
         class FakeEnv:
             def __init__(self):
@@ -517,7 +520,7 @@ class TestG1Locomanipulation(unittest.TestCase):
 
         pipeline = G1LocomanipulationPipeline.__new__(G1LocomanipulationPipeline)
         pipeline._mode_robot_name = "G1"
-        pipeline.mode = G1ControlMode.RL_DEFAULT
+        pipeline.mode = ControlMode.RL_DEFAULT
         pipeline.env = FakeEnv()
         pipeline.policy = FakePolicy()
         pipeline._default_damping = 5.0
@@ -532,12 +535,12 @@ class TestG1Locomanipulation(unittest.TestCase):
         pipeline._process_commands(["[SIM_REBORN]"])
         self.assertEqual(pipeline.env.reborn_count, 1)
         self.assertEqual(pipeline.policy.reset_count, 1)
-        self.assertEqual(pipeline.mode, G1ControlMode.PASSIVE_DEFAULT)
+        self.assertEqual(pipeline.mode, ControlMode.PASSIVE_DEFAULT)
         self.assertFalse(pipeline._upper_body_enabled)
         self.assertFalse(pipeline._joint_default_complete)
 
         pipeline._process_commands(["[SHUTDOWN]"])
-        self.assertEqual(pipeline.mode, G1ControlMode.DAMPING_DEFAULT)
+        self.assertEqual(pipeline.mode, ControlMode.DAMPING_DEFAULT)
         self.assertEqual(pipeline.env.damping_commands, [5.0])
         self.assertEqual(pipeline.env.shutdown_count, 1)
         self.assertTrue(pipeline.should_exit)
@@ -551,14 +554,12 @@ class TestG1Locomanipulation(unittest.TestCase):
         self.assertTrue(issubclass(X2LocomanipulationPolicy, LocomanipulationPolicyBase))
 
     def test_x2_and_g1_use_shared_control_modes(self):
-        from robojudo.pipeline.four_mode_pipeline import ControlMode, FourModePipelineMixin
-        from robojudo.pipeline.g1_locomanipulation_pipeline import G1ControlMode, G1ModePipelineMixin
-        from robojudo.pipeline.x2_deploy_pipeline import X2ControlMode, X2ModePipelineMixin
+        from robojudo.pipeline.four_mode_pipeline import FourModePipelineMixin
+        from robojudo.pipeline.g1_locomanipulation_pipeline import G1FourModePipelineMixin
+        from robojudo.pipeline.x2_locomanipulation_pipeline import X2FourModePipelineMixin
 
-        self.assertIs(G1ControlMode, ControlMode)
-        self.assertIs(X2ControlMode, ControlMode)
-        self.assertTrue(issubclass(G1ModePipelineMixin, FourModePipelineMixin))
-        self.assertTrue(issubclass(X2ModePipelineMixin, FourModePipelineMixin))
+        self.assertTrue(issubclass(G1FourModePipelineMixin, FourModePipelineMixin))
+        self.assertTrue(issubclass(X2FourModePipelineMixin, FourModePipelineMixin))
 
 
 if __name__ == "__main__":

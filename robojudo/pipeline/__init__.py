@@ -27,7 +27,13 @@ def __getattr__(name: str) -> type[Pipeline]:
 pipeline_registry.add("RlPipeline", ".rl_pipeline")
 pipeline_registry.add("RlMultiPolicyPipeline", ".rl_multi_policy_pipeline")
 pipeline_registry.add("RlLocoMimicPipeline", ".rl_loco_mimic_pipeline")
-pipeline_registry.add("X2DeployPipeline", ".x2_deploy_pipeline")
-pipeline_registry.add("X2LocoMimicPipeline", ".x2_loco_mimic_pipeline")
+pipeline_registry.add("X2LocomanipulationPipeline", ".x2_locomanipulation_pipeline")
+pipeline_registry.add(
+    "X2LocomanipulationLocoMimicPipeline",
+    ".x2_locomanipulation_loco_mimic_pipeline",
+)
 pipeline_registry.add("G1LocomanipulationPipeline", ".g1_locomanipulation_pipeline")
-pipeline_registry.add("G1LocoMimicPipeline", ".g1_loco_mimic_pipeline")
+pipeline_registry.add(
+    "G1LocomanipulationLocoMimicPipeline",
+    ".g1_locomanipulation_loco_mimic_pipeline",
+)
