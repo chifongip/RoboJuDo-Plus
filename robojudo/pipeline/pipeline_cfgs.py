@@ -6,6 +6,7 @@ from robojudo.config import Config
 from robojudo.controller import CtrlCfg
 from robojudo.environment import EnvCfg
 from robojudo.policy import PolicyCfg
+from robojudo.recording.record_cfgs import RecordCfg
 from robojudo.tools.debug_log import DebugCfg
 
 
@@ -15,6 +16,7 @@ class PipelineCfg(Config):
     device: str = "cpu"
 
     debug: DebugCfg = DebugCfg()
+    record: RecordCfg = RecordCfg()
 
     run_fullspeed: bool = False
     """If True, run the pipeline at full speed, ignoring the desired frequency"""

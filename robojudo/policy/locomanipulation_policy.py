@@ -220,7 +220,7 @@ class LocomanipulationPolicyBase(Policy):
             )
         if not np.isfinite(obs).all():
             raise FloatingPointError(f"{self._model_label} observation contains non-finite values")
-        return obs, {}
+        return obs, {"locomotion_command": commands.copy()}
 
     def get_action(self, obs: np.ndarray) -> np.ndarray:
         model_obs = np.asarray(obs, dtype=np.float32).reshape(1, -1)

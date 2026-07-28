@@ -1,8 +1,10 @@
 import logging
+import time
 
 import numpy as np
 
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
+from robojudo.recording import RecorderClient
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +22,13 @@ class UpperBodyZmqPipelineMixin:
         self._upper_body_indices = np.asarray([], dtype=np.int32)
         self._upper_body_default = np.asarray([], dtype=np.float32)
         self._upper_body_filtered = np.asarray([], dtype=np.float32)
+        self._recorder_client = None
         super().__init__(cfg=cfg)
         self._configure_upper_body_override()
+        if cfg.record.enabled:
+            if self._upper_body_cfg is None:
+                raise ValueError("recording requires an UpperBodyZmqCtrl configuration")
+            self._recorder_client = RecorderClient(cfg.record, robot_type=cfg.robot)
 
     def reset(self):
         self._upper_body_enabled = False
@@ -109,3 +116,33 @@ class UpperBodyZmqPipelineMixin:
         target = np.asarray(pd_target, dtype=np.float32).copy()
         target[self._upper_body_indices] = self._upper_body_filtered
         return target
+
+    def _record_upper_body_sample(self, env_data, extras, pd_target, *, rl_active: bool):
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is None:
+            return
+
+        can_record = rl_active and self._upper_body_enabled and self._upper_body_control_available()
+        if not can_record:
+            recorder_client.finish_episode(save=True)
+            return
+        if not self._upper_body_stream_was_fresh:
+            return
+
+        locomotion_command = extras.get("locomotion_command")
+        if locomotion_command is None or len(locomotion_command) < 4:
+            logger.warning("Skipped recording frame without a velocity/height command")
+            return
+        recorder_client.submit(
+            joint_names=list(self._upper_body_cfg.joint_names),
+            joint_positions=np.asarray(env_data.dof_pos, dtype=np.float32)[self._upper_body_indices],
+            joint_position_commands=np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices],
+            velocity_height_command=np.asarray(locomotion_command, dtype=np.float32)[:4],
+            timestamp_ns=time.monotonic_ns(),
+        )
+
+    def close_recording(self):
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is not None:
+            recorder_client.close()
+            self._recorder_client = None
