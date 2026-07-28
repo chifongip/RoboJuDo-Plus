@@ -23,6 +23,8 @@ class UpperBodyZmqPipelineMixin:
         self._upper_body_default = np.asarray([], dtype=np.float32)
         self._upper_body_filtered = np.asarray([], dtype=np.float32)
         self._recorder_client = None
+        self._recording_active = False
+        self._recording_paused = False
         super().__init__(cfg=cfg)
         self._configure_upper_body_override()
         if cfg.record.enabled:
@@ -31,6 +33,11 @@ class UpperBodyZmqPipelineMixin:
             self._recorder_client = RecorderClient(cfg.record, robot_type=cfg.robot)
 
     def reset(self):
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is not None and getattr(self, "_recording_active", False):
+            recorder_client.finish_episode(save=True)
+        self._recording_active = False
+        self._recording_paused = False
         self._upper_body_enabled = False
         self._upper_body_stream_was_fresh = False
         super().reset()
@@ -122,11 +129,14 @@ class UpperBodyZmqPipelineMixin:
         if recorder_client is None:
             return
 
+        if not self._recording_active:
+            return
+
         can_record = rl_active and self._upper_body_enabled and self._upper_body_control_available()
         if not can_record:
-            recorder_client.finish_episode(save=True)
+            self._finish_recording_episode()
             return
-        if not self._upper_body_stream_was_fresh:
+        if self._recording_paused or not self._upper_body_stream_was_fresh:
             return
 
         locomotion_command = extras.get("locomotion_command")
@@ -141,8 +151,41 @@ class UpperBodyZmqPipelineMixin:
             timestamp_ns=time.monotonic_ns(),
         )
 
+    def _toggle_recording_episode(self):
+        if getattr(self, "_recorder_client", None) is None:
+            logger.warning("Ignored record command: recorder is not enabled")
+            return
+        if self._recording_active:
+            self._finish_recording_episode()
+            return
+        if not self._upper_body_enabled:
+            logger.warning("Ignored record start: upper-body control is not enabled")
+            return
+        if not self._upper_body_enable_available():
+            return
+        self._recording_active = True
+        self._recording_paused = False
+        logger.warning("Recording started; waiting for a fresh upper-body sample")
+
+    def _toggle_recording_pause(self):
+        if not getattr(self, "_recording_active", False):
+            logger.warning("Ignored record pause/resume: no recording is active")
+            return
+        self._recording_paused = not self._recording_paused
+        logger.warning("Recording %s", "paused" if self._recording_paused else "resumed")
+
+    def _finish_recording_episode(self):
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is not None:
+            recorder_client.finish_episode(save=True)
+        self._recording_active = False
+        self._recording_paused = False
+        logger.warning("Recording stopped and episode saved")
+
     def close_recording(self):
         recorder_client = getattr(self, "_recorder_client", None)
         if recorder_client is not None:
+            self._recording_active = False
+            self._recording_paused = False
             recorder_client.close()
             self._recorder_client = None

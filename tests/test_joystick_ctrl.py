@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 
 class TestJoystickCtrl(unittest.TestCase):
@@ -60,6 +61,21 @@ class TestJoystickCtrl(unittest.TestCase):
         self.assertNotIn(self._button("A", True), ctrl_data["button_event"])
         self.assertEqual(controller.onhold_buttons, set())
         self.assertEqual(controller.used_combination_buttons, set())
+
+    def test_recording_combinations_are_installed_for_standard_joystick(self):
+        controller = self._controller()
+        controller.cfg_ctrl = SimpleNamespace(ctrl_type="JoystickCtrl")
+        controller._install_recording_triggers()
+        self.assertEqual(controller.triggers["LB+RB+Start"], "[RECORD_START_STOP]")
+        self.assertEqual(controller.triggers["LB+RB+Back"], "[RECORD_PAUSE_RESUME]")
+
+    def test_recording_combinations_are_installed_for_unitree_remote(self):
+        controller = self._controller()
+        controller.combination_init_buttons = ["L1", "R1"]
+        controller.cfg_ctrl = SimpleNamespace(ctrl_type="UnitreeCtrl")
+        controller._install_recording_triggers()
+        self.assertEqual(controller.triggers["L1+R1+Start"], "[RECORD_START_STOP]")
+        self.assertEqual(controller.triggers["L1+R1+Select"], "[RECORD_PAUSE_RESUME]")
 
 
 if __name__ == "__main__":
