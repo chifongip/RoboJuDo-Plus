@@ -3,8 +3,8 @@ from robojudo.pipeline.four_mode_pipeline import FourModePipelineMixin
 from robojudo.pipeline.rl_pipeline import RlPipeline
 
 
-class G1FourModePipelineMixin(FourModePipelineMixin):
-    """G1 extension point for four-mode control and its upper-body ZMQ support.
+class X2FourModePipelineMixin(FourModePipelineMixin):
+    """X2 extension point for four-mode control and its upper-body ZMQ support.
 
     Inherited capabilities:
     - ``FourModePipelineMixin``: PASSIVE, DAMPING, JOINT, and RL mode control.
@@ -13,14 +13,14 @@ class G1FourModePipelineMixin(FourModePipelineMixin):
 
 
 @pipeline_registry.register
-class G1LocomanipulationPipeline(G1FourModePipelineMixin, RlPipeline):
-    """Compose the G1 Locomanipulation, four-mode, and upper-body ZMQ pipeline.
+class X2LocomanipulationPipeline(X2FourModePipelineMixin, RlPipeline):
+    """Compose the X2 Locomanipulation, four-mode, and upper-body ZMQ pipeline.
 
     Inherited capabilities:
     - ``RlPipeline``: single-policy Locomanipulation inference and environment loop.
-    - ``G1FourModePipelineMixin``: G1 four-mode deployment control.
+    - ``X2FourModePipelineMixin``: X2 four-mode deployment control.
     - ``UpperBodyZmqPipelineMixin`` (transitive): optional upper-body ZMQ override.
     """
 
 
-__all__ = ["G1FourModePipelineMixin", "G1LocomanipulationPipeline"]
+__all__ = ["X2FourModePipelineMixin", "X2LocomanipulationPipeline"]

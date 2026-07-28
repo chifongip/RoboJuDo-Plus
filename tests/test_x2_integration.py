@@ -40,7 +40,7 @@ class TestX2Integration(unittest.TestCase):
         real_cfg = x2_real()
 
         self.assertEqual(sim_cfg.robot, "x2")
-        self.assertEqual(sim_cfg.pipeline_type, "X2DeployPipeline")
+        self.assertEqual(sim_cfg.pipeline_type, "X2LocomanipulationPipeline")
         self.assertEqual(sim_cfg.env.dof.num_dofs, 31)
         self.assertEqual(sim_cfg.policy.action_dof.num_dofs, 29)
         self.assertEqual(sim_cfg.policy.num_obs, 151)
@@ -84,7 +84,8 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(values["head_yaw_joint"], (0.0, 20.0, 1.0))
 
     def test_x2_mode_requires_completed_joint_default_before_rl(self):
-        from robojudo.pipeline.x2_deploy_pipeline import X2ControlMode, X2DeployPipeline
+        from robojudo.pipeline.four_mode_pipeline import ControlMode
+        from robojudo.pipeline.x2_locomanipulation_pipeline import X2LocomanipulationPipeline
 
         class FakeEnv:
             def __init__(self):
@@ -121,8 +122,8 @@ class TestX2Integration(unittest.TestCase):
             def set_default_pose_mode(self, enabled):
                 self.default_pose_mode = enabled
 
-        pipeline = X2DeployPipeline.__new__(X2DeployPipeline)
-        pipeline.mode = X2ControlMode.PASSIVE_DEFAULT
+        pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
+        pipeline.mode = ControlMode.PASSIVE_DEFAULT
         pipeline.env = FakeEnv()
         pipeline.policy = FakePolicy()
         pipeline._joint_default_start = None
@@ -135,8 +136,8 @@ class TestX2Integration(unittest.TestCase):
         pipeline._rl_stiffness = np.array([120.0, 20.0], dtype=np.float32)
         pipeline._rl_damping = np.array([5.0, 2.0], dtype=np.float32)
 
-        self.assertFalse(pipeline._enter_mode(X2ControlMode.RL_DEFAULT))
-        self.assertTrue(pipeline._enter_mode(X2ControlMode.JOINT_DEFAULT))
+        self.assertFalse(pipeline._enter_mode(ControlMode.RL_DEFAULT))
+        self.assertTrue(pipeline._enter_mode(ControlMode.JOINT_DEFAULT))
         self.assertEqual(pipeline.env.control_joint_names, ["joint_a", "joint_b"])
         self.assertTrue(pipeline.env.position_armed)
         for _ in range(3):
@@ -144,16 +145,17 @@ class TestX2Integration(unittest.TestCase):
         np.testing.assert_allclose(pipeline.env.targets[-1], pipeline._joint_default_target)
         self.assertTrue(pipeline._joint_default_complete)
 
-        self.assertTrue(pipeline._enter_mode(X2ControlMode.RL_DEFAULT))
+        self.assertTrue(pipeline._enter_mode(ControlMode.RL_DEFAULT))
         self.assertEqual(pipeline.env.control_joint_names, ["joint_a", "joint_b"])
         self.assertEqual(pipeline.policy.reset_count, 1)
         self.assertFalse(pipeline.policy.default_pose_mode)
 
-        pipeline._enter_mode(X2ControlMode.DAMPING_DEFAULT)
+        pipeline._enter_mode(ControlMode.DAMPING_DEFAULT)
         self.assertFalse(pipeline._joint_default_complete)
 
     def test_four_mode_dry_run_infers_while_passive_without_robot_commands(self):
-        from robojudo.pipeline.x2_deploy_pipeline import X2ControlMode, X2DeployPipeline
+        from robojudo.pipeline.four_mode_pipeline import ControlMode
+        from robojudo.pipeline.x2_locomanipulation_pipeline import X2LocomanipulationPipeline
 
         calls = []
 
@@ -175,8 +177,8 @@ class TestX2Integration(unittest.TestCase):
             def step(self, target):
                 calls.append(("step", target))
 
-        pipeline = X2DeployPipeline.__new__(X2DeployPipeline)
-        pipeline.mode = X2ControlMode.PASSIVE_DEFAULT
+        pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
+        pipeline.mode = ControlMode.PASSIVE_DEFAULT
         pipeline.env = FakeEnv()
         pipeline.ctrl_manager = SimpleNamespace(
             get_ctrl_data=lambda env_data: Box({"COMMANDS": []}),
@@ -200,10 +202,11 @@ class TestX2Integration(unittest.TestCase):
         self.assertFalse(any(isinstance(call, tuple) and call[0] in {"damping", "step"} for call in calls))
 
     def test_four_mode_dry_run_propagates_inference_errors_without_forcing_damping(self):
-        from robojudo.pipeline.x2_deploy_pipeline import X2ControlMode, X2DeployPipeline
+        from robojudo.pipeline.four_mode_pipeline import ControlMode
+        from robojudo.pipeline.x2_locomanipulation_pipeline import X2LocomanipulationPipeline
 
-        pipeline = X2DeployPipeline.__new__(X2DeployPipeline)
-        pipeline.mode = X2ControlMode.PASSIVE_DEFAULT
+        pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
+        pipeline.mode = ControlMode.PASSIVE_DEFAULT
         pipeline.env = SimpleNamespace(
             dof_pos=np.zeros(2, dtype=np.float32),
             update=lambda: None,
@@ -693,7 +696,7 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(mj_step.call_count, env.sim_decimation)
 
     def test_x2_pipeline_routes_elastic_band_commands(self):
-        from robojudo.pipeline.x2_deploy_pipeline import X2DeployPipeline
+        from robojudo.pipeline.x2_locomanipulation_pipeline import X2LocomanipulationPipeline
 
         class FakeEnv:
             def __init__(self):
@@ -708,7 +711,7 @@ class TestX2Integration(unittest.TestCase):
             def toggle_elastic_band(self):
                 self.calls.append("toggle")
 
-        pipeline = X2DeployPipeline.__new__(X2DeployPipeline)
+        pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
         pipeline.env = FakeEnv()
         pipeline._process_commands(
             ["[ELASTIC_BAND_LOWER]", "[ELASTIC_BAND_LIFT]", "[ELASTIC_BAND_TOGGLE]"]

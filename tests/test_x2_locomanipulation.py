@@ -49,10 +49,10 @@ class TestX2Locomanipulation(unittest.TestCase):
 
     def test_upper_body_zmq_override_changes_only_arms(self):
         from robojudo.config.x2 import x2_locomanipulation
-        from robojudo.pipeline.x2_deploy_pipeline import X2DeployPipeline
+        from robojudo.pipeline.x2_locomanipulation_pipeline import X2LocomanipulationPipeline
 
         cfg = x2_locomanipulation()
-        pipeline = X2DeployPipeline.__new__(X2DeployPipeline)
+        pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
         pipeline._upper_body_cfg = cfg.ctrl[-1].model_copy(update={"ema_alpha": 0.0})
         pipeline._upper_body_enabled = True
         pipeline._upper_body_stream_was_fresh = False
@@ -96,17 +96,18 @@ class TestX2Locomanipulation(unittest.TestCase):
 
     def test_upper_body_toggle_requires_rl_mode(self):
         from robojudo.config.x2 import x2_locomanipulation
-        from robojudo.pipeline.x2_deploy_pipeline import X2ControlMode, X2DeployPipeline
+        from robojudo.pipeline.four_mode_pipeline import ControlMode
+        from robojudo.pipeline.x2_locomanipulation_pipeline import X2LocomanipulationPipeline
 
-        pipeline = X2DeployPipeline.__new__(X2DeployPipeline)
+        pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
         pipeline._upper_body_cfg = x2_locomanipulation().ctrl[-1]
         pipeline._upper_body_enabled = False
         pipeline._upper_body_stream_was_fresh = False
-        pipeline.mode = X2ControlMode.JOINT_DEFAULT
+        pipeline.mode = ControlMode.JOINT_DEFAULT
         pipeline._toggle_upper_body()
         self.assertFalse(pipeline._upper_body_enabled)
 
-        pipeline.mode = X2ControlMode.RL_DEFAULT
+        pipeline.mode = ControlMode.RL_DEFAULT
         pipeline._toggle_upper_body()
         self.assertTrue(pipeline._upper_body_enabled)
         pipeline._toggle_upper_body()

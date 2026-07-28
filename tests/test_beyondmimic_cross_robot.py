@@ -112,7 +112,7 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
         self.assertEqual(g1_real.env.env_type, "UnitreeCppEnv")
         self.assertTrue(g1_real.do_safety_check)
 
-        self.assertEqual(x2_sim.pipeline_type, "X2DeployPipeline")
+        self.assertEqual(x2_sim.pipeline_type, "X2LocomanipulationPipeline")
         self.assertEqual(x2_sim.policy.policy_type, "X2BeyondMimicPolicy")
         self.assertEqual(x2_sim.policy.obs_dof.num_dofs, 29)
         self.assertEqual(x2_sim.env.dof.num_dofs, 31)

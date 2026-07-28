@@ -4,7 +4,7 @@ This document summarizes the current RoboJuDo deployment architecture for simula
 
 ## Shared Pipeline
 
-RoboJuDo uses the same high-level loop for all supported robots. A config selects one pipeline, one environment backend, one or more controllers, and one policy. Most deployments use `RlPipeline`; X2 uses `X2DeployPipeline`, which adds explicit preparation and safety modes around the RL loop.
+RoboJuDo uses the same high-level loop for all supported robots. A config selects one pipeline, one environment backend, one or more controllers, and one policy. Most deployments use `RlPipeline`; X2 uses `X2LocomanipulationPipeline`, which adds explicit preparation and safety modes around the RL loop.
 
 ```mermaid
 flowchart LR
@@ -54,7 +54,7 @@ python scripts/run_pipeline.py -c x2_real
 
 ## X2: MuJoCo And ROS 2/AimDK
 
-The X2 sim2sim config `x2` uses `X2DeployPipeline`, `X2MujocoEnvCfg`, and the shared `MujocoEnv`. The pipeline exposes four modes in both simulation and real deployment:
+The X2 sim2sim config `x2` uses `X2LocomanipulationPipeline`, `X2MujocoEnvCfg`, and the shared `MujocoEnv`. The pipeline exposes four modes in both simulation and real deployment:
 
 - `PASSIVE_DEFAULT`: publish zero stiffness and damping.
 - `DAMPING_DEFAULT`: apply damping to every X2 joint.
@@ -73,7 +73,7 @@ X2 simulation also enables a configurable `ElasticBand` on `torso_link`. `Mujoco
 
 The X2 policy controls 29 joints. The X2 environment has 31 DoFs, including two head joints. `PolicyWrapper` maps the 29 policy joints into the 31-DoF environment target. Passive, damping, and joint-default modes address all 31 joints; RL mode restricts position commands to the policy's 29-joint sequence.
 
-The `x2_locomimic` and `x2_locomimic_real` presets use `X2LocoMimicPipeline` to place the existing interpolation manager
+The `x2_locomimic` and `x2_locomimic_real` presets use `X2LocomanipulationLocoMimicPipeline` to place the existing interpolation manager
 inside the same X2 mode state machine. Locomanipulation supplies the 15-joint loco policy and optional ZMQ arm targets;
 `x2_rl_deploy` supplies the 29-joint test mimic. Switching and policy time advance only in `RL_DEFAULT`, and leaving RL
 cancels any transition and restores loco for the next prepared entry. Reaching the mimic's configured ONNX phase limit
