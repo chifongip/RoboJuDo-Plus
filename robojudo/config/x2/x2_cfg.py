@@ -1,11 +1,13 @@
 from robojudo.config import cfg_registry
 from robojudo.controller.ctrl_cfgs import JoystickCtrlCfg, KeyboardCtrlCfg, UpperBodyZmqCtrlCfg
+from robojudo.environment.env_cfgs import ElasticBandCfg
 from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 
 from .env.x2_env_cfg import X2_ARM_JOINT_NAMES, X2JointDefaultDoF
 from .env.x2_mujuco_env_cfg import X2MujocoEnvCfg
 from .env.x2_real_env_cfg import X2RealEnvCfg
 from .pipeline.x2_loco_mimic_pipeline_cfg import X2LocomanipulationLocoMimicPipelineCfg
+from .policy.x2_amp_recovery_policy_cfg import X2AmpRecoveryPolicyCfg
 from .policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
 from .policy.x2_deploy_policy_cfg import X2DeployPolicyCfg
 from .policy.x2_locomanipulation_policy_cfg import (
@@ -72,6 +74,28 @@ class x2_real(x2):
         )
     ]
     do_safety_check: bool = True
+
+
+@cfg_registry.register
+class x2_amp_recovery(RlPipelineCfg):
+    """AgiBot X2 29-DOF AMP fall-recovery policy, Sim2Sim."""
+
+    robot: str = "x2"
+    env: X2MujocoEnvCfg = X2MujocoEnvCfg(
+        dof=X2LocomanipulationEnvDoF(),
+        sim_dt=0.005,
+        sim_decimation=4,
+        elastic_band=ElasticBandCfg(
+            body_name="torso_link",
+            active=False,
+            visualize=False,
+        ),
+    )
+    ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
+        KeyboardCtrlCfg(),
+        JoystickCtrlCfg(),
+    ]
+    policy: X2AmpRecoveryPolicyCfg = X2AmpRecoveryPolicyCfg()
 
 
 @cfg_registry.register

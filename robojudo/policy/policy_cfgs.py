@@ -60,6 +60,40 @@ class PolicyCfg(Config):
         return self
 
 
+class AmpRecoveryPolicyCfg(PolicyCfg):
+    """Shared deployment configuration for mjlab AMP fall-recovery policies."""
+
+    policy_type: str = "AmpRecoveryPolicy"
+    policy_name: str
+    disable_autoload: bool = True
+    freq: int = 50
+
+    num_obs: int
+    history_length: int = 4
+    action_scales: list[float]
+
+    action_scale: float = 1.0
+    action_clip: float | None = None
+    action_beta: float = 1.0
+
+    @property
+    def policy_file(self) -> str:
+        return (ASSETS_DIR / f"models/{self.robot}/amp_recovery/{self.policy_name}.onnx").as_posix()
+
+    @model_validator(mode="after")
+    def check_amp_recovery_dimensions(self):
+        if self.history_length != 4:
+            raise ValueError("AMP Recovery exports require four observation-history frames")
+        expected_obs = self.history_length * (9 + 3 * self.obs_dof.num_dofs)
+        if self.num_obs != expected_obs:
+            raise ValueError(f"AMP Recovery num_obs {self.num_obs} does not match expected size {expected_obs}")
+        if self.obs_dof.joint_names != self.action_dof.joint_names:
+            raise ValueError("AMP Recovery observation and action joint orders must match")
+        if len(self.action_scales) != self.action_dof.num_dofs:
+            raise ValueError("AMP Recovery action_scales must contain one value per action joint")
+        return self
+
+
 class UnitreePolicyCfg(PolicyCfg):
     class ObsScalesCfg(Config):
         dof_pos: float = 1.0

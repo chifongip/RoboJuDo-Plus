@@ -13,6 +13,7 @@ We provide the following policies:
 - [AMOPolicy](#policy--amopolicy)
 - [H2HStudentPolicy](#policy--h2hstudentpolicy)
 - [HugWBCPolicy](#policy--hugwbcpolicy)
+- [AmpRecoveryPolicy](#policy--amprecoverypolicy)
 - [BeyondMimicPolicy](#policy--beyondmimicpolicy)
 - [ASAPPolicy](#policy--asappolicy)
 - [KungfuBotGeneralPolicy](#policy--kungfubotgeneralpolicy)
@@ -102,6 +103,32 @@ You can refer to `g1_h2h` config in [g1_cfg.py](../robojudo/config/g1/g1_cfg.py)
 script: [hugwbc_policy.py](../robojudo/policy/hugwbc_policy.py)
 
 🥺Will release soon.
+
+
+## [Policy](#policy) > [AmpRecoveryPolicy](#policy--amprecoverypolicy)
+
+`AmpRecoveryPolicy` deploys the standalone fall-recovery actors trained by AMP_mjlab. The policy always receives a
+zero twist command and uses four frames of term-major observation history, matching the original mjlab task. The
+bundled models control the full trained joint set and use the default pose, PD gains, and per-joint action scales
+recorded by each training run.
+
+Three simulation presets are available:
+
+```bash
+python scripts/run_pipeline.py -c g1_amp_recovery
+python scripts/run_pipeline.py -c g1_23_amp_recovery
+python scripts/run_pipeline.py -c x2_amp_recovery
+```
+
+The G1 presets control 29 and 23 joints respectively. The X2 model controls 29 joints while its two head joints remain
+at their environment defaults. All presets run at 50 Hz with a 5 ms simulation step and four simulation steps per
+policy action. Use MuJoCo mouse perturbations to place the robot in front, back, or side fallen states when evaluating
+recovery. Press the configured reset shortcut to respawn the simulation.
+
+The bundled policies are the final `model_20000` exports from
+`/home/ubuntu/AMP_mjlab/logs/fall_recovery`. Deployment uses the explicit observation layout, default poses, PD gains,
+and action scales recorded in this repository, and requires no AMP_mjlab runtime installation. These presets are
+simulation-only; they do not enable real-robot recovery or automatic switching from another locomotion policy.
 
 
 ## [Policy](#policy) > [BeyondMimicPolicy](#policy--beyondmimicpolicy)

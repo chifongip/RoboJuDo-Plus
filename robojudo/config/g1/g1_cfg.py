@@ -24,6 +24,11 @@ from .env.g1_dummy_env_cfg import G1DummyEnvCfg  # noqa: F401
 from .env.g1_mujuco_env_cfg import G1_12MujocoEnvCfg, G1_23MujocoEnvCfg, G1MujocoEnvCfg  # noqa: F401
 from .env.g1_real_env_cfg import G1_23RealEnvCfg, G1RealEnvCfg, G1UnitreeCfg  # noqa: F401
 from .policy.g1_amo_policy_cfg import G1AmoPolicyCfg  # noqa: F401
+from .policy.g1_amp_recovery_policy_cfg import (  # noqa: F401
+    G1_23AmpRecoveryPolicyCfg,
+    G1AmpRecovery29DoF,
+    G1AmpRecoveryPolicyCfg,
+)
 from .policy.g1_asap_policy_cfg import G1AsapLocoPolicyCfg, G1AsapPolicyCfg  # noqa: F401
 from .policy.g1_beyondmimic_policy_cfg import (  # noqa: F401
     G1_23BeyondMimicPolicyCfg,
@@ -89,6 +94,40 @@ class g1_real(g1):
     ]
 
     do_safety_check: bool = True  # enable safety check for real robot
+
+
+@cfg_registry.register
+class g1_amp_recovery(RlPipelineCfg):
+    """G1 29-DOF AMP fall-recovery policy, Sim2Sim."""
+
+    robot: str = "g1"
+    env: G1MujocoEnvCfg = G1MujocoEnvCfg(
+        dof=G1AmpRecovery29DoF(),
+        sim_dt=0.005,
+        sim_decimation=4,
+    )
+    ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
+        KeyboardCtrlCfg(),
+        JoystickCtrlCfg(),
+    ]
+    policy: G1AmpRecoveryPolicyCfg = G1AmpRecoveryPolicyCfg()
+
+
+@cfg_registry.register
+class g1_23_amp_recovery(RlPipelineCfg):
+    """G1 23-DOF AMP fall-recovery policy, Sim2Sim."""
+
+    robot: str = "g1"
+    env: G1_23MujocoEnvCfg = G1_23MujocoEnvCfg(
+        dof=G1_23AmpRecoveryPolicyCfg().obs_dof,
+        sim_dt=0.005,
+        sim_decimation=4,
+    )
+    ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
+        KeyboardCtrlCfg(),
+        JoystickCtrlCfg(),
+    ]
+    policy: G1_23AmpRecoveryPolicyCfg = G1_23AmpRecoveryPolicyCfg()
 
 
 @cfg_registry.register

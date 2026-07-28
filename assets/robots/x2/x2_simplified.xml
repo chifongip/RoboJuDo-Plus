@@ -169,7 +169,7 @@
           <inertial pos="-0.000188 0.000605 0.191827" quat="0.999959 0.00110321 0.0081892 0.00362262" mass="10.1441" diaginertia="0.479863 0.455999 0.0666413"/>
             <joint name="waist_roll_joint" pos="0 0 0" axis="1 0 0" range="-0.488 0.488" actuatorfrcrange="-48 48"/>
             <geom class="visual" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1 1 1 1" mesh="torso_link"/>
-            <geom name="torso_collision" class="collision" size="0.13" fromto="0 0 0.14 0 0 0.20"/>
+            <geom name="torso_collision" class="collision" size="0.12" fromto="0 0 0.14 0 0 0.20"/>
             <site name="imu_1" pos="-0.0248787 0.00198528 0.105938" group="3"/>
             <geom class="visual" pos="-0.0248787 0.00198528 0.105938" quat="1 0 0 0" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.647059 0.619608 0.588235 1" mesh="imu_in_torso_link"/>
             <body name="left_shoulder_pitch_link" pos="0.00329907 0.143032 0.241648" quat="0.994522 0.104528 0 0">
@@ -260,7 +260,7 @@
               <body name="head_pitch_link" pos="0 0 0.0889">
                 <inertial pos="0.003033 -6e-05 0.004395" quat="0.695573 -0.162421 -0.145198 0.684628" mass="0.999287" diaginertia="0.0035988 0.00298179 0.00259841"/>
                 <joint name="head_pitch_joint" pos="0 0 0" axis="0 1 0" range="-0.3838 0.3838" actuatorfrcrange="-0.6 0.6"/>
-                <geom name="head_collision" class="collision" size="0.074 0.05" pos="0 0 0.015" quat="0.499898 0.5 0.5 -0.500102" type="cylinder" rgba="0.498039 0.498039 0.498039 1"/>
+                <geom name="head_collision" class="collision" size="0.075" pos="0 0 0.01" type="sphere" rgba="0.498039 0.498039 0.498039 1"/>
                 <geom class="visual" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.2 0.2 0.2 1" mesh="head_pitch_link"/>
                 <!-- <geom class="collision" type="mesh" rgba="0.2 0.2 0.2 1" mesh="head_pitch_link"/> -->
                 <site name="imu_2" pos="0.0259999 -8.25389e-05 0.0176" group="3"/>
