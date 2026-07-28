@@ -357,6 +357,19 @@ maximum timestep, the pipeline automatically interpolates back to loco. Only the
 interpolated or overridden during policy switching; the lower body remains under Locomanipulation until mimic becomes
 active.
 
+These presets also provide operator-triggered AMP fall recovery. After a fall, select `JOINT_DEFAULT`, then press the
+right-stick button (`R`) in simulation, `r` on the keyboard, or `R2` on the Unitree remote to enter recovery.
+Recovery is accepted only while the robot is both in `JOINT_DEFAULT` and fallen. Once it is upright
+(tilt below `1.0 rad`), select loco to start the normal smooth transition back to `RL_DEFAULT`; `JOINT_DEFAULT` is not
+required for this return. Passive, damping, and shutdown remain immediate exits throughout recovery. The recovery
+policy's explicit PD gains are applied on entry and the loco gains are restored during the return transition.
+As with the normal `JOINT_DEFAULT` to `RL_DEFAULT` transition, the configured joint-default interpolation must finish
+before the recovery command is accepted.
+If the robot starts or respawns fallen, it retains its initial `PASSIVE_DEFAULT` mode; startup tilt alone does not
+force damping. An explicit operator `PASSIVE_DEFAULT` command is likewise retained despite the tilt. Selecting another
+mode clears the passive override. An explicitly selected `JOINT_DEFAULT` is also retained while fallen so recovery can
+be requested; passive and damping remain available at all times.
+
 Both G1 loco-mimic variants refresh their born-place position and heading frame when a transition activates the loco or
 mimic policy. This alignment-only refresh intentionally preserves the elastic band's active state and rest length.
 BeyondMimic startup also checks `observation_names` metadata against `without_state_estimator`: exports without the

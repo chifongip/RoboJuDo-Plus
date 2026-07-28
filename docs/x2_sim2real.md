@@ -55,6 +55,16 @@ Confirm that all four joint-state topics and `/aima/hal/imu/torso/state` are upd
 
 `RL_DEFAULT` is rejected until `JOINT_DEFAULT` completes. Entering passive or damping invalidates preparation, so joint preparation must run again before restarting RL. `LB+RB+A` requests damping followed by process shutdown. In simulation, `LB+RB+Y` resets the model and returns to passive mode.
 
+The X2 loco-mimic presets add AMP fall recovery. After a fall, select `JOINT_DEFAULT`, then press the joystick
+right-stick button (`R`), or `r` on the simulation keyboard, to start recovery. An operator-selected `JOINT_DEFAULT`
+is retained despite fall tilt so this sequence can complete. The recovery command is enabled only after the
+joint-default interpolation finishes, matching the existing `JOINT_DEFAULT` to `RL_DEFAULT` gate. After the robot is
+upright with tilt below `1.0 rad`, select loco with `Back` to interpolate directly into `RL_DEFAULT`. Recovery cannot
+be entered while upright or from another mode; passive, damping, and shutdown remain immediate emergency exits.
+A robot that starts or respawns fallen retains `PASSIVE_DEFAULT`; startup tilt alone does not force damping. An
+explicit operator `PASSIVE_DEFAULT` selection also remains active despite the fall tilt until another mode is
+requested.
+
 ## Simulation ElasticBand
 
 The `x2` MuJoCo configuration starts with a virtual tension band attached to `torso_link`. Its default world anchor is `[0, 0, 3]`, stiffness is `200 N/m`, damping is `100 Ns/m`, and rest length is `0 m`. The band force is applied before every physics substep in all four control modes. The viewer renders the band as an orange capsule with a sphere at the world anchor; both are hidden when the band is released.

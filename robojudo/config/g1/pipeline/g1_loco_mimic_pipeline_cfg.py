@@ -35,6 +35,7 @@ class G1LocomanipulationLocoMimicPipelineCfg(RlLocoMimicPipelineCfg):
     pipeline_type: str = "G1LocomanipulationLocoMimicPipeline"
     joint_default_duration: float = 1.5
     default_damping: float = 5.0
+    do_safety_check: bool = True
     realign_on_policy_switch: bool = True
 
 

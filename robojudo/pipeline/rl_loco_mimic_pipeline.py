@@ -32,17 +32,21 @@ class PolicyInterpManager(PolicyManager):
         cfg_policy_loco: PolicyCfg,
         cfg_policies: list[PolicyCfg],
         env: Environment,
+        cfg_policy_recovery: PolicyCfg | None = None,
         loco_dof_pos: np.ndarray | None = None,
         device: str = "cpu",
         realign_on_policy_switch: bool = False,
     ):
         cfg_policies_all = [cfg_policy_loco] + cfg_policies
+        if cfg_policy_recovery is not None:
+            cfg_policies_all.append(cfg_policy_recovery)
         super().__init__(cfg_policies_all, env, device)
 
         self.policy_loco_id = 0
         self.policy_mimic_num = len(cfg_policies)
         assert self.policy_mimic_num > 0, "At least one mimic policy is required for switching."
         self.policy_mimic_ids = list(range(1, self.policy_mimic_num + 1))
+        self.policy_recovery_id = len(cfg_policies_all) - 1 if cfg_policy_recovery is not None else None
         self.policy_mimic_idx = 0
         self.realign_on_policy_switch = realign_on_policy_switch
 
@@ -161,7 +165,17 @@ class PolicyInterpManager(PolicyManager):
         policy_name = self.policy_by_id(policy_id).name
         logger.info(f"Switch mimic policy to {self.policy_mimic_idx}: {policy_name}")
 
-    def switch_to_loco(self):
+    def activate_recovery(self) -> bool:
+        if self.policy_recovery_id is None:
+            logger.warning("No recovery policy is configured.")
+            return False
+        self.cancel_interpolation()
+        recovery = self.policy_by_id(self.policy_recovery_id)
+        recovery.reset()
+        self._activate_policy(self.policy_recovery_id)
+        return True
+
+    def switch_to_loco(self, callback_end=None):
         if self.interp_state != self.InterpState.IDLE:
             logger.warning("Cannot switch policy while interpolation is in progress.")
             return False
@@ -175,6 +189,7 @@ class PolicyInterpManager(PolicyManager):
             get_target_pos=lambda: self.loco_dof_pos,
             durations=self.DURATIONS_MIMIC_LOCO,
             callback_start=lambda: self._activate_policy(self.policy_loco_id),
+            callback_end=callback_end,
         )
         return True
 
@@ -234,6 +249,7 @@ class RlLocoMimicPipeline(RlMultiPolicyPipeline):
             cfg_policy_loco=self.cfg.loco_policy,
             cfg_policies=self.cfg.mimic_policies,
             env=self.env,
+            cfg_policy_recovery=self.cfg.recovery_policy,
             loco_dof_pos=self.loco_dof_pos,
             device=self.device,
             realign_on_policy_switch=self.cfg.realign_on_policy_switch,

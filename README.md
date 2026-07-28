@@ -74,6 +74,7 @@ Our framework highlights:
 - [x] [2025.11] Add support for **KungfuBot2** , check [KungfuBotGeneralPolicy](./docs/policy.md/#policy--kungfubotgeneralpolicy)!
 - [x] [2025.11] Add support for **TWIST** , check [TwistPolicy](./docs/policy.md/#policy--twistpolicy)!
 - [x] [2026.03] Add support for **ProtoMotions** ✨, check [ProtoMotions Tracker](#protomotions-tracker) and [ProtoMotionsTrackerPolicy](./docs/policy.md/#policy--protomotionstrackerpolicy)!
+- [ ] Validate IMU quaternions in real-robot environments, retain the last valid sample through a short invalid-packet grace window, and force damping only after persistent invalid or stale state; keep pipeline finite checks as a final safety fallback
 - [ ] Release code for **HugWBC**
 - [ ] Release code for **GMT**
 - [ ] Upcoming policies...

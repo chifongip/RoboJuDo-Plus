@@ -14,6 +14,7 @@ class X2LocomanipulationLocoMimicPipelineCfg(RlLocoMimicPipelineCfg):
     joint_default_dof: X2LocomanipulationEnvDoF = _X2_LOCO_MIMIC_ENV_DOF
     joint_default_duration: float = 1.5
     default_damping: float = 5.0
+    do_safety_check: bool = True
     realign_on_policy_switch: bool = True
 
     # The locomotion policy controls the first 15 joints. The remaining 14 arm

@@ -1,5 +1,9 @@
 import logging
 
+from robojudo.pipeline.four_mode_pipeline import (
+    FALL_TILT_THRESHOLD_RAD,
+    ControlMode,
+)
 from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager
 
 logger = logging.getLogger(__name__)
@@ -10,10 +14,12 @@ class LocomanipulationLocoMimicPipelineMixin:
 
     def __init__(self, cfg):
         self._upper_body_override_was_available = False
+        self._recovery_return_in_progress = False
         super().__init__(cfg)
 
     def reset(self):
         self._upper_body_override_was_available = False
+        self._recovery_return_in_progress = False
         if hasattr(self, "policy_manager") and hasattr(self.policy_manager.policy, "close_progress"):
             self.policy_manager.policy.close_progress()
         super().reset()
@@ -33,12 +39,17 @@ class LocomanipulationLocoMimicPipelineMixin:
 
     def _reset_loco_policy_state(self, close_active_progress: bool = True):
         self._upper_body_override_was_available = False
+        self._recovery_return_in_progress = False
         if close_active_progress and hasattr(self.policy_manager.policy, "close_progress"):
             self.policy_manager.policy.close_progress()
         self.policy_manager.reset_to_loco(refresh_env=True)
         self.policy_locomotion_mimic_flag = 0
 
     def _on_enter_rl(self):
+        if self._recovery_return_in_progress:
+            self._recovery_return_in_progress = False
+            self.policy_locomotion_mimic_flag = 0
+            return
         self._reset_loco_policy_state()
 
     def _on_leave_rl(self):
@@ -47,6 +58,84 @@ class LocomanipulationLocoMimicPipelineMixin:
 
     def _reset_policy_state(self):
         self._reset_loco_policy_state()
+
+    def _process_commands(self, commands: list[str]):
+        if "[POLICY_RECOVERY]" in commands:
+            self._try_enter_recovery()
+        if self.mode == ControlMode.RECOVERY_DEFAULT:
+            commands = [
+                command
+                for command in commands
+                if command
+                not in (
+                    "[JOINT_DEFAULT]",
+                    "[RL_DEFAULT]",
+                    "[UPPER_BODY_TOGGLE]",
+                )
+            ]
+        super()._process_commands(commands)
+
+    def _try_enter_recovery(self) -> bool:
+        if self._shutdown_requested:
+            logger.warning("Ignored recovery request during shutdown")
+            return False
+        if self.mode != ControlMode.JOINT_DEFAULT:
+            logger.warning("Ignored recovery request outside JOINT_DEFAULT")
+            return False
+        if not self._joint_default_complete:
+            logger.warning(
+                "Ignored recovery request: JOINT_DEFAULT interpolation has not completed"
+            )
+            return False
+        try:
+            tilt = self._robot_tilt()
+        except FloatingPointError as exc:
+            logger.error("Ignored recovery request: %s", exc)
+            return False
+        if tilt <= FALL_TILT_THRESHOLD_RAD:
+            logger.warning(
+                "Ignored recovery request: robot tilt %.3f rad does not exceed %.1f rad",
+                tilt,
+                FALL_TILT_THRESHOLD_RAD,
+            )
+            return False
+        self._set_upper_body_enabled(False)
+        try:
+            activated = self.policy_manager.activate_recovery()
+        except (FloatingPointError, RuntimeError, ValueError) as exc:
+            self._force_damping(f"failed to activate recovery policy: {exc}")
+            return False
+        if not activated:
+            return False
+        self._manual_mode_override = None
+        self.policy_locomotion_mimic_flag = 0
+        self._recovery_return_in_progress = False
+        return self._enter_mode(ControlMode.RECOVERY_DEFAULT)
+
+    def _finish_recovery_to_loco(self):
+        if self.mode != ControlMode.RECOVERY_DEFAULT:
+            return
+        self._recovery_return_in_progress = True
+        if not self._enter_mode(ControlMode.RL_DEFAULT, force=True):
+            self._recovery_return_in_progress = False
+
+    def _request_loco_from_recovery(self) -> bool:
+        try:
+            tilt = self._robot_tilt()
+        except FloatingPointError as exc:
+            self._force_damping(str(exc))
+            return False
+        if tilt >= FALL_TILT_THRESHOLD_RAD:
+            logger.warning(
+                "Ignored locomotion request: robot tilt %.3f rad is not below %.1f rad",
+                tilt,
+                FALL_TILT_THRESHOLD_RAD,
+            )
+            return False
+        if self.policy_manager.switch_to_loco(callback_end=self._finish_recovery_to_loco):
+            self._recovery_return_in_progress = True
+            return True
+        return False
 
     def _step_rl_policy(self, env_data, ctrl_data, dry_run: bool):
         commands = ctrl_data.get("COMMANDS", [])
@@ -74,6 +163,11 @@ class LocomanipulationLocoMimicPipelineMixin:
                 logger.info("Mimic motion done, switch to locomotion policy.")
 
         for command in commands:
+            if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT and (
+                command.startswith("[POLICY_SWITCH]") or command == "[POLICY_MIMIC]"
+            ):
+                logger.warning("Ignored %s during recovery", command)
+                continue
             match command:
                 case cmd if cmd.startswith("[POLICY_SWITCH]"):
                     switch_target = cmd.split(",")[1]
@@ -82,12 +176,20 @@ class LocomanipulationLocoMimicPipelineMixin:
                     elif switch_target == "LAST":
                         self.policy_manager.toggle_mimic_policy(-1)
                 case "[POLICY_LOCO]":
-                    if self.policy_manager.switch_to_loco():
+                    if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
+                        self._request_loco_from_recovery()
+                    elif self.policy_manager.switch_to_loco():
                         self.policy_locomotion_mimic_flag = 0
                 case "[POLICY_MIMIC]":
+                    if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
+                        logger.warning("Ignored mimic request during recovery")
+                        continue
                     self._set_upper_body_enabled(False)
                     if self.policy_manager.switch_to_mimic():
                         self.policy_locomotion_mimic_flag = 1
+                case "[POLICY_RECOVERY]":
+                    if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
+                        logger.warning("Ignored repeated recovery request")
 
     def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
         commands = ctrl_data.get("COMMANDS", [])
