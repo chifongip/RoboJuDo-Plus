@@ -212,6 +212,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         self.timestep += 1
         self.ctrl_manager.post_step_callback(ctrl_data)
         self.policy.post_step_callback(commands)
+        self._record_upper_body_sample(env_data, extras, pd_target, rl_active=rl_active)
         if self.visualizer is not None and rl_active:
             self.policy.debug_viz(self.visualizer, env_data, ctrl_data, extras)
         if self.cfg.debug.log_obs:
