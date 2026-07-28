@@ -11,6 +11,10 @@ remaining arm and head joints hold the defaults recorded with the training run u
 override is enabled. Its PD gains, effort limits, action scales, and default pose come from the run's saved
 `params/env.yaml`; rounded ONNX metadata is used only as a consistency check.
 
+The `x2`, `x2_real`, and locomanipulation presets use `X2LocomanipulationPipeline`, which owns X2's four deployment
+modes. The `x2_locomimic` presets use `X2LocomanipulationLocoMimicPipeline`, which adds locomotion/mimic policy
+interpolation to the same mode state machine.
+
 ## Prerequisites
 
 Initialize and build the pinned AimDK SDK, then install the ROS 2 extension with the managed installer:
@@ -40,13 +44,13 @@ Confirm that all four joint-state topics and `/aima/hal/imu/torso/state` are upd
 
 ## Control Modes
 
-The X2 pipeline starts in `PASSIVE_DEFAULT` and uses the same four operating modes as the standalone controller:
+`X2LocomanipulationPipeline` starts in `PASSIVE_DEFAULT` and owns the four operating modes:
 
 | Mode | Joystick | Behavior |
 | --- | --- | --- |
 | `PASSIVE_DEFAULT` | `A` | Zero stiffness and damping on all 31 joints. Use only while the robot is supported. |
 | `DAMPING_DEFAULT` | `B` | Zero stiffness and damping `5.0` on all 31 joints. |
-| `JOINT_DEFAULT` | `Y` | Interpolate all joints to the standalone preparation pose over 1.5 seconds. |
+| `JOINT_DEFAULT` | `Y` | Interpolate all joints to the configured default pose over 1.5 seconds. |
 | `RL_DEFAULT` | `X` | Reset and warm up ONNX, then run the 29-joint policy from timestep 1. |
 
 `RL_DEFAULT` is rejected until `JOINT_DEFAULT` completes. Entering passive or damping invalidates preparation, so joint preparation must run again before restarting RL. `LB+RB+A` requests damping followed by process shutdown. In simulation, `LB+RB+Y` resets the model and returns to passive mode.
@@ -142,8 +146,9 @@ python scripts/run_pipeline.py -c x2_locomimic
 python scripts/run_pipeline.py -c x2_locomimic_real
 ```
 
-The loco-mimic presets retain the four X2 control modes. Enter `JOINT_DEFAULT`, wait for completion, and then enter
-`RL_DEFAULT`; policy inference and switch timers remain stopped in every other mode. Joystick `Back` selects loco,
+`X2LocomanipulationLocoMimicPipeline` retains the same four X2 control modes. Enter `JOINT_DEFAULT`, wait for
+completion, and then enter `RL_DEFAULT`; policy inference and switch timers remain stopped in every other mode.
+Joystick `Back` selects loco,
 `Start` selects mimic, and left-stick click `L` toggles streamed upper-body targets while loco is idle. Release the
 right bumper (`RB`/physical R1) to select the next mimic policy or the left bumper (`LB`/physical L1) to select the
 previous one while loco is active and interpolation is idle. Bumpers used in a recognized chord do not also change the
@@ -155,7 +160,7 @@ manual return remains available through joystick `Back` or keyboard `]`.
 
 With the robot supported, select `JOINT_DEFAULT` and wait for the completion log. Then select `RL_DEFAULT`. ONNX time does not advance in passive, damping, or joint-preparation modes.
 
-The policy runs at 50 Hz. `aimdk_cpp` republishes the active mode at 500 Hz, matching the standalone X2 controller. If position commands stop for 100 ms, the backend latches damping. Position control cannot resume until a new mode transition explicitly re-arms it. Stale state, a non-finite target, excessive tilt, and shutdown also force damping.
+The policy runs at 50 Hz. `aimdk_cpp` republishes the active mode at 500 Hz. If position commands stop for 100 ms, the backend latches damping. Position control cannot resume until a new mode transition explicitly re-arms it. Stale state, a non-finite target, excessive tilt, and shutdown also force damping.
 
 ## Preflight Checks
 
