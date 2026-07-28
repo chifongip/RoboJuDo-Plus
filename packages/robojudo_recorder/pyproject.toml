@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robojudo-recorder"
+version = "0.1.0"
+description = "Hardware-neutral LeRobot v3 recording service for RoboJuDo"
+requires-python = ">=3.11"
+dependencies = [
+    "av>=15,<16",
+    "msgpack>=1.0",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pyarrow>=14",
+    "pyyaml>=6.0",
+    "pyzmq>=25",
+]
+
+[project.optional-dependencies]
+opencv = ["opencv-python>=4.8"]
+realsense = ["pyrealsense2>=2.55,<2.57; platform_system != 'Darwin'"]
+dev = ["pytest>=8", "ruff>=0.12"]
+
+[project.scripts]
+robojudo-recorder = "robojudo_recorder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+lint.select = ["E", "F", "I", "B", "UP"]
