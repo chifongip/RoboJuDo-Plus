@@ -28,6 +28,7 @@ from .pipeline.g1_loco_mimic_pipeline_cfg import (
     G1Locomanipulation29LocoMimicPipelineCfg,
     G1RlLocoMimicPipelineCfg,
 )
+from .policy.g1_amp_recovery_policy_cfg import G1_23AmpRecoveryPolicyCfg, G1AmpRecoveryPolicyCfg
 from .policy.g1_amo_policy_cfg import G1AmoPolicyCfg  # noqa: F401
 from .policy.g1_asap_policy_cfg import G1AsapLocoPolicyCfg, G1AsapPolicyCfg  # noqa: F401
 from .policy.g1_beyondmimic_policy_cfg import G1BeyondMimicPolicyCfg  # noqa: F401
@@ -76,6 +77,7 @@ def _g1_locomanipulation_locomimic_sim_ctrl(joint_names: list[str]):
                 "RB": "[POLICY_SWITCH],NEXT",
                 "LB": "[POLICY_SWITCH],LAST",
                 "L": "[UPPER_BODY_TOGGLE]",
+                "R": "[POLICY_RECOVERY]",
                 "LB+RB+A": "[SHUTDOWN]",
                 "LB+RB+Y": "[SIM_REBORN]",
             }
@@ -91,6 +93,7 @@ def _g1_locomanipulation_locomimic_sim_ctrl(joint_names: list[str]):
                 ";": "[POLICY_SWITCH],NEXT",
                 "'": "[POLICY_SWITCH],LAST",
                 "t": "[UPPER_BODY_TOGGLE]",
+                "r": "[POLICY_RECOVERY]",
                 "7": "[ELASTIC_BAND_LOWER]",
                 "8": "[ELASTIC_BAND_LIFT]",
                 "9": "[ELASTIC_BAND_TOGGLE]",
@@ -114,6 +117,7 @@ def _g1_locomanipulation_locomimic_real_ctrl(joint_names: list[str]):
                 "R1": "[POLICY_SWITCH],NEXT",
                 "L1": "[POLICY_SWITCH],LAST",
                 "L2": "[UPPER_BODY_TOGGLE]",
+                "R2": "[POLICY_RECOVERY]",
                 "L1+R1+A": "[SHUTDOWN]",
             },
         ),
@@ -136,6 +140,7 @@ class g1_23_locomanipulation_locomimic(G1Locomanipulation23LocoMimicPipelineCfg)
     )
     loco_policy: G1Locomanipulation23PolicyCfg = G1Locomanipulation23PolicyCfg()
     mimic_policies: list[G1BeyondMimicPolicyCfg] = _g1_locomanipulation_mimic_policies(True)
+    recovery_policy: G1_23AmpRecoveryPolicyCfg = G1_23AmpRecoveryPolicyCfg()
 
 
 @cfg_registry.register
@@ -172,6 +177,7 @@ class g1_29_locomanipulation_locomimic(G1Locomanipulation29LocoMimicPipelineCfg)
     )
     loco_policy: G1Locomanipulation29PolicyCfg = G1Locomanipulation29PolicyCfg()
     mimic_policies: list[G1BeyondMimicPolicyCfg] = _g1_locomanipulation_mimic_policies(False)
+    recovery_policy: G1AmpRecoveryPolicyCfg = G1AmpRecoveryPolicyCfg()
 
 
 @cfg_registry.register

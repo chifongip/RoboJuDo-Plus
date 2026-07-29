@@ -20,7 +20,7 @@ class FakePolicyEnv:
         self.elastic_band.rest_length = 0.0
 
     def update_dof_cfg(self, override_cfg=None):
-        del override_cfg
+        self.last_dof_cfg = override_cfg
 
     def set_control_joint_names(self, joint_names):
         self.control_joint_names = list(joint_names)
@@ -79,6 +79,11 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertEqual(sim_cfg.ctrl[0].triggers["RB"], "[POLICY_SWITCH],NEXT")
         self.assertEqual(sim_cfg.ctrl[0].triggers["LB"], "[POLICY_SWITCH],LAST")
         self.assertEqual(sim_cfg.ctrl[0].triggers["L"], "[UPPER_BODY_TOGGLE]")
+        self.assertEqual(sim_cfg.ctrl[0].triggers["R"], "[POLICY_RECOVERY]")
+        self.assertEqual(sim_cfg.ctrl[1].triggers_extra["r"], "[POLICY_RECOVERY]")
+        self.assertEqual(sim_cfg.recovery_policy.policy_type, "AmpRecoveryPolicy")
+        self.assertEqual(sim_cfg.recovery_policy.action_dof.num_dofs, 29)
+        self.assertTrue(sim_cfg.do_safety_check)
         self.assertEqual(sim_cfg.ctrl[1].triggers_extra["["], "[POLICY_MIMIC]")
         self.assertEqual(real_cfg.env.env_type, "AgiBotCppEnv")
         self.assertTrue(real_cfg.do_safety_check)
@@ -86,9 +91,11 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertEqual(real_cfg.ctrl[0].triggers["Back"], "[POLICY_LOCO]")
         self.assertEqual(real_cfg.ctrl[0].triggers["RB"], "[POLICY_SWITCH],NEXT")
         self.assertEqual(real_cfg.ctrl[0].triggers["LB"], "[POLICY_SWITCH],LAST")
+        self.assertEqual(real_cfg.ctrl[0].triggers["R"], "[POLICY_RECOVERY]")
         self.assertNotIn("LB+RB+Y", real_cfg.ctrl[0].triggers)
 
     def test_policy_manager_switches_both_directions_and_can_cancel(self):
+        from robojudo.config.x2.policy.x2_amp_recovery_policy_cfg import X2AmpRecoveryPolicyCfg
         from robojudo.config.x2.policy.x2_deploy_policy_cfg import X2DeployPolicyCfg
         from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import (
             X2LocomanipulationEnvDoF,
@@ -101,6 +108,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
             X2LocomanipulationPolicyCfg(),
             [X2DeployPolicyCfg(), X2DeployPolicyCfg()],
             env,
+            cfg_policy_recovery=X2AmpRecoveryPolicyCfg(),
             loco_dof_pos=env.default_pos,
         )
         manager.DURATIONS_LOCO_MIMIC = [0, 2, 1]
@@ -116,6 +124,8 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         ctrl_data = Box({})
 
         self.assertEqual(manager.policy_mimic_idx, 0)
+        self.assertEqual(manager.policy_mimic_ids, [1, 2])
+        self.assertEqual(manager.policy_recovery_id, 3)
         manager.toggle_mimic_policy(1)
         self.assertEqual(manager.policy_mimic_idx, 1)
         manager.toggle_mimic_policy(1)
@@ -154,6 +164,17 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertEqual(manager.interp_state, PolicyInterpManager.InterpState.IDLE)
         self.assertFalse(manager.timer.has_pending())
         np.testing.assert_array_equal(manager.override_dof_pos, manager.loco_dof_pos)
+
+        self.assertTrue(manager.activate_recovery())
+        self.assertEqual(manager.current_policy_id, manager.policy_recovery_id)
+        self.assertIs(env.last_dof_cfg, manager.policy.cfg_action_dof)
+        self.assertEqual(env.reset_count, 0)
+        completed = []
+        self.assertTrue(manager.switch_to_loco(callback_end=lambda: completed.append(True)))
+        for _ in range(5):
+            manager.step(env_data, ctrl_data)
+        self.assertEqual(manager.current_policy_id, manager.policy_loco_id)
+        self.assertEqual(completed, [True])
 
     def test_zmq_is_available_only_for_idle_loco_and_disables_on_mimic(self):
         from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager

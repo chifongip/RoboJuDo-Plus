@@ -1,11 +1,13 @@
 from robojudo.config import cfg_registry
 from robojudo.controller.ctrl_cfgs import JoystickCtrlCfg, KeyboardCtrlCfg, UpperBodyZmqCtrlCfg
+from robojudo.environment.env_cfgs import ElasticBandCfg
 from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 
 from .env.x2_env_cfg import X2_ARM_JOINT_NAMES, X2JointDefaultDoF
 from .env.x2_mujuco_env_cfg import X2MujocoEnvCfg
 from .env.x2_real_env_cfg import X2RealEnvCfg
 from .pipeline.x2_loco_mimic_pipeline_cfg import X2LocomanipulationLocoMimicPipelineCfg
+from .policy.x2_amp_recovery_policy_cfg import X2AmpRecoveryPolicyCfg
 from .policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
 from .policy.x2_deploy_policy_cfg import X2DeployPolicyCfg
 from .policy.x2_locomanipulation_policy_cfg import (
@@ -72,6 +74,28 @@ class x2_real(x2):
         )
     ]
     do_safety_check: bool = True
+
+
+@cfg_registry.register
+class x2_amp_recovery(RlPipelineCfg):
+    """AgiBot X2 29-DOF AMP fall-recovery policy, Sim2Sim."""
+
+    robot: str = "x2"
+    env: X2MujocoEnvCfg = X2MujocoEnvCfg(
+        dof=X2LocomanipulationEnvDoF(),
+        sim_dt=0.005,
+        sim_decimation=4,
+        elastic_band=ElasticBandCfg(
+            body_name="torso_link",
+            active=False,
+            visualize=False,
+        ),
+    )
+    ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
+        KeyboardCtrlCfg(),
+        JoystickCtrlCfg(),
+    ]
+    policy: X2AmpRecoveryPolicyCfg = X2AmpRecoveryPolicyCfg()
 
 
 @cfg_registry.register
@@ -181,6 +205,7 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
                 "RB": "[POLICY_SWITCH],NEXT",
                 "LB": "[POLICY_SWITCH],LAST",
                 "L": "[UPPER_BODY_TOGGLE]",
+                "R": "[POLICY_RECOVERY]",
                 "LB+RB+A": "[SHUTDOWN]",
                 "LB+RB+Y": "[SIM_REBORN]",
             }
@@ -196,6 +221,7 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
                 ";": "[POLICY_SWITCH],NEXT",
                 "'": "[POLICY_SWITCH],LAST",
                 "t": "[UPPER_BODY_TOGGLE]",
+                "r": "[POLICY_RECOVERY]",
                 "7": "[ELASTIC_BAND_LOWER]",
                 "8": "[ELASTIC_BAND_LIFT]",
                 "9": "[ELASTIC_BAND_TOGGLE]",
@@ -208,6 +234,7 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
         X2DeployPolicyCfg(max_timestep=2820),
         X2DeployPolicyCfg(max_timestep=2820),
     ]
+    recovery_policy: X2AmpRecoveryPolicyCfg = X2AmpRecoveryPolicyCfg()
 
 
 @cfg_registry.register
@@ -227,12 +254,14 @@ class x2_locomimic_real(x2_locomimic):
                 "RB": "[POLICY_SWITCH],NEXT",
                 "LB": "[POLICY_SWITCH],LAST",
                 "L": "[UPPER_BODY_TOGGLE]",
+                "R": "[POLICY_RECOVERY]",
                 "LB+RB+A": "[SHUTDOWN]",
             }
         ),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
     do_safety_check: bool = True
+
 
 @cfg_registry.register
 class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
@@ -255,6 +284,7 @@ class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
                 "RB": "[POLICY_SWITCH],NEXT",
                 "LB": "[POLICY_SWITCH],LAST",
                 "L": "[UPPER_BODY_TOGGLE]",
+                "R": "[POLICY_RECOVERY]",
                 "LB+RB+A": "[SHUTDOWN]",
                 "LB+RB+Y": "[SIM_REBORN]",
             }
@@ -270,6 +300,7 @@ class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
                 ";": "[POLICY_SWITCH],NEXT",
                 "'": "[POLICY_SWITCH],LAST",
                 "t": "[UPPER_BODY_TOGGLE]",
+                "r": "[POLICY_RECOVERY]",
                 "7": "[ELASTIC_BAND_LOWER]",
                 "8": "[ELASTIC_BAND_LIFT]",
                 "9": "[ELASTIC_BAND_TOGGLE]",
@@ -281,6 +312,8 @@ class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
     mimic_policies: list[X2BeyondMimicPolicyCfg] = [
         X2BeyondMimicPolicyCfg(max_timestep=1800, policy_name="Walk1_subject1_wose", without_state_estimator=True),
     ]
+    recovery_policy: X2AmpRecoveryPolicyCfg = X2AmpRecoveryPolicyCfg()
+
 
 @cfg_registry.register
 class x2_locomimic_beyondmimic_real(x2_locomimic_beyondmimic):
@@ -299,6 +332,7 @@ class x2_locomimic_beyondmimic_real(x2_locomimic_beyondmimic):
                 "RB": "[POLICY_SWITCH],NEXT",
                 "LB": "[POLICY_SWITCH],LAST",
                 "L": "[UPPER_BODY_TOGGLE]",
+                "R": "[POLICY_RECOVERY]",
                 "LB+RB+A": "[SHUTDOWN]",
             }
         ),

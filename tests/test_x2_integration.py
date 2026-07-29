@@ -74,8 +74,7 @@ class TestX2Integration(unittest.TestCase):
 
         dof = X2JointDefaultDoF()
         values = {
-            name: (dof.default_pos[i], dof.stiffness[i], dof.damping[i])
-            for i, name in enumerate(dof.joint_names)
+            name: (dof.default_pos[i], dof.stiffness[i], dof.damping[i]) for i, name in enumerate(dof.joint_names)
         }
         self.assertEqual(values["left_knee_joint"], (0.1, 80.0, 8.0))
         self.assertEqual(values["right_elbow_joint"], (-1.2, 50.0, 1.0))
@@ -713,9 +712,7 @@ class TestX2Integration(unittest.TestCase):
 
         pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
         pipeline.env = FakeEnv()
-        pipeline._process_commands(
-            ["[ELASTIC_BAND_LOWER]", "[ELASTIC_BAND_LIFT]", "[ELASTIC_BAND_TOGGLE]"]
-        )
+        pipeline._process_commands(["[ELASTIC_BAND_LOWER]", "[ELASTIC_BAND_LIFT]", "[ELASTIC_BAND_TOGGLE]"])
         self.assertEqual(pipeline.env.calls, ["lower", "lift", "toggle"])
 
     def test_x2_default_keyframe_matches_policy_pose(self):
@@ -733,68 +730,35 @@ class TestX2Integration(unittest.TestCase):
         np.testing.assert_allclose(data.qpos[-cfg.dof.num_dofs :], expected, atol=1e-7)
 
         mujoco.mj_forward(model, data)
+        collision_geom_ids = np.flatnonzero(model.geom_group == 3)
         foot_clearances = []
         for side in ("left", "right"):
-            for index in range(1, 8):
-                geom_name = f"{side}_foot{index}_collision"
-                geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
-                self.assertEqual(model.geom_type[geom_id], mujoco.mjtGeom.mjGEOM_CAPSULE)
-                capsule_axis = data.geom_xmat[geom_id].reshape(3, 3)[:, 2]
-                foot_clearances.append(
-                    data.geom_xpos[geom_id, 2]
-                    - abs(capsule_axis[2]) * model.geom_size[geom_id, 1]
-                    - model.geom_size[geom_id, 0]
-                )
+            foot_geom_ids = [
+                geom_id
+                for geom_id in collision_geom_ids
+                if mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[geom_id]))
+                == f"{side}_ankle_roll_link"
+            ]
+            self.assertEqual(len(foot_geom_ids), 12)
+            self.assertTrue(np.all(model.geom_type[foot_geom_ids] == mujoco.mjtGeom.mjGEOM_SPHERE))
+            self.assertTrue(np.allclose(model.geom_size[foot_geom_ids, 0], 0.005))
+            foot_clearances.extend(data.geom_xpos[foot_geom_ids, 2] - model.geom_size[foot_geom_ids, 0])
         self.assertGreaterEqual(min(foot_clearances), 0.0)
         self.assertLess(min(foot_clearances), 0.01)
 
-    def test_x2_collision_geometry_matches_simplified_reference(self):
+    def test_x2_collision_geometry_matches_full_reference(self):
         from robojudo.config.x2.env.x2_mujuco_env_cfg import X2MujocoEnvCfg
 
         model = mujoco.MjModel.from_xml_path(X2MujocoEnvCfg().xml)
-        expected_collision_names = {
-            "pelvis_collision",
-            "left_hip_collision",
-            "left_thigh_collision",
-            "left_shin_collision",
-            "left_linkage_brace_collision",
-            "right_hip_collision",
-            "right_thigh_collision",
-            "right_shin_collision",
-            "right_linkage_brace_collision",
-            "torso_collision",
-            "left_shoulder_yaw_collision",
-            "left_elbow_collision",
-            "left_wrist_pitch_collision",
-            "left_hand_collision",
-            "right_shoulder_yaw_collision",
-            "right_elbow_collision",
-            "right_wrist_pitch_collision",
-            "right_hand_collision",
-            "head_collision",
-        }
-        expected_collision_names.update(
-            f"{side}_foot{index}_collision" for side in ("left", "right") for index in range(1, 8)
-        )
         collision_geom_ids = np.flatnonzero(model.geom_group == 3)
-        collision_names = {
-            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(geom_id)) for geom_id in collision_geom_ids
-        }
-
-        self.assertEqual(collision_names, expected_collision_names)
-        self.assertFalse(np.any(model.geom_type[collision_geom_ids] == mujoco.mjtGeom.mjGEOM_MESH))
-        self.assertTrue(np.all(model.geom_condim[collision_geom_ids] == 6))
-        self.assertTrue(np.all(model.geom_priority[collision_geom_ids] == 1))
-        self.assertEqual(model.nexclude, 4)
+        self.assertEqual(len(collision_geom_ids), 49)
+        self.assertEqual(np.count_nonzero(model.geom_type[collision_geom_ids] == mujoco.mjtGeom.mjGEOM_MESH), 24)
+        self.assertEqual(np.count_nonzero(model.geom_type[collision_geom_ids] == mujoco.mjtGeom.mjGEOM_SPHERE), 24)
+        self.assertEqual(np.count_nonzero(model.geom_type[collision_geom_ids] == mujoco.mjtGeom.mjGEOM_CYLINDER), 1)
+        self.assertTrue(np.all(model.geom_condim[collision_geom_ids] == 3))
+        self.assertTrue(np.all(model.geom_priority[collision_geom_ids] == 0))
+        self.assertEqual(model.nexclude, 0)
         self.assertEqual((model.nq, model.nv, model.nu, model.nkey), (38, 37, 31, 1))
-
-        for side in ("left", "right"):
-            for index in range(1, 8):
-                geom_id = mujoco.mj_name2id(
-                    model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_foot{index}_collision"
-                )
-                self.assertEqual(model.geom_type[geom_id], mujoco.mjtGeom.mjGEOM_CAPSULE)
-                self.assertAlmostEqual(model.geom_size[geom_id, 0], 0.015)
 
     def test_agibot_real_targets_are_clamped_by_hardware_joint_name(self):
         from robojudo.config.x2.env.x2_env_cfg import X2_31DoF

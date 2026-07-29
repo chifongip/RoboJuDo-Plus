@@ -14,9 +14,15 @@ class ControlMode(str, Enum):
     DAMPING_DEFAULT = "DAMPING_DEFAULT"
     JOINT_DEFAULT = "JOINT_DEFAULT"
     RL_DEFAULT = "RL_DEFAULT"
+    RECOVERY_DEFAULT = "RECOVERY_DEFAULT"
 
 
-MODE_COMMANDS = {f"[{mode.value}]": mode for mode in ControlMode}
+MODE_COMMANDS = {
+    f"[{mode.value}]": mode
+    for mode in ControlMode
+    if mode != ControlMode.RECOVERY_DEFAULT
+}
+FALL_TILT_THRESHOLD_RAD = 1.0
 ELASTIC_BAND_COMMANDS = {
     "[ELASTIC_BAND_LOWER]": "lower_elastic_band",
     "[ELASTIC_BAND_LIFT]": "lift_elastic_band",
@@ -42,6 +48,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         self._joint_default_step = 0
         self._joint_default_complete = False
         self._shutdown_requested = False
+        self._manual_mode_override: ControlMode | None = ControlMode.PASSIVE_DEFAULT
         self.should_exit = False
         self._joint_default_dof = cfg.joint_default_dof
         self._joint_default_target = np.asarray(self._joint_default_dof.default_pos, dtype=np.float32)
@@ -81,6 +88,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
 
     def prepare(self, init_motor_angle=None, prepare_seconds=None):
         del init_motor_angle, prepare_seconds
+        self._manual_mode_override = ControlMode.PASSIVE_DEFAULT
         self._enter_mode(ControlMode.PASSIVE_DEFAULT, force=True)
         self.env.command_passive()
         logger.warning(
@@ -91,14 +99,15 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
     def _enter_mode(self, requested: ControlMode, force: bool = False) -> bool:
         if requested == self.mode and not force:
             return True
-        if requested == ControlMode.RL_DEFAULT and not (
+        if requested == ControlMode.RL_DEFAULT and not force and not (
             self.mode == ControlMode.JOINT_DEFAULT and self._joint_default_complete
         ):
             logger.error("Rejected RL_DEFAULT: JOINT_DEFAULT interpolation has not completed")
             return False
 
         previous = self.mode
-        if previous == ControlMode.RL_DEFAULT and requested != ControlMode.RL_DEFAULT:
+        policy_modes = (ControlMode.RL_DEFAULT, ControlMode.RECOVERY_DEFAULT)
+        if previous in policy_modes and requested not in policy_modes:
             self._on_leave_rl()
         self.mode = requested
         if requested in (ControlMode.PASSIVE_DEFAULT, ControlMode.DAMPING_DEFAULT):
@@ -121,6 +130,9 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             if getattr(self, "_upper_body_indices", np.asarray([])).size:
                 self._upper_body_filtered = self.env.dof_pos[self._upper_body_indices].astype(np.float32)
                 self._upper_body_stream_was_fresh = False
+        elif requested == ControlMode.RECOVERY_DEFAULT:
+            self._set_upper_body_enabled(False)
+            self.env.arm_position_control()
 
         logger.warning(
             "%s mode: %s -> %s",
@@ -146,6 +158,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
 
     def _force_damping(self, reason: str):
         logger.error("Forcing DAMPING_DEFAULT: %s", reason)
+        self._manual_mode_override = None
         self._enter_mode(ControlMode.DAMPING_DEFAULT, force=True)
         self.env.command_damping(self._default_damping)
 
@@ -158,6 +171,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             return
         if "[SIM_REBORN]" in commands and hasattr(self.env, "reborn"):
             self._set_upper_body_enabled(False)
+            self._manual_mode_override = ControlMode.PASSIVE_DEFAULT
             self.env.reborn()
             self._reset_policy_state()
             self._enter_mode(ControlMode.PASSIVE_DEFAULT, force=True)
@@ -169,7 +183,12 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
                 continue
             requested = MODE_COMMANDS.get(command)
             if requested is not None:
-                self._enter_mode(requested)
+                if self._enter_mode(requested):
+                    self._manual_mode_override = (
+                        requested
+                        if requested in (ControlMode.PASSIVE_DEFAULT, ControlMode.JOINT_DEFAULT)
+                        else None
+                    )
                 continue
             method_name = ELASTIC_BAND_COMMANDS.get(command)
             if method_name is not None:
@@ -182,10 +201,29 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
     def _safety_check_before_command(self):
         if not self.do_safety_check:
             return
-        gravity = get_gravity_orientation(self.env.base_quat)
-        tilt = np.arccos(np.clip(-gravity[2], -1.0, 1.0))
-        if abs(tilt) > 1.0 and self.mode != ControlMode.DAMPING_DEFAULT:
-            self._force_damping(f"robot tilt {tilt:.3f} rad exceeds 1.0 rad")
+        if self.mode == ControlMode.RECOVERY_DEFAULT:
+            return
+        if self.mode == getattr(self, "_manual_mode_override", None):
+            return
+        try:
+            tilt = self._robot_tilt()
+        except FloatingPointError as exc:
+            self._force_damping(str(exc))
+            return
+        if tilt > FALL_TILT_THRESHOLD_RAD and self.mode != ControlMode.DAMPING_DEFAULT:
+            self._force_damping(
+                f"robot tilt {tilt:.3f} rad exceeds {FALL_TILT_THRESHOLD_RAD:.1f} rad"
+            )
+
+    def _robot_tilt(self) -> float:
+        base_quat = np.asarray(self.env.base_quat)
+        if not np.all(np.isfinite(base_quat)):
+            raise FloatingPointError("robot orientation contains non-finite values")
+        gravity = get_gravity_orientation(base_quat)
+        tilt = float(np.arccos(np.clip(-gravity[2], -1.0, 1.0)))
+        if not np.isfinite(tilt):
+            raise FloatingPointError("robot tilt is non-finite")
+        return tilt
 
     def _step_joint_default(self):
         if self._joint_default_start is None:
@@ -250,7 +288,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
                     self.env.command_damping(self._default_damping)
                 elif self.mode == ControlMode.JOINT_DEFAULT:
                     pd_target = self._step_joint_default()
-                elif self.mode == ControlMode.RL_DEFAULT:
+                elif self.mode in (ControlMode.RL_DEFAULT, ControlMode.RECOVERY_DEFAULT):
                     pd_target, extras = self._step_rl_policy(env_data, ctrl_data, dry_run=False)
         except (FloatingPointError, RuntimeError, ValueError) as exc:
             if dry_run:
@@ -262,5 +300,5 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             ctrl_data,
             extras,
             pd_target,
-            rl_active=self.mode == ControlMode.RL_DEFAULT,
+            rl_active=self.mode in (ControlMode.RL_DEFAULT, ControlMode.RECOVERY_DEFAULT),
         )

@@ -1,11 +1,12 @@
 from robojudo.utils.module_registry import Registry
 
 from .base_policy import Policy
-from .policy_cfgs import PolicyCfg
+from .policy_cfgs import AmpRecoveryPolicyCfg, PolicyCfg
 
 policy_registry = Registry(package="robojudo.policy", base_class=Policy)
 
 __all__ = [
+    "AmpRecoveryPolicyCfg",
     "Policy",
     "PolicyCfg",
     "policy_registry",
@@ -41,3 +42,4 @@ policy_registry.add("ProtoMotionsTrackerPolicy", ".protomotions_tracker_policy")
 policy_registry.add("X2DeployPolicy", ".x2_deploy_policy")
 policy_registry.add("X2LocomanipulationPolicy", ".x2_locomanipulation_policy")
 policy_registry.add("G1LocomanipulationPolicy", ".g1_locomanipulation_policy")
+policy_registry.add("AmpRecoveryPolicy", ".amp_recovery_policy")

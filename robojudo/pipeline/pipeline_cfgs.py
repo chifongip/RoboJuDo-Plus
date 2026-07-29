@@ -63,6 +63,8 @@ class RlLocoMimicPipelineCfg(PipelineCfg):
     """LocoMotion policy, as init"""
     mimic_policies: list[PolicyCfg | Any] = []
     """MotionMimic policies, can be switched to"""
+    recovery_policy: PolicyCfg | Any | None = None
+    """Optional fall-recovery policy, activated explicitly from damping mode."""
 
     realign_on_policy_switch: bool = False
     """Refresh the environment's born-place frame when a loco-mimic transition activates a policy."""
@@ -76,6 +78,11 @@ class RlLocoMimicPipelineCfg(PipelineCfg):
 
     @model_validator(mode="after")
     def check_upper_dof(self):
+        if self.recovery_policy is not None and self.recovery_policy.freq != self.loco_policy.freq:
+            raise ValueError(
+                "recovery_policy frequency must match loco_policy frequency "
+                f"({self.recovery_policy.freq} != {self.loco_policy.freq})"
+            )
         if self.upper_dof_pos_default is not None:
             if len(self.upper_dof_pos_default) != self.upper_dof_num:
                 raise ValueError(

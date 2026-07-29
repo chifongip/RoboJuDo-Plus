@@ -13,6 +13,7 @@ We provide the following policies:
 - [AMOPolicy](#policy--amopolicy)
 - [H2HStudentPolicy](#policy--h2hstudentpolicy)
 - [HugWBCPolicy](#policy--hugwbcpolicy)
+- [AmpRecoveryPolicy](#policy--amprecoverypolicy)
 - [BeyondMimicPolicy](#policy--beyondmimicpolicy)
 - [ASAPPolicy](#policy--asappolicy)
 - [KungfuBotGeneralPolicy](#policy--kungfubotgeneralpolicy)
@@ -102,6 +103,32 @@ You can refer to `g1_h2h` config in [g1_cfg.py](../robojudo/config/g1/g1_cfg.py)
 script: [hugwbc_policy.py](../robojudo/policy/hugwbc_policy.py)
 
 🥺Will release soon.
+
+
+## [Policy](#policy) > [AmpRecoveryPolicy](#policy--amprecoverypolicy)
+
+`AmpRecoveryPolicy` deploys the standalone fall-recovery actors trained by AMP_mjlab. The policy always receives a
+zero twist command and uses four frames of term-major observation history, matching the original mjlab task. The
+bundled models control the full trained joint set and use the default pose, PD gains, and per-joint action scales
+recorded by each training run.
+
+Three simulation presets are available:
+
+```bash
+python scripts/run_pipeline.py -c g1_amp_recovery
+python scripts/run_pipeline.py -c g1_23_amp_recovery
+python scripts/run_pipeline.py -c x2_amp_recovery
+```
+
+The G1 presets control 29 and 23 joints respectively. The X2 model controls 29 joints while its two head joints remain
+at their environment defaults. All presets run at 50 Hz with a 5 ms simulation step and four simulation steps per
+policy action. Use MuJoCo mouse perturbations to place the robot in front, back, or side fallen states when evaluating
+recovery. Press the configured reset shortcut to respawn the simulation.
+
+The bundled policies are the final `model_20000` exports from
+`/home/ubuntu/AMP_mjlab/logs/fall_recovery`. Deployment uses the explicit observation layout, default poses, PD gains,
+and action scales recorded in this repository, and requires no AMP_mjlab runtime installation. These presets are
+simulation-only; they do not enable real-robot recovery or automatic switching from another locomotion policy.
 
 
 ## [Policy](#policy) > [BeyondMimicPolicy](#policy--beyondmimicpolicy)
@@ -329,6 +356,19 @@ resynchronized to the current loco target before it becomes available again. Whe
 maximum timestep, the pipeline automatically interpolates back to loco. Only the upper non-locomotion joints are
 interpolated or overridden during policy switching; the lower body remains under Locomanipulation until mimic becomes
 active.
+
+These presets also provide operator-triggered AMP fall recovery. After a fall, select `JOINT_DEFAULT`, then press the
+right-stick button (`R`) in simulation, `r` on the keyboard, or `R2` on the Unitree remote to enter recovery.
+Recovery is accepted only while the robot is both in `JOINT_DEFAULT` and fallen. Once it is upright
+(tilt below `1.0 rad`), select loco to start the normal smooth transition back to `RL_DEFAULT`; `JOINT_DEFAULT` is not
+required for this return. Passive, damping, and shutdown remain immediate exits throughout recovery. The recovery
+policy's explicit PD gains are applied on entry and the loco gains are restored during the return transition.
+As with the normal `JOINT_DEFAULT` to `RL_DEFAULT` transition, the configured joint-default interpolation must finish
+before the recovery command is accepted.
+If the robot starts or respawns fallen, it retains its initial `PASSIVE_DEFAULT` mode; startup tilt alone does not
+force damping. An explicit operator `PASSIVE_DEFAULT` command is likewise retained despite the tilt. Selecting another
+mode clears the passive override. An explicitly selected `JOINT_DEFAULT` is also retained while fallen so recovery can
+be requested; passive and damping remain available at all times.
 
 Both G1 loco-mimic variants refresh their born-place position and heading frame when a transition activates the loco or
 mimic policy. This alignment-only refresh intentionally preserves the elastic band's active state and rest length.
