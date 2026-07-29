@@ -52,7 +52,10 @@ class AgiBotCppEnv(Environment):
         if self.aimdk is None:
             return
         if not self.aimdk.self_check():
-            raise RuntimeError("AgiBotCppEnv did not receive AimDK joint/IMU state.")
+            required_streams = "joint/IMU"
+            if self._odometry_type == "AIMDK":
+                required_streams += " or odometry"
+            raise RuntimeError(f"AgiBotCppEnv did not receive fresh AimDK {required_streams} state.")
 
     def reset(self):
         if self.born_place_align:
