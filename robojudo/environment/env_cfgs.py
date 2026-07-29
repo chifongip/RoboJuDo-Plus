@@ -157,6 +157,7 @@ class AgiBotEnvCfg(RobotEnvCfg):
         shutdown_publish_duration: float = 0.2
         state_timeout: float = 0.1
         base_imu_topic: str = "/aima/hal/imu/torso/state"
+        odometry_topic: str = "/aima/mc/leg_odometry"
 
         leg_state_topic: str = "/aima/hal/joint/leg/state"
         waist_state_topic: str = "/aima/hal/joint/waist/state"
@@ -170,8 +171,15 @@ class AgiBotEnvCfg(RobotEnvCfg):
 
     env_type: str = "AgiBotCppEnv"
     aimdk: AimdkCfg = AimdkCfg()
+    odometry_type: Literal["NONE", "DUMMY", "AIMDK"] = "DUMMY"  # pyright: ignore
 
     leg_joint_names: list[str] = []
     waist_joint_names: list[str] = []
     arm_joint_names: list[str] = []
     head_joint_names: list[str] = []
+
+    @model_validator(mode="after")
+    def check_aimdk_odometry_config(self):
+        if self.odometry_type == "AIMDK" and not self.aimdk.odometry_topic.strip():
+            raise ValueError("aimdk.odometry_topic must be set if odometry_type is 'AIMDK'")
+        return self

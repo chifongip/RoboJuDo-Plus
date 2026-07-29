@@ -8,7 +8,6 @@ from robojudo.environment import Environment, env_registry
 from robojudo.environment.env_cfgs import UnitreeEnvCfg
 from robojudo.tools.retarget import HandRetarget
 from robojudo.utils.rotation import TransformAlignment
-from robojudo.utils.util_func import quat_rotate_inverse_np
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +142,10 @@ class UnitreeCppEnv(Environment):
         elif self._odometry_type == "UNITREE":
             self.sport_state = self.unitree.get_sport_state()
             base_pos = np.asarray(self.sport_state.position, dtype=np.float32)
-            lin_vel = np.asarray(self.sport_state.velocity, dtype=np.float32)
-            self._base_lin_vel = quat_rotate_inverse_np(self.base_quat, lin_vel)
+            # Unitree reports this velocity along the robot axes. It is already
+            # body-frame data; applying the separately sampled low-state IMU
+            # orientation would rotate it a second time.
+            self._base_lin_vel = np.asarray(self.sport_state.velocity, dtype=np.float32)
             self._base_pos = self.base_align.align_pos(base_pos) if self.born_place_align else base_pos
 
         # FK

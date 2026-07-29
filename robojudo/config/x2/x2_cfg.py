@@ -310,6 +310,7 @@ class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
     ]
     loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg()
     mimic_policies: list[X2BeyondMimicPolicyCfg] = [
+        X2BeyondMimicPolicyCfg(max_timestep=6747, policy_name="Solo_dance", without_state_estimator=False),
         X2BeyondMimicPolicyCfg(max_timestep=1800, policy_name="Walk1_subject1_wose", without_state_estimator=True),
     ]
     recovery_policy: X2AmpRecoveryPolicyCfg = X2AmpRecoveryPolicyCfg()

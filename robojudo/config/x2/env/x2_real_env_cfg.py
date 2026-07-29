@@ -1,3 +1,5 @@
+from typing import Literal
+
 from robojudo.environment.env_cfgs import AgiBotEnvCfg
 
 from .x2_env_cfg import (
@@ -22,6 +24,7 @@ class X2AimdkCfg(AgiBotEnvCfg.AimdkCfg):
 class X2RealEnvCfg(X2EnvCfg, AgiBotEnvCfg):
     env_type: str = "AgiBotCppEnv"
     aimdk: AgiBotEnvCfg.AimdkCfg = X2AimdkCfg()
+    odometry_type: Literal["NONE", "DUMMY", "AIMDK"] = "AIMDK"
 
     leg_joint_names: list[str] = X2_LEG_JOINT_NAMES
     waist_joint_names: list[str] = X2_WAIST_JOINT_NAMES

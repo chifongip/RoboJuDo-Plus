@@ -50,6 +50,18 @@ from .policy.g1_unitree_policy_cfg import G1UnitreePolicyCfg, G1UnitreeWoGaitPol
 def _g1_locomanipulation_mimic_policies(pad_missing_dofs: bool):
     return [
         G1BeyondMimicPolicyCfg(
+            policy_name="Violin",
+            without_state_estimator=False,
+            max_timestep=610,
+            pad_missing_dofs=pad_missing_dofs,
+        ),
+        G1BeyondMimicPolicyCfg(
+            policy_name="Waltz",
+            without_state_estimator=False,
+            max_timestep=940,
+            pad_missing_dofs=pad_missing_dofs,
+        ),
+        G1BeyondMimicPolicyCfg(
             policy_name="Jump_wose",
             without_state_estimator=True,
             max_timestep=140,

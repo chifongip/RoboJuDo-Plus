@@ -24,6 +24,7 @@ class ZedOdometry:
 
         self._valid = False
         self._pos = np.zeros(3)
+        self._raw_quat = np.array([0.0, 0.0, 0.0, 1.0])
         self._quat = np.array([0.0, 0.0, 0.0, 1.0])  # xyzw
         self._rpy = np.zeros(3)
         self._lin_vel = np.zeros(3)
@@ -72,7 +73,8 @@ class ZedOdometry:
             self._pos = _pos + np.array(self.cfg.pos_offset)
 
         if quat := self.staus_data.get("quat", None):
-            _quat = np.array(quat)
+            self._raw_quat = np.array(quat)
+            _quat = self._raw_quat.copy()
             if self.cfg.zero_align:
                 _quat = self.zero_align.align_quat(_quat)
             self._quat = _quat
@@ -82,7 +84,7 @@ class ZedOdometry:
 
         if lin_vel := self.staus_data.get("vel_xyz_world", None):
             _lin_vel = np.array(lin_vel)
-            self._lin_vel = quat_rotate_inverse_np(self._quat, _lin_vel)
+            self._lin_vel = quat_rotate_inverse_np(self._raw_quat, _lin_vel)
 
     @property
     def is_valid(self):

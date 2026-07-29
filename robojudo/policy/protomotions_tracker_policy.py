@@ -180,7 +180,8 @@ class ProtoMotionsTrackerPolicy(Policy):
         self._paused = False
         self._default_pose_mode = False
 
-    def reset_alignment(self):
+    def reset_alignment(self, env_data=None):
+        del env_data
         self._heading_offset = None
 
     def post_step_callback(self, commands=None):

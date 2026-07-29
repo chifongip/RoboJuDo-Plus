@@ -34,6 +34,7 @@ class AgiBotCppEnv(Environment):
         cfg.update(
             {
                 "act": self.enabled,
+                "enable_odometry": cfg_env.odometry_type == "AIMDK",
                 "joint_names": self.joint_names,
                 "leg_joint_names": cfg_env.leg_joint_names,
                 "waist_joint_names": cfg_env.waist_joint_names,
@@ -44,6 +45,7 @@ class AgiBotCppEnv(Environment):
             }
         )
         self.aimdk = AimdkController(cfg)
+        self._odometry_type = cfg_env.odometry_type
         self.self_check()
 
     def self_check(self):
@@ -71,7 +73,7 @@ class AgiBotCppEnv(Environment):
 
         if self.enabled and not self.aimdk.state_is_fresh(self.cfg_env.aimdk.state_timeout):
             self.command_damping(self.cfg_env.aimdk.shutdown_damping)
-            raise RuntimeError("AgiBotCppEnv joint or IMU state became stale; damping commands were sent.")
+            raise RuntimeError("AgiBotCppEnv joint, IMU, or odometry state became stale; damping commands were sent.")
 
         state = self.aimdk.get_robot_state()
         self._dof_pos = np.asarray(state.motor_state.q, dtype=np.float32)
@@ -85,13 +87,40 @@ class AgiBotCppEnv(Environment):
         self._base_ang_vel = np.asarray(state.imu_state.gyroscope, dtype=np.float32)
         self._base_lin_acc = np.asarray(state.imu_state.accelerometer, dtype=np.float32)
 
-        if self._base_pos is None:
-            self._base_pos = np.zeros(3, dtype=np.float32)
-        if self._base_lin_vel is None:
+        measured_torso_pos = None
+        measured_torso_quat = None
+        if self._odometry_type == "AIMDK":
+            odometry = state.odometry_state
+            if odometry.valid:
+                odometry_pos = np.asarray(odometry.position, dtype=np.float32)
+                odometry_quat = np.asarray(odometry.quaternion, dtype=np.float32)
+                if self.born_place_align:
+                    odometry_quat, odometry_pos = self.base_align.align_transform(
+                        odometry_quat,
+                        odometry_pos,
+                    )
+                self._base_pos = odometry_pos
+                # nav_msgs/Odometry specifies twist in child_frame_id. The X2
+                # publisher uses lidar_imu_chest_front, so this is already a
+                # body-frame velocity and must not be rotated again.
+                self._base_lin_vel = np.asarray(odometry.linear_velocity, dtype=np.float32)
+                measured_torso_pos = odometry_pos.copy()
+                measured_torso_quat = odometry_quat.copy()
+            else:
+                self._base_pos = None
+                self._base_lin_vel = None
+        elif self._odometry_type == "DUMMY":
+            self._base_pos = np.array([0.0, 0.0, 0.8], dtype=np.float32)
             self._base_lin_vel = np.zeros(3, dtype=np.float32)
+        else:
+            self._base_pos = None
+            self._base_lin_vel = None
 
         if self.update_with_fk:
             fk_info = self.fk()
+            if measured_torso_pos is not None:
+                fk_info[self._torso_name]["pos"] = measured_torso_pos
+                fk_info[self._torso_name]["quat"] = measured_torso_quat
             self._fk_info = fk_info.copy()
             self._torso_pos = fk_info[self._torso_name]["pos"]
             self._torso_quat = fk_info[self._torso_name]["quat"]

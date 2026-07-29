@@ -1,6 +1,7 @@
 import hashlib
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import mujoco
 import numpy as np
@@ -239,6 +240,111 @@ class TestG1Locomanipulation(unittest.TestCase):
             env.update()
         self.assertEqual(env.unitree.timeout, 0.1)
         self.assertEqual(env.unitree.damping, [5.0])
+
+    def test_unitree_real_backends_keep_reported_robot_frame_velocity(self):
+        from robojudo.environment.unitree_cpp_env import UnitreeCppEnv
+        from robojudo.environment.unitree_env import UnitreeEnv
+        from robojudo.utils.rotation import TransformAlignment
+
+        from scipy.spatial.transform import Rotation
+
+        body_velocity = np.asarray([0.4, -0.2, 0.1], dtype=np.float32)
+        sport_state = SimpleNamespace(position=np.zeros(3), velocity=body_velocity)
+
+        for heading in (0.0, 90.0, 180.0):
+            with self.subTest(heading=heading):
+                raw_quat = Rotation.from_euler("z", heading, degrees=True).as_quat()
+                imu = SimpleNamespace(
+                    quaternion=raw_quat[[3, 0, 1, 2]],
+                    gyroscope=np.zeros(3, dtype=np.float32),
+                    rpy=np.zeros(3, dtype=np.float32),
+                )
+
+                cpp_env = UnitreeCppEnv.__new__(UnitreeCppEnv)
+                cpp_env.cfg_env = SimpleNamespace(unitree=SimpleNamespace(state_timeout=0.0))
+                cpp_env.enabled = False
+                cpp_env.robot = "g1"
+                cpp_env.num_dofs = 1
+                cpp_env.born_place_align = True
+                cpp_env.base_align = TransformAlignment(
+                    quat=Rotation.from_euler("z", 45.0, degrees=True).as_quat(),
+                    yaw_only=True,
+                    xy_only=True,
+                )
+                cpp_env._odometry_type = "UNITREE"
+                cpp_env.update_with_fk = False
+                cpp_env.RemoteControllerHandler = None
+                cpp_env._motor_to_logical = lambda values, dtype: np.asarray(values, dtype=dtype)
+                cpp_env.unitree = SimpleNamespace(
+                    get_robot_state=lambda: SimpleNamespace(
+                        motor_state=SimpleNamespace(q=[0.0], dq=[0.0]),
+                        imu_state=imu,
+                    ),
+                    get_sport_state=lambda: sport_state,
+                )
+                cpp_env.update()
+                np.testing.assert_allclose(cpp_env.base_lin_vel, body_velocity, atol=1e-6)
+
+                python_env = UnitreeEnv.__new__(UnitreeEnv)
+                python_env.robot = "g1"
+                python_env.num_dofs = 1
+                python_env._dof_idx = None
+                python_env.born_place_align = True
+                python_env.base_align = cpp_env.base_align
+                python_env._odometry_type = "UNITREE"
+                python_env.update_with_fk = False
+                python_env.RemoteControllerHandler = None
+                python_env.low_state = SimpleNamespace(
+                    motor_state=[SimpleNamespace(q=0.0, dq=0.0)],
+                    imu_state=imu,
+                )
+                python_env.sport_state = sport_state
+                python_env.update()
+                np.testing.assert_allclose(python_env.base_lin_vel, body_velocity, atol=1e-6)
+
+    def test_zed_velocity_uses_raw_orientation_while_pose_remains_aligned(self):
+        from scipy.spatial.transform import Rotation
+
+        from robojudo.utils.rotation import TransformAlignment
+
+        with patch.dict("sys.modules", {"zed_proxy": SimpleNamespace(ZedOdometryProxy=object)}):
+            from robojudo.tools.zed_odometry import ZedOdometry
+
+        body_velocity = np.asarray([0.4, -0.2, 0.1], dtype=np.float32)
+        raw_quat = Rotation.from_euler("z", 180.0, degrees=True).as_quat()
+        world_velocity = Rotation.from_quat(raw_quat).apply(body_velocity)
+
+        odometry = ZedOdometry.__new__(ZedOdometry)
+        odometry.cfg = SimpleNamespace(zero_align=True, pos_offset=[0.0, 0.0, 0.0])
+        odometry.zed_proxy = SimpleNamespace(
+            get_status=lambda: {
+                "flag_ok": True,
+                "position_xyz": [2.0, 3.0, 0.8],
+                "quat": raw_quat.tolist(),
+                "rpy": [0.0, 0.0, np.pi],
+                "vel_xyz_world": world_velocity.tolist(),
+            },
+            close=lambda: None,
+        )
+        odometry.zero_align = TransformAlignment(
+            quat=Rotation.from_euler("z", 90.0, degrees=True).as_quat(),
+            pos=[1.0, 1.0, 0.0],
+            yaw_only=True,
+            xy_only=True,
+        )
+        odometry.staus_data = {}
+        odometry._valid = False
+        odometry._pos = np.zeros(3)
+        odometry._raw_quat = np.asarray([0.0, 0.0, 0.0, 1.0])
+        odometry._quat = np.asarray([0.0, 0.0, 0.0, 1.0])
+        odometry._rpy = np.zeros(3)
+        odometry._lin_vel = np.zeros(3)
+
+        odometry.update()
+
+        np.testing.assert_allclose(odometry.lin_vel, body_velocity, atol=1e-6)
+        aligned_yaw = Rotation.from_quat(odometry.quat).as_euler("xyz", degrees=True)[2]
+        self.assertAlmostEqual(aligned_yaw, 90.0, places=5)
 
     def test_elastic_band_attaches_to_both_g1_models_and_resets(self):
         from robojudo.config.g1.g1_cfg import (

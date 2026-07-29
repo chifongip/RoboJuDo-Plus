@@ -6,6 +6,62 @@ from box import Box
 
 
 class TestG1LocomanipulationLocoMimic(unittest.TestCase):
+    def test_generic_g1_beyondmimic_configs_enable_alignment_and_load_all_policies(self):
+        from robojudo.config.g1.g1_loco_mimic_cfg import (
+            g1_locomimic_beyondmimic,
+            g1_locomimic_beyondmimic_real,
+        )
+        from robojudo.policy.g1_beyondmimic_policy import G1BeyondMimicPolicy
+
+        for config_type in (g1_locomimic_beyondmimic, g1_locomimic_beyondmimic_real):
+            cfg = config_type()
+            with self.subTest(config=config_type.__name__):
+                self.assertTrue(cfg.realign_on_policy_switch)
+                for policy_cfg in cfg.mimic_policies:
+                    self.assertFalse(policy_cfg.override_robot_anchor_pos)
+                    policy = G1BeyondMimicPolicy(policy_cfg, "cpu")
+                    self.addCleanup(policy.close_progress)
+
+    def test_g1_beyondmimic_is_heading_invariant_with_and_without_estimator(self):
+        from scipy.spatial.transform import Rotation
+
+        from robojudo.config.g1.policy.g1_beyondmimic_policy_cfg import G1BeyondMimicPolicyCfg
+        from robojudo.policy.g1_beyondmimic_policy import G1BeyondMimicPolicy
+
+        for policy_name, without_state_estimator in (("Dance_wose", True), ("Violin", False)):
+            policy = G1BeyondMimicPolicy(
+                G1BeyondMimicPolicyCfg(
+                    policy_name=policy_name,
+                    without_state_estimator=without_state_estimator,
+                ),
+                "cpu",
+            )
+            self.addCleanup(policy.close_progress)
+            observations = []
+            actions = []
+            for heading in (0.0, 90.0, 180.0):
+                policy.reset()
+                env_data = Box(
+                    {
+                        "dof_pos": policy.default_dof_pos.copy(),
+                        "dof_vel": np.zeros(policy.num_dofs, dtype=np.float32),
+                        "base_ang_vel": np.asarray([0.01, -0.02, 0.03], dtype=np.float32),
+                        "base_lin_vel": np.asarray([0.04, -0.01, 0.0], dtype=np.float32),
+                        "torso_pos": np.asarray([1.0, -2.0, 0.8], dtype=np.float32),
+                        "torso_quat": Rotation.from_euler("z", heading, degrees=True).as_quat(),
+                    }
+                )
+                policy.reset_alignment(env_data)
+                observation, _ = policy.get_observation(env_data, Box({}))
+                observations.append(observation)
+                actions.append(policy.get_action(observation))
+
+            with self.subTest(policy=policy_name):
+                for observation in observations[1:]:
+                    np.testing.assert_allclose(observation, observations[0], atol=1e-5)
+                for action in actions[1:]:
+                    np.testing.assert_allclose(action, actions[0], atol=1e-5)
+
     def test_configs_register_models_controls_and_safety(self):
         from robojudo.config.g1.g1_loco_mimic_cfg import (
             g1_23_locomanipulation_default_locomimic,
@@ -50,7 +106,12 @@ class TestG1LocomanipulationLocoMimic(unittest.TestCase):
                         (policy.policy_name, policy.without_state_estimator, policy.max_timestep)
                         for policy in cfg.mimic_policies
                     ],
-                    [("Jump_wose", True, 140), ("Dance_wose", True, 6574)],
+                    [
+                        ("Violin", False, 610),
+                        ("Waltz", False, 940),
+                        ("Jump_wose", True, 140),
+                        ("Dance_wose", True, 6574),
+                    ],
                 )
                 self.assertTrue(all(policy.pad_missing_dofs is padded for policy in cfg.mimic_policies))
 
@@ -245,21 +306,27 @@ class TestG1LocomanipulationLocoMimic(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"expects observation shape \(154,\)"):
             policy.get_action(np.zeros(160, dtype=np.float32))
 
-    def test_g1_policy_activation_realigns_without_resetting_elastic_band(self):
+    def test_g1_policy_activation_aligns_reference_without_resetting_environment(self):
         from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager
 
         calls = []
         elastic_band = SimpleNamespace(active=False, rest_length=0.6)
-        env = SimpleNamespace(elastic_band=elastic_band)
-        env.reset_alignment = lambda: calls.append("realign")
+        env = SimpleNamespace(
+            elastic_band=elastic_band,
+            reset_alignment=lambda: self.fail("environment alignment must not reset during policy activation"),
+        )
+        env_data = Box({"torso_pos": [1.0, 2.0, 0.9]})
+        policy = SimpleNamespace(reset_alignment=lambda data=None: calls.append(("align-reference", data)))
 
         manager = PolicyInterpManager.__new__(PolicyInterpManager)
         manager.env = env
         manager.realign_on_policy_switch = True
+        manager._latest_env_data = env_data
+        manager.policy_by_id = lambda policy_id: policy
         manager.set_policy = lambda policy_id, reset_env: calls.append(("policy", policy_id, reset_env))
         manager._activate_policy(2)
 
-        self.assertEqual(calls, ["realign", ("policy", 2, False)])
+        self.assertEqual(calls, [("align-reference", env_data), ("policy", 2, False)])
         self.assertFalse(elastic_band.active)
         self.assertEqual(elastic_band.rest_length, 0.6)
 

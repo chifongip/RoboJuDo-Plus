@@ -88,7 +88,7 @@ flowchart LR
     Cpp --> Exec[rclcpp executor thread]
     Exec --> Subs[ROS 2 subscribers]
     Loop --> Pubs[ROS 2 publishers]
-    Subs --> State[Joint state groups + torso IMU]
+    Subs --> State[Joint state groups + torso IMU + optional odometry]
     Pubs --> Cmd[Joint command groups]
 ```
 
@@ -99,6 +99,11 @@ The C++ bridge initializes ROS 2 once, creates a single-threaded executor, and s
 - `/aima/hal/joint/arm/state`
 - `/aima/hal/joint/head/state`
 - `/aima/hal/imu/torso/state`
+
+For real X2, `odometry_type="AIMDK"` also enables a best-effort, transient-local
+`nav_msgs/msg/Odometry` subscription to `/aima/mc/leg_odometry`. The C++ bridge includes this
+stream in its freshness check and exposes the measured chest pose and body-frame velocity to
+`AgiBotCppEnv`.
 
 It publishes grouped `aimdk_msgs/msg/JointCommandArray` commands to:
 
@@ -137,6 +142,8 @@ The main DDS channels are:
 - `rt/dex3/left/cmd` and `rt/dex3/right/cmd`: optional Dex-3 hand commands
 
 Incoming low-state messages are CRC-checked before updating the internal robot state buffer. Outgoing low-command messages are filled from the latest motor command buffer, assigned `mode_pr` and `mode_machine`, CRC-stamped, and written to DDS. `step()` sends commands immediately, while recurrent writer threads maintain command publication at the configured control period.
+
+The source-language Unitree odometry contract defines `SportModeState.velocity` along the robot coordinate axes. RoboJuDo therefore passes it to policies as body-frame velocity without rotating it by the separately sampled low-state IMU quaternion. Position remains world-frame data and is transformed by born-place alignment when enabled. This distinction also avoids the incorrect sign reversal that an extra heading rotation would introduce after a 180-degree turn.
 
 ## Practical Notes
 

@@ -40,7 +40,17 @@ ROBOJUDO_REQUIRE_AIMDK=1 python -m unittest discover -s tests
 
 This strict test mode fails instead of skipping when `aimdk_cpp` or one of its ROS 2 libraries cannot be loaded.
 
-Confirm that all four joint-state topics and `/aima/hal/imu/torso/state` are updating before enabling commands. Missing or stale state prevents activation and triggers damping.
+Confirm that all four joint-state topics, `/aima/hal/imu/torso/state`, and
+`/aima/mc/leg_odometry` are updating before enabling commands. Real X2 configurations use
+`odometry_type="AIMDK"` and require `nav_msgs/msg/Odometry` from that topic. Missing or stale
+joint, IMU, or odometry state prevents activation and triggers damping.
+
+The leg-odometry publisher reports its pose in `leg_odom` for
+`child_frame_id=lidar_imu_chest_front`. RoboJuDo therefore uses the pose directly as the
+measured torso pose. The message twist follows the ROS `Odometry` convention and is already
+expressed in the child/body frame; it is passed to the policy without another heading
+rotation. Reinstall `aimdk_cpp` after changing or updating this integration because the
+subscriber is implemented in the native extension.
 
 ## Control Modes
 
@@ -170,7 +180,7 @@ manual return remains available through joystick `Back` or keyboard `]`.
 
 With the robot supported, select `JOINT_DEFAULT` and wait for the completion log. Then select `RL_DEFAULT`. ONNX time does not advance in passive, damping, or joint-preparation modes.
 
-The policy runs at 50 Hz. `aimdk_cpp` republishes the active mode at 500 Hz. If position commands stop for 100 ms, the backend latches damping. Position control cannot resume until a new mode transition explicitly re-arms it. Stale state, a non-finite target, excessive tilt, and shutdown also force damping.
+The policy runs at 50 Hz. `aimdk_cpp` republishes the active mode at 500 Hz. If position commands stop for 100 ms, the backend latches damping. Position control cannot resume until a new mode transition explicitly re-arms it. Stale joint, IMU, or enabled odometry state, a non-finite target, excessive tilt, and shutdown also force damping.
 
 ## Preflight Checks
 

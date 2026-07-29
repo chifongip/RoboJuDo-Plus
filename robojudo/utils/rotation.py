@@ -60,6 +60,23 @@ class TransformAlignment:
         pos_aligned = self.align_pos(pos)
         return quat_aligned, pos_aligned
 
+    def unalign_quat(self, quat):
+        """Convert an aligned rotation back to the original frame."""
+        R_aligned = sRot.from_quat(quat)
+        return (self.R_base * R_aligned).as_quat()
+
+    def unalign_xyz(self, xyz):
+        """Convert an aligned vector back to the original frame."""
+        return self.R_base.apply(np.asarray(xyz))
+
+    def unalign_pos(self, pos):
+        """Convert an aligned position back to the original frame."""
+        return self.unalign_xyz(pos) + self.p_base
+
+    def unalign_transform(self, quat, pos):
+        """Convert an aligned transform back to the original frame."""
+        return self.unalign_quat(quat), self.unalign_pos(pos)
+
 
 if __name__ == "__main__":
     # base: 90° yaw, pos [1,0,0]
