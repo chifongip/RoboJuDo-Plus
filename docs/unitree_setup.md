@@ -52,7 +52,7 @@ We provide two deployment options:
 Run the policy directly **on the robot**.
 
 ## Setup
-1. Clone our repository and setup the environment on the robot’s onboard computer: see [Basic Setup](../README.md#🛠️Easy-Setup).
+1. Clone our repository and setup the environment on the robot’s onboard computer: see [Setup](../README.md#setup).
 2. check [🛠️SDK Installation](#️sdk-installation) for Unitree SDK setup.
 
 Since the G1 has limited computing resources, you need to run `UnitreeCppEnv`. 
