@@ -161,6 +161,8 @@ class AgiBotEnvCfg(RobotEnvCfg):
         odometry_topic: str = "/aima/mc/leg_odometry"
         odometry_parent_frame: str = "leg_odom"
         odometry_child_frame: str = "lidar_imu_chest_front"
+        odometry_position_mode: Literal["ABSOLUTE", "RELATIVE_START"] = "ABSOLUTE"
+        """Whether odometry translation is ground-referenced or relative to its first sample."""
         torso_to_odometry_sensor_position: list[float] = [
             0.0915429,
             0.01577811,

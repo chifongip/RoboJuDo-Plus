@@ -29,6 +29,9 @@ class X2SuperOdomCfg(X2AimdkCfg):
     odometry_topic: str = "/laser_odometry"
     odometry_parent_frame: str = "map"
     odometry_child_frame: str = "lidar_chest_front"
+    # SuperOdom initializes the LiDAR translation at zero. Rebase its converted
+    # pelvis pose so policies consume displacement, not a fictitious ground height.
+    odometry_position_mode: Literal["ABSOLUTE", "RELATIVE_START"] = "RELATIVE_START"
     torso_to_odometry_sensor_position: list[float] = [
         0.102632855873251,
         0.0,

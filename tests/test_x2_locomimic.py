@@ -179,6 +179,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertEqual(real_cfg.env.aimdk.base_imu_topic, "/aima/hal/imu/torso/state")
         self.assertEqual(real_cfg.env.aimdk.odometry_parent_frame, "map")
         self.assertEqual(real_cfg.env.aimdk.odometry_child_frame, "lidar_chest_front")
+        self.assertEqual(real_cfg.env.aimdk.odometry_position_mode, "RELATIVE_START")
         np.testing.assert_allclose(
             real_cfg.env.aimdk.torso_to_odometry_sensor_quaternion,
             [-np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)],
@@ -349,6 +350,43 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
 
         np.testing.assert_allclose(env._filtered_base_lin_vel, [1.0, 0.0, 0.0], atol=1e-6)
 
+    def test_relative_start_odometry_removes_superodom_sensor_origin_without_changing_delta(self):
+        from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
+
+        odometry = SimpleNamespace(
+            sequence=1,
+            stamp_sec=10,
+            stamp_nanosec=0,
+            position=[-0.35, 0.12, -0.61],
+            quaternion=[0.0, 0.0, 0.0, 1.0],
+        )
+        env = AgiBotCppEnv.__new__(AgiBotCppEnv)
+        env.cfg_env = SimpleNamespace(
+            aimdk=SimpleNamespace(
+                odometry_timeout=0.3,
+                odometry_velocity_filter_time_constant=0.0,
+                odometry_position_mode="RELATIVE_START",
+            )
+        )
+        env._last_odometry_sequence = None
+        env._last_odometry_stamp = None
+        env._last_odometry_root_pos = None
+        env._last_odometry_root_quat = None
+        env._filtered_base_lin_vel = np.zeros(3, dtype=np.float32)
+        env._last_odometry_receipt_time = None
+        env._odometry_position_origin = None
+        env._odometry_sensor_pose_to_root = lambda position, quaternion: (position, quaternion)
+
+        first_position, _ = env._update_odometry_state(odometry)
+        odometry.sequence = 2
+        odometry.stamp_nanosec = 100_000_000
+        odometry.position = [-0.25, 0.12, -0.61]
+        second_position, _ = env._update_odometry_state(odometry)
+
+        np.testing.assert_allclose(first_position, np.zeros(3), atol=1e-6)
+        np.testing.assert_allclose(second_position, [0.1, 0.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(env._filtered_base_lin_vel, [1.0, 0.0, 0.0], atol=1e-6)
+
     def test_pipeline_composes_locomanipulation_loco_mimic_and_four_mode_behavior(self):
         from robojudo.pipeline.locomanipulation_loco_mimic_pipeline import (
             LocomanipulationLocoMimicPipelineMixin,
@@ -359,9 +397,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         )
         from robojudo.pipeline.x2_locomanipulation_pipeline import X2FourModePipelineMixin
 
-        self.assertTrue(
-            issubclass(X2LocomanipulationLocoMimicPipeline, LocomanipulationLocoMimicPipelineMixin)
-        )
+        self.assertTrue(issubclass(X2LocomanipulationLocoMimicPipeline, LocomanipulationLocoMimicPipelineMixin))
         self.assertTrue(issubclass(X2LocomanipulationLocoMimicPipeline, X2FourModePipelineMixin))
         self.assertTrue(issubclass(X2LocomanipulationLocoMimicPipeline, RlLocoMimicPipeline))
 
@@ -612,9 +648,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         progress = SimpleNamespace(close_calls=0)
         manager = SimpleNamespace(
             reset_to_loco_calls=[],
-            policy=SimpleNamespace(
-                close_progress=lambda: setattr(progress, "close_calls", progress.close_calls + 1)
-            ),
+            policy=SimpleNamespace(close_progress=lambda: setattr(progress, "close_calls", progress.close_calls + 1)),
         )
         manager.reset_to_loco = lambda refresh_env: manager.reset_to_loco_calls.append(refresh_env)
         pipeline.policy_manager = manager

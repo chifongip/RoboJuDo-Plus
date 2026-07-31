@@ -25,6 +25,7 @@ class AgiBotCppEnv(Environment):
         self._last_odometry_stamp: float | None = None
         self._last_odometry_root_pos: np.ndarray | None = None
         self._last_odometry_root_quat: np.ndarray | None = None
+        self._odometry_position_origin: np.ndarray | None = None
         self._filtered_base_lin_vel = np.zeros(3, dtype=np.float32)
         self._last_odometry_receipt_time: float | None = None
 
@@ -130,9 +131,12 @@ class AgiBotCppEnv(Environment):
                 np.asarray(odometry.position, dtype=np.float64),
                 np.asarray(odometry.quaternion, dtype=np.float64),
             )
-            stamp = float(getattr(odometry, "stamp_sec", 0)) + float(
-                getattr(odometry, "stamp_nanosec", 0)
-            ) * 1e-9
+            position_mode = getattr(self.cfg_env.aimdk, "odometry_position_mode", "ABSOLUTE")
+            if position_mode == "RELATIVE_START":
+                if getattr(self, "_odometry_position_origin", None) is None:
+                    self._odometry_position_origin = root_pos.copy()
+                root_pos = root_pos - self._odometry_position_origin
+            stamp = float(getattr(odometry, "stamp_sec", 0)) + float(getattr(odometry, "stamp_nanosec", 0)) * 1e-9
             if stamp <= 0.0:
                 stamp = time.monotonic()
 
@@ -162,9 +166,7 @@ class AgiBotCppEnv(Environment):
                 time.monotonic() - self._last_odometry_receipt_time,
                 self.cfg_env.aimdk.odometry_timeout,
             )
-            velocity_world = Rotation.from_quat(self._last_odometry_root_quat).apply(
-                self._filtered_base_lin_vel
-            )
+            velocity_world = Rotation.from_quat(self._last_odometry_root_quat).apply(self._filtered_base_lin_vel)
             root_pos += velocity_world * age
         return root_pos.astype(np.float32), self._last_odometry_root_quat.astype(np.float32)
 
