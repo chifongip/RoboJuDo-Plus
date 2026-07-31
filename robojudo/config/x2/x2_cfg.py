@@ -5,7 +5,7 @@ from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 
 from .env.x2_env_cfg import X2_ARM_JOINT_NAMES, X2JointDefaultDoF
 from .env.x2_mujuco_env_cfg import X2MujocoEnvCfg
-from .env.x2_real_env_cfg import X2RealEnvCfg
+from .env.x2_real_env_cfg import X2RealEnvCfg, X2SuperOdomCfg
 from .pipeline.x2_loco_mimic_pipeline_cfg import X2LocomanipulationLocoMimicPipelineCfg
 from .policy.x2_amp_recovery_policy_cfg import X2AmpRecoveryPolicyCfg
 from .policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
@@ -320,7 +320,11 @@ class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
 class x2_locomimic_beyondmimic_real(x2_locomimic_beyondmimic):
     """X2 locomanipulation locomotion with x2_rl_deploy as the test mimic, Sim2Real."""
 
-    env: X2RealEnvCfg = X2RealEnvCfg(dof=X2LocomanipulationEnvDoF())
+    env: X2RealEnvCfg = X2RealEnvCfg(
+        dof=X2LocomanipulationEnvDoF(),
+        odometry_type="SUPERODOM",
+        aimdk=X2SuperOdomCfg(),
+    )
     ctrl: list[JoystickCtrlCfg | UpperBodyZmqCtrlCfg] = [
         JoystickCtrlCfg(
             triggers={

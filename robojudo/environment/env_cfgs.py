@@ -156,8 +156,23 @@ class AgiBotEnvCfg(RobotEnvCfg):
         shutdown_damping: float = 5.0
         shutdown_publish_duration: float = 0.2
         state_timeout: float = 0.1
+        odometry_timeout: float = 0.1
         base_imu_topic: str = "/aima/hal/imu/torso/state"
         odometry_topic: str = "/aima/mc/leg_odometry"
+        odometry_parent_frame: str = "leg_odom"
+        odometry_child_frame: str = "lidar_imu_chest_front"
+        torso_to_odometry_sensor_position: list[float] = [
+            0.0915429,
+            0.01577811,
+            0.1770966,
+        ]
+        torso_to_odometry_sensor_quaternion: list[float] = [
+            -0.00547157,
+            -0.70923143,
+            0.00118664,
+            0.7049535,
+        ]
+        odometry_velocity_filter_time_constant: float = 0.15
 
         leg_state_topic: str = "/aima/hal/joint/leg/state"
         waist_state_topic: str = "/aima/hal/joint/waist/state"
@@ -171,7 +186,7 @@ class AgiBotEnvCfg(RobotEnvCfg):
 
     env_type: str = "AgiBotCppEnv"
     aimdk: AimdkCfg = AimdkCfg()
-    odometry_type: Literal["NONE", "DUMMY", "AIMDK"] = "DUMMY"  # pyright: ignore
+    odometry_type: Literal["NONE", "DUMMY", "AIMDK", "SUPERODOM"] = "DUMMY"  # pyright: ignore
 
     leg_joint_names: list[str] = []
     waist_joint_names: list[str] = []
@@ -180,6 +195,9 @@ class AgiBotEnvCfg(RobotEnvCfg):
 
     @model_validator(mode="after")
     def check_aimdk_odometry_config(self):
-        if self.odometry_type == "AIMDK" and not self.aimdk.odometry_topic.strip():
-            raise ValueError("aimdk.odometry_topic must be set if odometry_type is 'AIMDK'")
+        if self.odometry_type in ("AIMDK", "SUPERODOM") and not self.aimdk.odometry_topic.strip():
+            raise ValueError("aimdk.odometry_topic must be set when odometry is enabled")
+        if self.odometry_type in ("AIMDK", "SUPERODOM"):
+            if not self.aimdk.odometry_parent_frame.strip() or not self.aimdk.odometry_child_frame.strip():
+                raise ValueError("odometry parent and child frames must be set when odometry is enabled")
         return self
