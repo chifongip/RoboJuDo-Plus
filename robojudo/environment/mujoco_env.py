@@ -9,7 +9,12 @@ from robojudo.environment import Environment, env_registry
 from robojudo.environment.env_cfgs import MujocoEnvCfg
 from robojudo.environment.utils.elastic_band import ElasticBand
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
-from robojudo.environment.utils.odometry import SimulatedOdometry, root_pose_to_sensor, sensor_pose_to_root
+from robojudo.environment.utils.odometry import (
+    OdometryReplayProfile,
+    SimulatedOdometry,
+    root_pose_to_sensor,
+    sensor_pose_to_root,
+)
 from robojudo.utils.util_func import quat_rotate_inverse_np, quatToEuler
 
 logger = logging.getLogger(__name__)
@@ -107,10 +112,22 @@ class MujocoEnv(Environment):
         self.data.qpos[5] = c * q[2] + s * q[1]
         self.data.qpos[6] = c * q[3] + s * q[0]
 
-    def reborn(self, init_qpos=None):
+    def reborn(self, init_qpos=None, init_qvel=None):
         if init_qpos is not None:
-            self.data.qpos[0:7] = init_qpos
-            self.data.qvel[:] = 0.0
+            init_qpos = np.asarray(init_qpos, dtype=np.float64)
+            if init_qpos.shape == (7,):
+                self.data.qpos[0:7] = init_qpos
+            elif init_qpos.shape == self.data.qpos.shape:
+                self.data.qpos[:] = init_qpos
+            else:
+                raise ValueError(f"init_qpos shape {init_qpos.shape} must be (7,) or {self.data.qpos.shape}")
+            if init_qvel is None:
+                self.data.qvel[:] = 0.0
+            else:
+                init_qvel = np.asarray(init_qvel, dtype=np.float64)
+                if init_qvel.shape != self.data.qvel.shape:
+                    raise ValueError(f"init_qvel shape {init_qvel.shape} != {self.data.qvel.shape}")
+                self.data.qvel[:] = init_qvel
             self.data.ctrl[:] = 0.0
         else:
             if self.model.nkey > 0:
@@ -123,6 +140,14 @@ class MujocoEnv(Environment):
             self.elastic_band.reset()
         if self.simulated_odometry is not None:
             self.simulated_odometry.reset(float(self.data.time))
+
+    def set_odometry_replay_profile(self, profile: OdometryReplayProfile | None):
+        """Replace the simulated odometer while preserving its safety configuration."""
+        cfg = self.cfg_env.simulated_odometry
+        if cfg is None or not cfg.enabled:
+            raise RuntimeError("Simulated odometry must be enabled before installing a replay profile")
+        self.simulated_odometry = SimulatedOdometry(cfg, replay_profile=profile)
+        self.simulated_odometry.reset(float(self.data.time))
 
     def reset(self):
         if self.elastic_band is not None:
@@ -288,6 +313,9 @@ class MujocoEnv(Environment):
 
         if hand_pose is not None:
             logger.info("Hand pose-->", hand_pose)
+        pd_target = np.asarray(pd_target, dtype=np.float64)
+        if getattr(getattr(self, "cfg_env", None), "clip_position_targets", False):
+            pd_target = np.clip(pd_target, self.position_limits[:, 0], self.position_limits[:, 1])
 
         def pd_torque():
             torque = (pd_target - self.dof_pos) * self.stiffness - self.dof_vel * self.damping

@@ -30,12 +30,8 @@ def sensor_pose_to_root(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Convert a world->sensor pose to world->root using the two fixed/dynamic mounts."""
     sensor_position, sensor_quaternion = _pose(sensor_position, sensor_quaternion)
-    torso_to_sensor_position, torso_to_sensor_quaternion = _pose(
-        torso_to_sensor_position, torso_to_sensor_quaternion
-    )
-    root_to_torso_position, root_to_torso_quaternion = _pose(
-        root_to_torso_position, root_to_torso_quaternion
-    )
+    torso_to_sensor_position, torso_to_sensor_quaternion = _pose(torso_to_sensor_position, torso_to_sensor_quaternion)
+    root_to_torso_position, root_to_torso_quaternion = _pose(root_to_torso_position, root_to_torso_quaternion)
     world_to_sensor = Rotation.from_quat(sensor_quaternion)
     torso_to_sensor = Rotation.from_quat(torso_to_sensor_quaternion)
     root_to_torso = Rotation.from_quat(root_to_torso_quaternion)
@@ -57,20 +53,14 @@ def root_pose_to_sensor(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Construct a virtual world->sensor pose from the simulated root pose."""
     root_position, root_quaternion = _pose(root_position, root_quaternion)
-    root_to_torso_position, root_to_torso_quaternion = _pose(
-        root_to_torso_position, root_to_torso_quaternion
-    )
-    torso_to_sensor_position, torso_to_sensor_quaternion = _pose(
-        torso_to_sensor_position, torso_to_sensor_quaternion
-    )
+    root_to_torso_position, root_to_torso_quaternion = _pose(root_to_torso_position, root_to_torso_quaternion)
+    torso_to_sensor_position, torso_to_sensor_quaternion = _pose(torso_to_sensor_position, torso_to_sensor_quaternion)
     world_to_root = Rotation.from_quat(root_quaternion)
     root_to_torso = Rotation.from_quat(root_to_torso_quaternion)
     torso_to_sensor = Rotation.from_quat(torso_to_sensor_quaternion)
     world_to_torso = world_to_root * root_to_torso
     sensor_position = (
-        root_position
-        + world_to_root.apply(root_to_torso_position)
-        + world_to_torso.apply(torso_to_sensor_position)
+        root_position + world_to_root.apply(root_to_torso_position) + world_to_torso.apply(torso_to_sensor_position)
     )
     return sensor_position, (world_to_torso * torso_to_sensor).as_quat()
 
@@ -148,11 +138,48 @@ class _PendingSample:
     converter: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
 
 
+@dataclass(frozen=True)
+class OdometryReplayProfile:
+    """Recorded delivery timing and detrended pose residuals for simulation replay."""
+
+    sample_times: np.ndarray
+    position_residuals: np.ndarray
+    yaw_residuals: np.ndarray
+    valid: np.ndarray
+
+    def __post_init__(self):
+        sample_times = np.asarray(self.sample_times, dtype=np.float64)
+        position_residuals = np.asarray(self.position_residuals, dtype=np.float64)
+        yaw_residuals = np.asarray(self.yaw_residuals, dtype=np.float64)
+        valid = np.asarray(self.valid, dtype=bool)
+        count = len(sample_times)
+        if (
+            sample_times.shape != (count,)
+            or position_residuals.shape != (count, 3)
+            or yaw_residuals.shape != (count,)
+            or valid.shape != (count,)
+        ):
+            raise ValueError("Odometry replay profile arrays have incompatible shapes")
+        if count == 0 or abs(sample_times[0]) > 1e-9 or np.any(np.diff(sample_times) <= 0.0):
+            raise ValueError("Odometry replay sample_times must start at zero and increase strictly")
+        if not (
+            np.isfinite(sample_times).all()
+            and np.isfinite(position_residuals).all()
+            and np.isfinite(yaw_residuals).all()
+        ):
+            raise ValueError("Odometry replay profile must contain finite values")
+        object.__setattr__(self, "sample_times", sample_times)
+        object.__setattr__(self, "position_residuals", position_residuals)
+        object.__setattr__(self, "yaw_residuals", yaw_residuals)
+        object.__setattr__(self, "valid", valid)
+
+
 class SimulatedOdometry:
     """Deterministic sample/latency/dropout model used by MuJoCo benchmarks."""
 
-    def __init__(self, cfg: SimulatedOdometryCfg):
+    def __init__(self, cfg: SimulatedOdometryCfg, replay_profile: OdometryReplayProfile | None = None):
         self.cfg = cfg
+        self.replay_profile = replay_profile
         self.tracker = OdometryTracker(cfg.timeout, cfg.velocity_filter_time_constant)
         self.reset()
 
@@ -161,6 +188,7 @@ class SimulatedOdometry:
         self.tracker.reset()
         self.start_time = float(start_time)
         self.next_sample_time = self.start_time
+        self.replay_index = 0
         self.pending: list[_PendingSample] = []
         self.generated = 0
         self.delivered = 0
@@ -177,6 +205,9 @@ class SimulatedOdometry:
         sensor_quaternion: np.ndarray,
         converter: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
     ) -> OdometryEstimate | None:
+        if self.replay_profile is not None:
+            return self._update_replay(now, sensor_position, sensor_quaternion, converter)
+
         period = 1.0 / self.cfg.update_rate_hz
         while now + 1e-9 >= self.next_sample_time:
             sample_time = self.next_sample_time
@@ -209,6 +240,36 @@ class SimulatedOdometry:
         for sample in sorted(ready, key=lambda item: item.sample_time):
             root_position, root_quaternion = sample.converter(sample.sensor_position, sample.sensor_quaternion)
             self.tracker.update(root_position, root_quaternion, sample.sample_time, now)
+            self.delivered += 1
+        return self.tracker.estimate(now) if self.tracker.initialized else None
+
+    def _update_replay(
+        self,
+        now: float,
+        sensor_position: np.ndarray,
+        sensor_quaternion: np.ndarray,
+        converter: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
+    ) -> OdometryEstimate | None:
+        """Apply a captured delivery schedule to the current virtual sensor pose."""
+        elapsed = float(now) - self.start_time
+        profile = self.replay_profile
+        assert profile is not None
+        while (
+            self.replay_index < len(profile.sample_times) and elapsed + 1e-9 >= profile.sample_times[self.replay_index]
+        ):
+            index = self.replay_index
+            self.replay_index += 1
+            self.generated += 1
+            if not profile.valid[index]:
+                self.degenerate += 1
+                continue
+            noisy_position = np.asarray(sensor_position, dtype=np.float64) + profile.position_residuals[index]
+            noisy_rotation = Rotation.from_euler("z", profile.yaw_residuals[index]) * Rotation.from_quat(
+                sensor_quaternion
+            )
+            root_position, root_quaternion = converter(noisy_position, noisy_rotation.as_quat())
+            sample_time = self.start_time + profile.sample_times[index]
+            self.tracker.update(root_position, root_quaternion, sample_time, now)
             self.delivered += 1
         return self.tracker.estimate(now) if self.tracker.initialized else None
 

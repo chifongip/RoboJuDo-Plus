@@ -104,6 +104,9 @@ class MujocoEnvCfg(EnvCfg):
     headless: bool = False
     """Run without creating a MuJoCo viewer (for deterministic batch benchmarks)."""
 
+    clip_position_targets: bool = False
+    """Clamp PD targets to configured joint limits, matching real command transports."""
+
     simulated_odometry: SimulatedOdometryCfg | None = None
     """Optional low-rate odometry model. Disabled by default and has no effect when omitted."""
 
