@@ -6,6 +6,7 @@ from scipy.spatial.transform import Rotation
 
 from robojudo.environment import Environment, env_registry
 from robojudo.environment.env_cfgs import AgiBotEnvCfg
+from robojudo.environment.utils.odometry import sensor_pose_to_root
 
 logger = logging.getLogger(__name__)
 
@@ -185,23 +186,21 @@ class AgiBotCppEnv(Environment):
             self.cfg_env.aimdk.torso_to_odometry_sensor_position,
             dtype=np.float64,
         )
-        torso_to_sensor_rot = Rotation.from_quat(
-            self.cfg_env.aimdk.torso_to_odometry_sensor_quaternion
-        )
-        world_to_sensor_rot = Rotation.from_quat(sensor_quat)
-        world_to_torso_rot = world_to_sensor_rot * torso_to_sensor_rot.inv()
-        world_to_torso_pos = sensor_pos - world_to_torso_rot.apply(torso_to_sensor_pos)
-
         relative_fk = self.kinematics.forward(
             joint_pos=self._dof_pos,
             base_pos=np.zeros(3, dtype=np.float64),
             base_quat=np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float64),
         )
         pelvis_to_torso_pos = relative_fk[self._torso_name]["pos"]
-        pelvis_to_torso_rot = Rotation.from_quat(relative_fk[self._torso_name]["quat"])
-        world_to_pelvis_rot = world_to_torso_rot * pelvis_to_torso_rot.inv()
-        world_to_pelvis_pos = world_to_torso_pos - world_to_pelvis_rot.apply(pelvis_to_torso_pos)
-        return world_to_pelvis_pos, world_to_pelvis_rot.as_quat()
+        pelvis_to_torso_quat = relative_fk[self._torso_name]["quat"]
+        return sensor_pose_to_root(
+            sensor_pos,
+            sensor_quat,
+            torso_to_sensor_pos,
+            self.cfg_env.aimdk.torso_to_odometry_sensor_quaternion,
+            pelvis_to_torso_pos,
+            pelvis_to_torso_quat,
+        )
 
     def step(self, pd_target, hand_pose=None):
         assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"

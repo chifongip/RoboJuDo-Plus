@@ -42,6 +42,46 @@ class ElasticBandCfg(Config):
     anchor_radius: float = Field(default=0.04, gt=0.0)
 
 
+class SimulatedOdometryCfg(Config):
+    """Simulation-only model of a low-rate external pose odometer."""
+
+    enabled: bool = False
+    update_rate_hz: float = Field(default=10.0, gt=0.0)
+    timeout: float = Field(default=0.3, gt=0.0)
+    velocity_filter_time_constant: float = Field(default=0.15, ge=0.0)
+    latency: float = Field(default=0.0, ge=0.0)
+    jitter: float = Field(default=0.0, ge=0.0)
+    position_noise_std: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    yaw_noise_std: float = Field(default=0.0, ge=0.0)
+    dropout_probability: float = Field(default=0.0, ge=0.0, lt=1.0)
+    degeneracy_windows: list[tuple[float, float]] = []
+    random_seed: int = 0
+    torso_to_sensor_position: tuple[float, float, float] = (
+        0.0915429,
+        0.01577811,
+        0.1770966,
+    )
+    torso_to_sensor_quaternion: tuple[float, float, float, float] = (
+        -0.00547157,
+        -0.70923143,
+        0.00118664,
+        0.7049535,
+    )
+    fail_on_stale: bool = True
+
+    @model_validator(mode="after")
+    def check_odometry_model(self):
+        if any(value < 0.0 for value in self.position_noise_std):
+            raise ValueError("position_noise_std entries must be non-negative")
+        for start, end in self.degeneracy_windows:
+            if start < 0.0 or end <= start:
+                raise ValueError("degeneracy windows must satisfy 0 <= start < end")
+        quat_norm = sum(value * value for value in self.torso_to_sensor_quaternion) ** 0.5
+        if quat_norm < 1e-8:
+            raise ValueError("torso_to_sensor_quaternion must be non-zero")
+        return self
+
+
 class MujocoEnvCfg(EnvCfg):
     env_type: str = "MujocoEnv"
     is_sim: bool = True
@@ -55,8 +95,17 @@ class MujocoEnvCfg(EnvCfg):
     random_heading: bool = False
     """Randomize the robot's yaw heading on each spawn/reborn (useful for testing heading alignment)."""
 
+    initial_heading_degrees: float | None = None
+    """Optional deterministic spawn yaw used by heading-invariance benchmarks."""
+
     elastic_band: ElasticBandCfg | None = None
     """Optional simulation-only suspension band."""
+
+    headless: bool = False
+    """Run without creating a MuJoCo viewer (for deterministic batch benchmarks)."""
+
+    simulated_odometry: SimulatedOdometryCfg | None = None
+    """Optional low-rate odometry model. Disabled by default and has no effect when omitted."""
 
 
 class RobotEnvCfg(EnvCfg):

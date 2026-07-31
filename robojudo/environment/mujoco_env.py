@@ -9,6 +9,7 @@ from robojudo.environment import Environment, env_registry
 from robojudo.environment.env_cfgs import MujocoEnvCfg
 from robojudo.environment.utils.elastic_band import ElasticBand
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
+from robojudo.environment.utils.odometry import SimulatedOdometry, root_pose_to_sensor, sensor_pose_to_root
 from robojudo.utils.util_func import quat_rotate_inverse_np, quatToEuler
 
 logger = logging.getLogger(__name__)
@@ -38,26 +39,34 @@ class MujocoEnv(Environment):
             ElasticBand(cfg_env.elastic_band, self.model, self.data) if cfg_env.elastic_band is not None else None
         )
 
-        self.viewer = mujoco_viewer.MujocoViewer(
-            self.model,
-            self.data,
-            width=1200,
-            height=900,
-            hide_menus=True,
-            diable_key_callbacks=True,
-        )
-        self.viewer.cam.distance = 3.0
-        self.viewer.cam.elevation = -10.0
-        self.viewer.cam.azimuth = 180.0
-        # self.viewer._paused = True
+        self.viewer = None
+        if not cfg_env.headless:
+            self.viewer = mujoco_viewer.MujocoViewer(
+                self.model,
+                self.data,
+                width=1200,
+                height=900,
+                hide_menus=True,
+                diable_key_callbacks=True,
+            )
+            self.viewer.cam.distance = 3.0
+            self.viewer.cam.elevation = -10.0
+            self.viewer.cam.azimuth = 180.0
+            # self.viewer._paused = True
 
-        if cfg_env.visualize_extras:
+        if cfg_env.visualize_extras and self.viewer is not None:
             self.visualizer = MujocoVisualizer(self.viewer, alignment=self.base_align)
         else:
             self.visualizer = None
 
         self.last_time = time.time()
         self.random_heading = cfg_env.random_heading
+        self.initial_heading_degrees = cfg_env.initial_heading_degrees
+        self.simulated_odometry = (
+            SimulatedOdometry(cfg_env.simulated_odometry)
+            if cfg_env.simulated_odometry is not None and cfg_env.simulated_odometry.enabled
+            else None
+        )
 
         self._apply_random_heading()
 
@@ -84,9 +93,12 @@ class MujocoEnv(Environment):
 
     def _apply_random_heading(self):
         """Rotate the root body by a random yaw if random_heading is enabled."""
-        if not self.random_heading:
+        if self.initial_heading_degrees is not None:
+            yaw = np.deg2rad(self.initial_heading_degrees)
+        elif self.random_heading:
+            yaw = np.random.uniform(0, 2 * np.pi)
+        else:
             return
-        yaw = np.random.uniform(0, 2 * np.pi)
         c, s = np.cos(yaw / 2), np.sin(yaw / 2)
         q = self.data.qpos[3:7].copy()  # MuJoCo [w, x, y, z]
         # Pre-multiply by yaw rotation q_yaw=[c,0,0,s]: q_new = q_yaw ⊗ q
@@ -109,10 +121,14 @@ class MujocoEnv(Environment):
         mujoco.mj_forward(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
         if self.elastic_band is not None:
             self.elastic_band.reset()
+        if self.simulated_odometry is not None:
+            self.simulated_odometry.reset(float(self.data.time))
 
     def reset(self):
         if self.elastic_band is not None:
             self.elastic_band.reset()
+        if self.simulated_odometry is not None:
+            self.simulated_odometry.reset(float(self.data.time))
         self.reset_alignment()
 
     def set_gains(self, stiffness, damping):
@@ -166,8 +182,9 @@ class MujocoEnv(Environment):
         raw_quat = self.data.qpos.astype(np.float32)[3:7][[1, 2, 3, 0]]
         quat = raw_quat.copy()
         ang_vel = self.data.qvel.astype(np.float32)[3:6]
-        base_pos = self.data.qpos.astype(np.float32)[:3]
-        lin_vel = self.data.qvel.astype(np.float32)[0:3]
+        raw_base_pos = self.data.qpos.astype(np.float32)[:3]
+        base_pos = raw_base_pos.copy()
+        world_lin_vel = self.data.qvel.astype(np.float32)[0:3]
 
         if self.born_place_align:
             quat, base_pos = self.base_align.align_transform(quat, base_pos)
@@ -175,7 +192,51 @@ class MujocoEnv(Environment):
         # MuJoCo free-joint translation velocity is expressed in the raw world
         # frame. Convert it with the physical root orientation, not the
         # born-place-aligned orientation exposed to policies.
-        lin_vel = quat_rotate_inverse_np(raw_quat, lin_vel)
+        lin_vel = quat_rotate_inverse_np(raw_quat, world_lin_vel)
+
+        if self.simulated_odometry is not None:
+            relative_fk = self.kinematics.forward(
+                joint_pos=self._dof_pos,
+                base_pos=np.zeros(3, dtype=np.float64),
+                base_quat=np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float64),
+            )
+            root_to_torso_pos = np.asarray(relative_fk[self._torso_name]["pos"], dtype=np.float64)
+            root_to_torso_quat = np.asarray(relative_fk[self._torso_name]["quat"], dtype=np.float64)
+            odom_cfg = self.simulated_odometry.cfg
+            sensor_pos, sensor_quat = root_pose_to_sensor(
+                raw_base_pos,
+                raw_quat,
+                root_to_torso_pos,
+                root_to_torso_quat,
+                odom_cfg.torso_to_sensor_position,
+                odom_cfg.torso_to_sensor_quaternion,
+            )
+
+            def convert_sensor_pose(position, quaternion):
+                return sensor_pose_to_root(
+                    position,
+                    quaternion,
+                    odom_cfg.torso_to_sensor_position,
+                    odom_cfg.torso_to_sensor_quaternion,
+                    root_to_torso_pos,
+                    root_to_torso_quat,
+                )
+
+            estimate = self.simulated_odometry.update(
+                float(self.data.time),
+                sensor_pos,
+                sensor_quat,
+                convert_sensor_pose,
+            )
+            if estimate is not None:
+                base_pos = estimate.position
+                if self.born_place_align:
+                    base_pos = self.base_align.align_pos(base_pos)
+                lin_vel = estimate.linear_velocity_body
+                if estimate.stale and odom_cfg.fail_on_stale:
+                    raise RuntimeError(
+                        f"Simulated odometry became stale ({estimate.age:.3f}s > {odom_cfg.timeout:.3f}s)"
+                    )
         rpy = quatToEuler(quat)
 
         self._base_rpy = rpy.copy()
@@ -193,6 +254,8 @@ class MujocoEnv(Environment):
             self._torso_pos = fk_info[self._torso_name]["pos"]
 
     def _render(self):
+        if self.viewer is None:
+            return
         self.viewer.cam.lookat = self.data.qpos.astype(np.float32)[:3]
         if self.viewer.is_alive:
             if self.elastic_band is not None:
@@ -233,7 +296,14 @@ class MujocoEnv(Environment):
         self._simulate_torque(pd_torque)
 
     def shutdown(self):
-        self.viewer.close()
+        if self.viewer is not None:
+            self.viewer.close()
+
+    @property
+    def odometry_diagnostics(self) -> dict | None:
+        if self.simulated_odometry is None:
+            return None
+        return self.simulated_odometry.diagnostics(float(self.data.time))
 
 
 if __name__ == "__main__":
