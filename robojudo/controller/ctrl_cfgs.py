@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field, model_validator
 
 from robojudo.config import ASSETS_DIR, Config
@@ -44,6 +46,22 @@ class JoystickCtrlCfg(CtrlCfg):
         # "RB": "[MOTION_LOAD_NEXT]",
         # Note: combo keys supported: "LB+RB+A": "[TEST]",
     }
+
+
+class RosJoystickCtrlCfg(JoystickCtrlCfg):
+    """Configuration for a native ROS 2 ``sensor_msgs/msg/Joy`` controller."""
+
+    ctrl_type: str = "RosJoystickCtrl"
+    topic: str = "/joy"
+    profile: Literal["xbox", "xbox_bluetooth", "ps5"] = "xbox"
+    timeout_s: float = Field(default=0.5, gt=0.0)
+    queue_capacity: int = Field(default=256, gt=0)
+
+    @model_validator(mode="after")
+    def validate_ros_joystick(self):
+        if not self.topic.strip():
+            raise ValueError("ROS joystick topic must not be empty")
+        return self
 
 
 class UnitreeCtrlCfg(JoystickCtrlCfg):

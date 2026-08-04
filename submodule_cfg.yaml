@@ -27,6 +27,13 @@ aimdk:
   installer: scripts/install_aimdk.py
 
 
+# Generic ROS 2 Joy subscriber built for the active Python interpreter
+ros2_joy_cpp:
+  install: false
+  path: packages/ros2_joy_cpp
+  installer: scripts/install_ros2_joy.py
+
+
 # XR-based arm and dexterous-hand teleoperation
 # installs Conda and pip dependencies into the currently active Conda environment
 dex_teleop:

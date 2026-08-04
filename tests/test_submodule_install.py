@@ -35,6 +35,27 @@ class TestSubmoduleInstall(unittest.TestCase):
         self.assertTrue(any("reset --hard" in command for command in commands))
         self.assertTrue(any("clean -fd" in command for command in commands))
 
+    def test_local_package_skips_git_submodule_initialization(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "module"
+            path.mkdir()
+            config = {
+                "example": {
+                    "install": False,
+                    "local": True,
+                    "path": path.as_posix(),
+                    "installer": "installer.py",
+                }
+            }
+            commands = []
+
+            with patch.object(submodule_install, "load_config", return_value=config):
+                with patch.object(submodule_install, "run", side_effect=lambda command, **_: commands.append(command)):
+                    submodule_install.install_submodules(["example"])
+
+        self.assertFalse(any("git submodule" in command for command in commands))
+        self.assertTrue(any("installer.py" in command for command in commands))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -55,14 +55,18 @@ def install_submodules(selected=None, clean=False):
         patches = info.get("patches", [])
         addons = info.get("addons", [])
 
-        print(f"Initializing submodule '{name}'...")
-        if clean and (path / ".git").exists():
-            print(f"Cleaning existing submodule '{name}'...")
-            run(f"git -C {shlex.quote(path.as_posix())} reset --hard", required=True)
-            run(f"git -C {shlex.quote(path.as_posix())} clean -fd", required=True)
-        elif (path / ".git").exists():
-            print(f"Preserving existing worktree for submodule '{name}'.")
-        run(f"git submodule update --init {shlex.quote(path.as_posix())}", required=True)
+        is_local = info.get("local", False)
+        if is_local:
+            print(f"Using repository-local package '{name}'.")
+        else:
+            print(f"Initializing submodule '{name}'...")
+            if clean and (path / ".git").exists():
+                print(f"Cleaning existing submodule '{name}'...")
+                run(f"git -C {shlex.quote(path.as_posix())} reset --hard", required=True)
+                run(f"git -C {shlex.quote(path.as_posix())} clean -fd", required=True)
+            elif (path / ".git").exists():
+                print(f"Preserving existing worktree for submodule '{name}'.")
+            run(f"git submodule update --init {shlex.quote(path.as_posix())}", required=True)
 
         if not path.exists():
             print(f"Path {path} does not exist. Skipping {name}.")

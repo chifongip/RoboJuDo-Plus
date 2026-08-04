@@ -25,3 +25,7 @@
 	url = https://github.com/chifongip/aimdk_cpp.git
 	branch = main
 	ignore = dirty
+[submodule "packages/ros2_joy_cpp"]
+	path = packages/ros2_joy_cpp
+	url = https://github.com/chifongip/ros2_joy_cpp.git
+	branch = main

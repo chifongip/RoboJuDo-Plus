@@ -9,6 +9,7 @@
 ---
 We provide the following controllers:
 - [JoystickCtrl](#controller--joystickctrl)
+- [RosJoystickCtrl](#controller--rosjoystickctrl)
 - [UnitreeCtrl](#controller--unitreectrl)
 - [KeyboardCtrl](#controller--keyboardctrl)
 - [MotionCtrl](#controller--motionctrl)
@@ -59,6 +60,61 @@ when you press the `RB+Down` button, the command will be `["[POLICY_SWITCH],0"]`
 💡We have joystick mapping config for different platforms and Joystick types. 
 
 > For KEY name and more details, please refer to the [joystick.py](../robojudo/controller/utils/joystick.py)
+
+## [Controller](#controller) > [RosJoystickCtrl](#controller--rosjoystickctrl)
+
+`RosJoystickCtrl` is a drop-in alternative to `JoystickCtrl` that subscribes to the ROS 2 `/joy` topic published by
+the `joy_node` executable from the `joy` package. It uses a small `rclcpp`/pybind11 extension so RoboJuDo can keep
+running on Python 3.11 even when the ROS 2 distribution's Python packages were built for Python 3.10.
+
+Build the extension for the active RoboJuDo interpreter after sourcing ROS 2:
+
+```bash
+source /opt/ros/humble/setup.bash
+python submodule_install.py ros2_joy_cpp
+```
+
+Then start the ROS driver in another terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 run joy joy_node
+```
+
+Select the raw `joy_node` layout explicitly in the pipeline configuration:
+
+```python
+from robojudo.controller.ctrl_cfgs import RosJoystickCtrlCfg
+
+RosJoystickCtrlCfg(
+    profile="xbox",  # "xbox", "xbox_bluetooth", or "ps5"
+    topic="/joy",
+    timeout_s=0.5,
+    triggers_extra={"RB+Down": "[POLICY_SWITCH],0"},
+)
+```
+
+All profiles expose the same `axes` and `button_event` schema as `JoystickCtrl`. For PS5 controllers, Cross,
+Circle, Square, and Triangle are normalized to `A`, `B`, `X`, and `Y`; Create, Options, and PS are normalized to
+`Back`, `Start`, and `Xbox`. The D-pad is emitted as `Up`, `Down`, `Left`, and `Right` button events.
+
+Xbox controllers use different raw layouts over USB and Bluetooth. Select `profile="xbox"` for USB and
+`profile="xbox_bluetooth"` for Bluetooth.
+
+The controller returns neutral axes until the first message. If `/joy` becomes stale, it neutralizes all axes and
+emits release events for held buttons once. `joy_node` does not include a device identity in `sensor_msgs/msg/Joy`,
+so the controller profile cannot be detected reliably from the message itself.
+
+To measure the raw layout of a specific controller and connection mode, run the interactive calibration script while
+`joy_node` is publishing:
+
+```bash
+python scripts/calibrate_ros_joystick.py --profile ps5 --connection usb
+python scripts/calibrate_ros_joystick.py --profile xbox --connection bluetooth
+```
+
+The script walks through each control and writes a JSON report containing the neutral state and every raw button or
+axis that changed. USB and Bluetooth layouts should be calibrated separately if both connection modes will be used.
 
 ## [Controller](#controller) > [UnitreeCtrl](#controller--unitreectrl)
 
