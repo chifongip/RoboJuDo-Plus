@@ -1,0 +1,24 @@
+control_endpoint: tcp://127.0.0.1:8560
+
+dataset:
+  root: record_data/x2_upper_body
+  repo_id: local/x2_upper_body
+  fps: 30
+  codec: libx264
+  resume: false
+
+camera:
+  type: ros2
+  name: head_rgb
+  topic: /aima/hal/sensor/stereo_head_front_right/rgb_image/compressed
+  qos_reliability: best_effort
+  qos_depth: 1
+  ros_python_executable: /usr/bin/python3
+  fps: 30
+  # width: 640
+  # height: 480
+
+sync:
+  clock: receive
+  max_control_age_ms: 50
+  poll_timeout_ms: 10

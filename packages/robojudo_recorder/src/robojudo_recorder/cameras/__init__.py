@@ -23,6 +23,6 @@ def create_camera(cfg: CameraConfig) -> CameraSource:
     return _REGISTRY[cfg.type](cfg)
 
 
-from . import opencv, realsense, zmq_camera  # noqa: E402, F401
+from . import opencv, realsense, ros2, zmq_camera  # noqa: E402, F401
 
 __all__ = ["CameraFrame", "CameraSource", "create_camera", "register_camera"]

@@ -119,6 +119,7 @@ class x2_locomanipulation(x2):
                 "Y": "[JOINT_DEFAULT]",
                 "X": "[RL_DEFAULT]",
                 "Start": "[UPPER_BODY_TOGGLE]",
+                "L": "[UPPER_BODY_TOGGLE]",
                 "LB+RB+A": "[SHUTDOWN]",
                 "LB+RB+Y": "[SIM_REBORN]",
             }
@@ -279,7 +280,8 @@ class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
     ]
     loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg()
     mimic_policies: list[X2BeyondMimicPolicyCfg] = [
-        X2BeyondMimicPolicyCfg(max_timestep=1800, policy_name="Walk1_subject1_wose", without_state_estimator=True),
+        X2BeyondMimicPolicyCfg(max_timestep=815, policy_name="walk2_subject1_subset_10000", without_state_estimator=False),
+        X2BeyondMimicPolicyCfg(max_timestep=815, policy_name="walk2_subject1_subset_wose_10000", without_state_estimator=True),
     ]
 
 @cfg_registry.register

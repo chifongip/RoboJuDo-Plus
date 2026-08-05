@@ -24,7 +24,8 @@ pip install -e "packages/robojudo_recorder[realsense]"
 ```
 
 Use `[opencv]` instead of `[realsense]` for a V4L2/OpenCV camera. A ZMQ RGB camera only needs the base package; JPEG
-frames additionally require `[opencv]`.
+frames additionally require `[opencv]`. The ROS 2 backend uses `[ros2]` for compressed-image decoding; `rclpy` and
+`sensor_msgs` must come from the sourced ROS 2 environment.
 
 ## Run
 
@@ -60,9 +61,37 @@ names, action names, and camera shape before opening a new episode; it will not 
 
 ## Camera backends
 
-Camera creation is registry based. Built-in types are `realsense`, `opencv`, and `zmq`. A new backend implements
+Camera creation is registry based. Built-in types are `realsense`, `opencv`, `ros2`, and `zmq`. A new backend implements
 `CameraSource` and registers itself with `register_camera("name")`; dataset and pipeline code do not need changes.
 For direct cameras, configured camera FPS must equal dataset FPS.
+
+### ROS 2 CompressedImage
+
+Use `type: ros2` to subscribe directly to a `sensor_msgs/msg/CompressedImage` topic:
+
+```yaml
+camera:
+  type: ros2
+  name: head_rgb
+  topic: /aima/hal/sensor/stereo_head_front_right/rgb_image/compressed
+  qos_reliability: best_effort
+  qos_depth: 1
+  ros_python_executable: /usr/bin/python3
+  fps: 30
+  # width: 640
+  # height: 480
+```
+
+The complete example is `packages/robojudo_recorder/recorder.ros2.example.yaml`. The recorder may run under Python
+3.11 while ROS 2 Humble uses Python 3.10: this backend launches `ros_python_executable` as a small subscriber process
+and transfers compressed bytes to the recorder over a loopback ZMQ socket. The ROS Python only needs `rclpy`,
+`sensor_msgs`, and `pyzmq`; OpenCV decoding and dataset writing remain in the recorder process.
+
+`best_effort` with depth 1 matches the usual ROS sensor-data QoS and keeps only the latest frame; set
+`qos_reliability: reliable` when the publisher uses reliable delivery. Width and height are optional and inferred from
+the first frame; when configured, every decoded frame is validated against them. Set camera FPS to the topic
+publication rate; it must equal `dataset.fps`. Frames are timestamped with local monotonic receive time, so use
+`sync.clock: receive`. Set `ROS_DOMAIN_ID` before starting the recorder when the publisher is in a non-default domain.
 
 The ZMQ backend expects multipart messages containing a JSON header and image payload:
 
@@ -74,5 +103,6 @@ Set `encoding: raw_rgb` for contiguous `uint8[H,W,3]` bytes or `encoding: jpeg` 
 The ZMQ backend uses local receive time by default. Set `timestamp_mode: source` only when the camera publisher and
 recorder clocks are synchronized.
 
-For processes on one machine, set `sync.clock: source`. Across machines, set it to `receive` unless the hosts share a
-PTP/chrony-synchronized clock. Frames without a sufficiently recent control sample are dropped.
+For a ZMQ camera on the same machine, `sync.clock: source` can preserve source timestamps. Across machines, use
+`sync.clock: receive` unless the hosts share a PTP/chrony-synchronized clock. Frames without a sufficiently recent
+control sample are dropped.
