@@ -1,5 +1,6 @@
 from robojudo.config import cfg_registry
 from robojudo.controller.ctrl_cfgs import (
+    Gr00tCameraCfg,
     Gr00tZmqCtrlCfg,
     JoystickCtrlCfg,
     KeyboardCtrlCfg,
@@ -202,6 +203,17 @@ class x2_gr00t_locomanipulation(x2_locomanipulation):
             joint_names=X2_ARM_JOINT_NAMES,
             ema_alpha=0.0,
             max_joint_velocity_rad_s=4.0,
+            observation_enabled=True,
+            observation_profile="x2",
+            camera=Gr00tCameraCfg(
+                type="ros2",
+                options={
+                    "topic": "/aima/hal/sensor/stereo_head_front_right/rgb_image/compressed",
+                    "qos_reliability": "best_effort",
+                    "qos_depth": 1,
+                    "ros_python_executable": "/usr/bin/python3",
+                },
+            ),
         ),
     ]
 
@@ -226,6 +238,17 @@ class x2_gr00t_locomanipulation_real(x2_gr00t_locomanipulation):
             joint_names=X2_ARM_JOINT_NAMES,
             ema_alpha=0.0,
             max_joint_velocity_rad_s=4.0,
+            observation_enabled=True,
+            observation_profile="x2",
+            camera=Gr00tCameraCfg(
+                type="ros2",
+                options={
+                    "topic": "/aima/hal/sensor/stereo_head_front_right/rgb_image/compressed",
+                    "qos_reliability": "best_effort",
+                    "qos_depth": 1,
+                    "ros_python_executable": "/usr/bin/python3",
+                },
+            ),
         ),
     ]
     do_safety_check: bool = True

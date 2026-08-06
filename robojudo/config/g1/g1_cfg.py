@@ -1,5 +1,7 @@
 from robojudo.config import cfg_registry
 from robojudo.controller.ctrl_cfgs import (
+    Gr00tCameraCfg,
+    Gr00tZmqCtrlCfg,
     JoystickCtrlCfg,  # noqa: F401
     KeyboardCtrlCfg,  # noqa: F401
     UnitreeCtrlCfg,  # noqa: F401
@@ -29,6 +31,7 @@ from .policy.g1_beyondmimic_policy_cfg import (  # noqa: F401
     G1_23BeyondMimicPolicyCfg,
     G1BeyondMimicPolicyCfg,
 )
+from .policy.g1_gr00t_locomanipulation_policy_cfg import G1Gr00tLocomanipulation23PolicyCfg
 from .policy.g1_h2h_policy_cfg import G1H2HPolicyCfg  # noqa: F401
 from .policy.g1_kungfubot_policy_cfg import G1KungfuBotGeneralPolicyCfg, G1KungfuBotPolicyCfg  # noqa: F401
 from .policy.g1_locomanipulation_policy_cfg import (
@@ -322,6 +325,132 @@ class g1_29_locomanipulation_stiff_real(g1_29_locomanipulation_stiff):
         G1Locomanipulation29ObsDoF().joint_names[15:]
     )
     do_safety_check: bool = True
+
+
+def _g1_gr00t_locomanipulation_sim_ctrl(
+    joint_names: list[str],
+) -> list[JoystickCtrlCfg | KeyboardCtrlCfg | Gr00tZmqCtrlCfg]:
+    return [
+        JoystickCtrlCfg(
+            triggers={
+                "A": "[PASSIVE_DEFAULT]",
+                "B": "[DAMPING_DEFAULT]",
+                "Y": "[JOINT_DEFAULT]",
+                "X": "[RL_DEFAULT]",
+                "Start": "[UPPER_BODY_TOGGLE]",
+                "LB+RB+A": "[SHUTDOWN]",
+                "LB+RB+Y": "[SIM_REBORN]",
+            }
+        ),
+        KeyboardCtrlCfg(
+            triggers={
+                "k": "[PASSIVE_DEFAULT]",
+                "l": "[DAMPING_DEFAULT]",
+                "i": "[JOINT_DEFAULT]",
+                "j": "[RL_DEFAULT]",
+                "7": "[ELASTIC_BAND_LOWER]",
+                "8": "[ELASTIC_BAND_LIFT]",
+                "9": "[ELASTIC_BAND_TOGGLE]",
+                "t": "[UPPER_BODY_TOGGLE]",
+            }
+        ),
+        Gr00tZmqCtrlCfg(
+            joint_names=joint_names,
+            ema_alpha=0.0,
+            max_joint_velocity_rad_s=4.0,
+            observation_enabled=True,
+            observation_profile="g1_23dof",
+            camera=Gr00tCameraCfg(
+                type="realsense",
+                options={"width": 640, "height": 480, "fps": 30},
+            ),
+        ),
+    ]
+
+
+def _g1_gr00t_locomanipulation_real_ctrl(
+    joint_names: list[str],
+) -> list[UnitreeCtrlCfg | Gr00tZmqCtrlCfg]:
+    return [
+        UnitreeCtrlCfg(
+            combination_init_buttons=["L1", "R1"],
+            triggers={
+                "A": "[PASSIVE_DEFAULT]",
+                "B": "[DAMPING_DEFAULT]",
+                "Y": "[JOINT_DEFAULT]",
+                "X": "[RL_DEFAULT]",
+                "Start": "[UPPER_BODY_TOGGLE]",
+                "L1+R1+A": "[SHUTDOWN]",
+            },
+        ),
+        Gr00tZmqCtrlCfg(
+            joint_names=joint_names,
+            ema_alpha=0.0,
+            max_joint_velocity_rad_s=4.0,
+            observation_enabled=True,
+            observation_profile="g1_23dof",
+            camera=Gr00tCameraCfg(
+                type="realsense",
+                options={"width": 640, "height": 480, "fps": 30},
+            ),
+        ),
+    ]
+
+
+@cfg_registry.register
+class g1_23_gr00t_locomanipulation_default(g1_23_locomanipulation_default):
+    """G1 23-DoF default-gain Locomanipulation driven by GR00T, Sim2Sim."""
+
+    pipeline_type: str = "G1Gr00tLocomanipulationPipeline"
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | Gr00tZmqCtrlCfg] = _g1_gr00t_locomanipulation_sim_ctrl(
+        G1Locomanipulation23ObsDoF().joint_names[13:]
+    )
+    policy: G1Gr00tLocomanipulation23PolicyCfg = G1Gr00tLocomanipulation23PolicyCfg(
+        policy_name="policy_23dof_default",
+        pd_gain_preset="default",
+    )
+
+
+@cfg_registry.register
+class g1_23_gr00t_locomanipulation_stiff(g1_23_locomanipulation_stiff):
+    """G1 23-DoF stiff-gain Locomanipulation driven by GR00T, Sim2Sim."""
+
+    pipeline_type: str = "G1Gr00tLocomanipulationPipeline"
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | Gr00tZmqCtrlCfg] = _g1_gr00t_locomanipulation_sim_ctrl(
+        G1Locomanipulation23ObsDoF().joint_names[13:]
+    )
+    policy: G1Gr00tLocomanipulation23PolicyCfg = G1Gr00tLocomanipulation23PolicyCfg(
+        policy_name="policy_23dof_stiff",
+        pd_gain_preset="stiff",
+    )
+
+
+@cfg_registry.register
+class g1_23_gr00t_locomanipulation_default_real(g1_23_locomanipulation_default_real):
+    """G1 23-DoF default-gain GR00T Locomanipulation, Sim2Real."""
+
+    pipeline_type: str = "G1Gr00tLocomanipulationPipeline"
+    ctrl: list[UnitreeCtrlCfg | Gr00tZmqCtrlCfg] = _g1_gr00t_locomanipulation_real_ctrl(
+        G1Locomanipulation23ObsDoF().joint_names[13:]
+    )
+    policy: G1Gr00tLocomanipulation23PolicyCfg = G1Gr00tLocomanipulation23PolicyCfg(
+        policy_name="policy_23dof_default",
+        pd_gain_preset="default",
+    )
+
+
+@cfg_registry.register
+class g1_23_gr00t_locomanipulation_stiff_real(g1_23_locomanipulation_stiff_real):
+    """G1 23-DoF stiff-gain GR00T Locomanipulation, Sim2Real."""
+
+    pipeline_type: str = "G1Gr00tLocomanipulationPipeline"
+    ctrl: list[UnitreeCtrlCfg | Gr00tZmqCtrlCfg] = _g1_gr00t_locomanipulation_real_ctrl(
+        G1Locomanipulation23ObsDoF().joint_names[13:]
+    )
+    policy: G1Gr00tLocomanipulation23PolicyCfg = G1Gr00tLocomanipulation23PolicyCfg(
+        policy_name="policy_23dof_stiff",
+        pd_gain_preset="stiff",
+    )
 
 
 @cfg_registry.register

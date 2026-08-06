@@ -112,6 +112,13 @@ class TestX2Gr00tLocomanipulationPolicy(unittest.TestCase):
         policy.current_vel_cmd = np.zeros(3, dtype=np.float32)
         policy._target_height = 0.64
         policy._target_waist_yaw = 0.0
+        policy._held_keys = set()
+        policy.cfg_policy = SimpleNamespace(
+            command_decay=0.95,
+            standing_command_threshold=0.1,
+            height_step=0.02,
+            waist_yaw_step=0.1,
+        )
         return policy
 
     def test_uses_clipped_gr00t_command_only_while_takeover_is_active(self):
@@ -131,6 +138,49 @@ class TestX2Gr00tLocomanipulationPolicy(unittest.TestCase):
         stale = Box({"Gr00tZmqCtrl": {"takeover_enabled": True, "fresh": False}})
         command = policy._get_commands(stale)
         np.testing.assert_allclose(command, [0.0, 0.0, 0.0, 0.66, 0.0])
+
+    def test_uses_manual_joystick_commands_after_takeover_is_disabled(self):
+        policy = self.make_policy()
+        manual = Box(
+            {
+                "JoystickCtrl": {
+                    "axes": {"LeftX": 0.4, "LeftY": 0.6, "RightX": -0.5},
+                    "button_event": [],
+                },
+                "Gr00tZmqCtrl": {"takeover_enabled": False, "fresh": True},
+            }
+        )
+
+        command = policy._get_commands(manual)
+
+        np.testing.assert_allclose(command, [0.6, -0.2, 0.5, 0.64, 0.0])
+
+    def test_stopping_takeover_clears_the_previous_vla_velocity(self):
+        policy = self.make_policy()
+        active = Box(
+            {
+                "Gr00tZmqCtrl": {
+                    "takeover_enabled": True,
+                    "fresh": True,
+                    "locomotion_command": [0.8, -0.2, 0.4, 0.65],
+                }
+            }
+        )
+        policy._get_commands(active)
+        stopped = Box(
+            {
+                "JoystickCtrl": {
+                    "axes": {"LeftX": 0.0, "LeftY": 0.0, "RightX": 0.0},
+                    "button_event": [],
+                },
+                "Gr00tZmqCtrl": {"takeover_enabled": False, "fresh": True},
+            }
+        )
+
+        command = policy._get_commands(stopped)
+
+        np.testing.assert_allclose(command[:3], [0.0, 0.0, 0.0])
+        self.assertAlmostEqual(command[3], 0.65)
 
     def test_real_lower_body_model_accepts_gr00t_commands(self):
         from robojudo.config.x2.policy.x2_gr00t_locomanipulation_policy_cfg import (
@@ -217,6 +267,15 @@ class TestX2Gr00tLocomanipulationPipeline(unittest.TestCase):
         self.assertEqual(sim.policy.policy_type, "X2Gr00tLocomanipulationPolicy")
         self.assertEqual([cfg.ctrl_type for cfg in sim.ctrl], ["JoystickCtrl", "KeyboardCtrl", "Gr00tZmqCtrl"])
         self.assertEqual([cfg.ctrl_type for cfg in real.ctrl], ["JoystickCtrl", "Gr00tZmqCtrl"])
+        for cfg in (sim.ctrl[-1], real.ctrl[-1]):
+            self.assertTrue(cfg.observation_enabled)
+            self.assertEqual(cfg.observation_profile, "x2")
+        for cfg in (sim.ctrl[-1], real.ctrl[-1]):
+            self.assertEqual(cfg.camera.type, "ros2")
+            self.assertEqual(
+                cfg.camera.options["topic"],
+                "/aima/hal/sensor/stereo_head_front_right/rgb_image/compressed",
+            )
 
 
 if __name__ == "__main__":
