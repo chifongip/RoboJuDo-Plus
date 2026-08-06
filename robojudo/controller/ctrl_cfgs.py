@@ -201,3 +201,11 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
         if len(self.joint_names) != len(set(self.joint_names)):
             raise ValueError("Upper-body ZMQ joint_names must be unique")
         return self
+
+
+class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
+    """Atomic GR00T arm targets and locomotion commands received over ZMQ."""
+
+    ctrl_type: str = "Gr00tZmqCtrl"
+    require_complete_positions: bool = True
+    max_joint_velocity_rad_s: float = Field(default=4.0, gt=0.0)
