@@ -185,9 +185,47 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
         return self
 
 
+class Gr00tCameraCfg(Config):
+    """Camera backend used by the GR00T observation stream."""
+
+    type: str = "realsense"
+    name: str = "head_rgb"
+    options: dict = {}
+
+    @model_validator(mode="after")
+    def validate_camera(self):
+        if not self.type.strip():
+            raise ValueError("GR00T camera type must not be empty")
+        if not self.name.strip():
+            raise ValueError("GR00T camera name must not be empty")
+        return self
+
+
 class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
-    """Atomic GR00T arm targets and locomotion commands received over ZMQ."""
+    """Bidirectional GR00T command and observation transport."""
 
     ctrl_type: str = "Gr00tZmqCtrl"
     require_complete_positions: bool = True
     max_joint_velocity_rad_s: float = Field(default=4.0, gt=0.0)
+    observation_enabled: bool = False
+    observation_endpoint: str = "tcp://*:8561"
+    """observation_profile: Exact deployment schema identifier (for example, ``g1_23dof``), including joint layout and order."""
+    observation_profile: str = "custom"
+    observation_task: str = "upper body manipulation"
+    observation_fps: int = Field(default=30, gt=0)
+    observation_jpeg_quality: int = Field(default=90, ge=1, le=100)
+    observation_joint_timeout_s: float = Field(default=0.1, gt=0.0)
+    camera_poll_timeout_ms: int = Field(default=100, gt=0)
+    camera_startup_timeout_s: float = Field(default=5.0, gt=0.0)
+    camera: Gr00tCameraCfg = Gr00tCameraCfg()
+
+    @model_validator(mode="after")
+    def validate_gr00t_transport(self):
+        if self.observation_enabled:
+            if not self.observation_endpoint.startswith("tcp://"):
+                raise ValueError("GR00T observation endpoint must use tcp://")
+            if not self.observation_profile.strip():
+                raise ValueError("GR00T observation profile must not be empty")
+            if not self.observation_task.strip():
+                raise ValueError("GR00T observation task must not be empty")
+        return self
