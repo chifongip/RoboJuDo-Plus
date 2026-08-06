@@ -1,5 +1,6 @@
 from .x2_beyondmimic_policy_cfg import X2BeyondMimicDoF, X2BeyondMimicPolicyCfg
 from .x2_deploy_policy_cfg import X2DeployDoF, X2DeployPolicyCfg
+from .x2_gr00t_locomanipulation_policy_cfg import X2Gr00tLocomanipulationPolicyCfg
 from .x2_locomanipulation_policy_cfg import (
     X2LocomanipulationActionDoF,
     X2LocomanipulationEnvDoF,
@@ -12,6 +13,7 @@ __all__ = [
     "X2BeyondMimicPolicyCfg",
     "X2DeployDoF",
     "X2DeployPolicyCfg",
+    "X2Gr00tLocomanipulationPolicyCfg",
     "X2LocomanipulationActionDoF",
     "X2LocomanipulationEnvDoF",
     "X2LocomanipulationObsDoF",

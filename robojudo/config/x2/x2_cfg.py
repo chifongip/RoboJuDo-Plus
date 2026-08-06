@@ -1,5 +1,10 @@
 from robojudo.config import cfg_registry
-from robojudo.controller.ctrl_cfgs import JoystickCtrlCfg, KeyboardCtrlCfg, UpperBodyZmqCtrlCfg
+from robojudo.controller.ctrl_cfgs import (
+    Gr00tZmqCtrlCfg,
+    JoystickCtrlCfg,
+    KeyboardCtrlCfg,
+    UpperBodyZmqCtrlCfg,
+)
 from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 
 from .env.x2_env_cfg import X2_ARM_JOINT_NAMES, X2JointDefaultDoF
@@ -8,6 +13,7 @@ from .env.x2_real_env_cfg import X2RealEnvCfg
 from .pipeline.x2_loco_mimic_pipeline_cfg import X2LocomanipulationLocoMimicPipelineCfg
 from .policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
 from .policy.x2_deploy_policy_cfg import X2DeployPolicyCfg
+from .policy.x2_gr00t_locomanipulation_policy_cfg import X2Gr00tLocomanipulationPolicyCfg
 from .policy.x2_locomanipulation_policy_cfg import (
     X2LocomanipulationEnvDoF,
     X2LocomanipulationPolicyCfg,
@@ -157,6 +163,70 @@ class x2_locomanipulation_real(x2_locomanipulation):
             }
         ),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
+    ]
+    do_safety_check: bool = True
+
+
+@cfg_registry.register
+class x2_gr00t_locomanipulation(x2_locomanipulation):
+    """X2 Locomanipulation driven by atomic GR00T arm, velocity, and height commands."""
+
+    pipeline_type: str = "X2Gr00tLocomanipulationPipeline"
+    policy: X2Gr00tLocomanipulationPolicyCfg = X2Gr00tLocomanipulationPolicyCfg()
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | Gr00tZmqCtrlCfg] = [
+        JoystickCtrlCfg(
+            triggers={
+                "A": "[PASSIVE_DEFAULT]",
+                "B": "[DAMPING_DEFAULT]",
+                "Y": "[JOINT_DEFAULT]",
+                "X": "[RL_DEFAULT]",
+                "Start": "[UPPER_BODY_TOGGLE]",
+                "L": "[UPPER_BODY_TOGGLE]",
+                "LB+RB+A": "[SHUTDOWN]",
+                "LB+RB+Y": "[SIM_REBORN]",
+            }
+        ),
+        KeyboardCtrlCfg(
+            triggers={
+                "k": "[PASSIVE_DEFAULT]",
+                "l": "[DAMPING_DEFAULT]",
+                "i": "[JOINT_DEFAULT]",
+                "j": "[RL_DEFAULT]",
+                "7": "[ELASTIC_BAND_LOWER]",
+                "8": "[ELASTIC_BAND_LIFT]",
+                "9": "[ELASTIC_BAND_TOGGLE]",
+                "t": "[UPPER_BODY_TOGGLE]",
+            }
+        ),
+        Gr00tZmqCtrlCfg(
+            joint_names=X2_ARM_JOINT_NAMES,
+            ema_alpha=0.0,
+            max_joint_velocity_rad_s=4.0,
+        ),
+    ]
+
+
+@cfg_registry.register
+class x2_gr00t_locomanipulation_real(x2_gr00t_locomanipulation):
+    """X2 GR00T Locomanipulation, Sim2Real through AimDK."""
+
+    env: X2RealEnvCfg = X2RealEnvCfg(dof=X2LocomanipulationEnvDoF())
+    ctrl: list[JoystickCtrlCfg | Gr00tZmqCtrlCfg] = [
+        JoystickCtrlCfg(
+            triggers={
+                "A": "[PASSIVE_DEFAULT]",
+                "B": "[DAMPING_DEFAULT]",
+                "Y": "[JOINT_DEFAULT]",
+                "X": "[RL_DEFAULT]",
+                "Start": "[UPPER_BODY_TOGGLE]",
+                "LB+RB+A": "[SHUTDOWN]",
+            }
+        ),
+        Gr00tZmqCtrlCfg(
+            joint_names=X2_ARM_JOINT_NAMES,
+            ema_alpha=0.0,
+            max_joint_velocity_rad_s=4.0,
+        ),
     ]
     do_safety_check: bool = True
 
