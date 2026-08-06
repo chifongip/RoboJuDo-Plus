@@ -1,20 +1,34 @@
 import logging
 import math
+import threading
 import time
 from numbers import Integral, Real
 
+import msgpack
 import numpy as np
 import zmq
 
-from robojudo.controller import Controller, ctrl_registry
+from robojudo.controller import ControllerHook, ctrl_registry
 from robojudo.controller.ctrl_cfgs import Gr00tZmqCtrlCfg
 
 logger = logging.getLogger(__name__)
 
 
 @ctrl_registry.register
-class Gr00tZmqCtrl(Controller):
-    """Receive one atomic GR00T arm and locomotion command per message."""
+class Gr00tZmqCtrl(ControllerHook):
+    """Receive atomic GR00T commands and publish camera/joint observations.
+
+    Threading and data flow:
+
+    - Control thread (pipeline rate): ``get_data_with_hook`` snapshots measured
+      upper-body joints from ``env_data`` and non-blockingly returns the latest
+      GR00T command to the pipeline.
+    - Observation worker: reads camera frames, combines each frame with the
+      latest thread-safe joint snapshot and task, then publishes to deploy.
+
+    The worker never reads robot state directly, and it never executes robot
+    control; final targets are still applied synchronously by the pipeline.
+    """
 
     cfg_ctrl: Gr00tZmqCtrlCfg
 
@@ -28,12 +42,34 @@ class Gr00tZmqCtrl(Controller):
         self._socket.setsockopt(zmq.RCVHWM, 100)
         self._socket.setsockopt(zmq.SUBSCRIBE, b"")
         self._socket.connect(cfg_ctrl.endpoint)
+        self._joint_indices = (
+            np.asarray(
+                [env.joint_names.index(name) for name in self._joint_names],
+                dtype=np.int32,
+            )
+            if cfg_ctrl.observation_enabled
+            else np.asarray([], dtype=np.int32)
+        )
         self._latest_positions: dict[str, float] = {}
         self._latest_locomotion_command: np.ndarray | None = None
         self._latest_sequence: int | None = None
         self._last_received_at: float | None = None
         self._last_invalid_log_at = float("-inf")
+        self._observation_snapshot_lock = threading.Lock()
+        self._observation_snapshot: tuple[int, np.ndarray] | None = None
+        self._observation_stop = threading.Event()
+        self._observation_ready = threading.Event()
+        self._observation_thread: threading.Thread | None = None
+        self._observation_error: Exception | None = None
+        self._published_observations = 0
+        self._dropped_observations = 0
         logger.info("Gr00tZmqCtrl subscribed to %s", cfg_ctrl.endpoint)
+        if cfg_ctrl.observation_enabled:
+            try:
+                self._start_observation_worker()
+            except Exception:
+                self.close()
+                raise
 
     def reset(self):
         self._latest_positions.clear()
@@ -47,7 +83,130 @@ class Gr00tZmqCtrl(Controller):
                 break
 
     def close(self):
+        self._observation_stop.set()
+        if self._observation_thread is not None:
+            self._observation_thread.join(timeout=3.0)
+            if self._observation_thread.is_alive():
+                logger.warning("GR00T observation worker did not stop within 3 seconds")
+            self._observation_thread = None
         self._socket.close(linger=0)
+
+    def _start_observation_worker(self):
+        self._observation_thread = threading.Thread(
+            target=self._observation_loop,
+            name="Gr00tObservationPublisher",
+            daemon=True,
+        )
+        self._observation_thread.start()
+        if not self._observation_ready.wait(self.cfg_ctrl.camera_startup_timeout_s):
+            self._observation_stop.set()
+            raise TimeoutError(
+                f"GR00T camera did not start within {self.cfg_ctrl.camera_startup_timeout_s:.1f} seconds"
+            )
+        if self._observation_error is not None:
+            raise RuntimeError("failed to start GR00T observation publisher") from self._observation_error
+
+    def _observation_loop(self):
+        # Worker flow: camera -> latest joint snapshot + task -> observation PUB.
+        camera = None
+        publisher = None
+        try:
+            try:
+                import cv2
+                from robojudo_recorder.cameras import create_camera
+                from robojudo_recorder.config import CameraConfig
+            except ImportError as exc:
+                raise RuntimeError(
+                    "GR00T observation publishing requires robojudo-recorder and OpenCV"
+                ) from exc
+
+            camera_cfg = CameraConfig(
+                type=self.cfg_ctrl.camera.type,
+                name=self.cfg_ctrl.camera.name,
+                options=dict(self.cfg_ctrl.camera.options),
+            )
+            camera = create_camera(camera_cfg)
+            camera.connect()
+            publisher = self._context.socket(zmq.PUB)
+            publisher.setsockopt(zmq.LINGER, 0)
+            publisher.setsockopt(zmq.SNDHWM, 2)
+            publisher.bind(self.cfg_ctrl.observation_endpoint)
+            self._observation_ready.set()
+            logger.info(
+                "GR00T observations publishing to %s from %s camera",
+                self.cfg_ctrl.observation_endpoint,
+                self.cfg_ctrl.camera.type,
+            )
+
+            minimum_period_ns = int(1_000_000_000 / self.cfg_ctrl.observation_fps)
+            last_published_at = 0
+            last_camera_sequence = -1
+            observation_sequence = 0
+            while not self._observation_stop.is_set():
+                frame = camera.read(self.cfg_ctrl.camera_poll_timeout_ms)
+                if frame is None:
+                    continue
+                if frame.sequence == last_camera_sequence:
+                    continue
+                last_camera_sequence = frame.sequence
+                now_ns = time.monotonic_ns()
+                if now_ns - last_published_at < minimum_period_ns:
+                    continue
+                with self._observation_snapshot_lock:
+                    snapshot = self._observation_snapshot
+                if snapshot is None:
+                    continue
+
+                joint_timestamp_ns, joint_positions = snapshot
+                joint_timeout_ns = int(self.cfg_ctrl.observation_joint_timeout_s * 1_000_000_000)
+                if now_ns - joint_timestamp_ns > joint_timeout_ns:
+                    continue
+                image = np.asarray(frame.image, dtype=np.uint8)
+                if image.ndim != 3 or image.shape[2] != 3:
+                    raise ValueError(f"GR00T camera returned invalid RGB shape {image.shape}")
+                bgr = np.ascontiguousarray(image[:, :, ::-1])
+                ok, encoded = cv2.imencode(
+                    ".jpg",
+                    bgr,
+                    [cv2.IMWRITE_JPEG_QUALITY, self.cfg_ctrl.observation_jpeg_quality],
+                )
+                if not ok:
+                    raise RuntimeError("failed to encode GR00T camera frame as JPEG")
+
+                observation_sequence += 1
+                header = {
+                    "protocol_version": 1,
+                    "sequence": observation_sequence,
+                    "camera_sequence": int(frame.sequence),
+                    "timestamp_ns": int(frame.timestamp_ns),
+                    "joint_timestamp_ns": joint_timestamp_ns,
+                    "robot_type": self.cfg_ctrl.observation_profile.split("_", 1)[0],
+                    "profile": self.cfg_ctrl.observation_profile,
+                    "task": self.cfg_ctrl.observation_task,
+                    "camera_name": self.cfg_ctrl.camera.name,
+                    "encoding": "jpeg",
+                    "shape": list(image.shape),
+                    "joint_names": list(self._joint_names),
+                    "joint_positions": joint_positions.tolist(),
+                }
+                try:
+                    publisher.send_multipart(
+                        [msgpack.packb(header, use_bin_type=True), encoded.tobytes()],
+                        flags=zmq.NOBLOCK,
+                    )
+                    self._published_observations += 1
+                    last_published_at = now_ns
+                except zmq.Again:
+                    self._dropped_observations += 1
+        except Exception as exc:
+            self._observation_error = exc
+            logger.exception("GR00T observation publisher stopped: %s", exc)
+            self._observation_ready.set()
+        finally:
+            if camera is not None:
+                camera.close()
+            if publisher is not None:
+                publisher.close(linger=0)
 
     def _decode_positions(self, value) -> dict[str, float]:
         if not isinstance(value, dict) or not value:
@@ -142,6 +301,8 @@ class Gr00tZmqCtrl(Controller):
         has_received = self._last_received_at is not None
         age_s = None if self._last_received_at is None else now - self._last_received_at
         fresh = age_s is not None and age_s <= self.cfg_ctrl.timeout_s
+        observation_error = getattr(self, "_observation_error", None)
+        observation_ready = getattr(self, "_observation_ready", None)
         return {
             "joint_positions": self._latest_positions.copy(),
             "locomotion_command": (
@@ -151,7 +312,29 @@ class Gr00tZmqCtrl(Controller):
             "has_received": has_received,
             "fresh": fresh,
             "age_s": age_s,
+            "observation_ready": bool(
+                not self.cfg_ctrl.observation_enabled
+                or (
+                    observation_ready is not None
+                    and observation_ready.is_set()
+                    and observation_error is None
+                )
+            ),
+            "observation_error": None if observation_error is None else str(observation_error),
+            "published_observations": getattr(self, "_published_observations", 0),
+            "dropped_observations": getattr(self, "_dropped_observations", 0),
         }
+
+    def get_data_with_hook(self, prior_ctrl_data: dict, env_data: dict):
+        # Control flow: env joints -> shared snapshot; latest GR00T command -> pipeline.
+        del prior_ctrl_data
+        if self.cfg_ctrl.observation_enabled:
+            joint_positions = np.asarray(env_data["dof_pos"], dtype=np.float32)[self._joint_indices]
+            if not np.isfinite(joint_positions).all():
+                raise FloatingPointError("GR00T observation joint positions contain non-finite values")
+            with self._observation_snapshot_lock:
+                self._observation_snapshot = (time.monotonic_ns(), joint_positions.copy())
+        return self.get_data()
 
     def process_triggers(self, ctrl_data):
         return ctrl_data, []
