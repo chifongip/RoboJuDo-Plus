@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -27,6 +28,375 @@ class FakePolicyEnv:
 
 
 class TestX2LocomanipulationLocoMimic(unittest.TestCase):
+    def test_mujoco_base_linear_velocity_is_heading_invariant_after_alignment(self):
+        from unittest.mock import patch
+
+        import mujoco
+        from scipy.spatial.transform import Rotation
+
+        from robojudo.config.x2.x2_cfg import x2_locomimic_beyondmimic
+        from robojudo.environment.mujoco_env import MujocoEnv
+
+        class HeadlessViewer:
+            def __init__(self, *args, **kwargs):
+                self.cam = SimpleNamespace(distance=0, elevation=0, azimuth=0, lookat=np.zeros(3))
+                self.is_alive = False
+
+            def close(self):
+                pass
+
+        body_velocity = np.asarray([0.4, -0.2, 0.1], dtype=np.float32)
+        with patch("robojudo.environment.mujoco_env.mujoco_viewer.MujocoViewer", HeadlessViewer):
+            env = MujocoEnv(x2_locomimic_beyondmimic().env)
+        self.addCleanup(env.shutdown)
+
+        for heading in (0.0, 90.0, 180.0):
+            with self.subTest(heading=heading):
+                mujoco.mj_resetDataKeyframe(env.model, env.data, 0)
+                initial_quat = Rotation.from_quat(env.data.qpos[3:7][[1, 2, 3, 0]])
+                raw_quat = (Rotation.from_euler("z", heading, degrees=True) * initial_quat).as_quat()
+                env.data.qpos[3:7] = raw_quat[[3, 0, 1, 2]]
+                env.data.qvel[:] = 0.0
+                env.data.qvel[:3] = Rotation.from_quat(raw_quat).apply(body_velocity)
+                mujoco.mj_forward(env.model, env.data)
+
+                env.base_align.set_base()
+                env.update()
+                env.reset_alignment()
+
+                np.testing.assert_allclose(env.base_lin_vel, body_velocity, atol=1e-6)
+
+    def test_aligned_debug_arrow_is_drawn_in_raw_mujoco_world(self):
+        from scipy.spatial.transform import Rotation
+
+        from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
+        from robojudo.utils.rotation import TransformAlignment
+
+        markers = []
+        viewer = SimpleNamespace(add_marker=lambda **marker: markers.append(marker))
+        alignment = TransformAlignment(
+            quat=Rotation.from_euler("z", 180.0, degrees=True).as_quat(),
+            pos=np.asarray([2.0, 3.0, 0.0]),
+            yaw_only=True,
+            xy_only=True,
+        )
+        visualizer = MujocoVisualizer(viewer, alignment=alignment)
+
+        visualizer.draw_arrow(
+            origin=np.asarray([1.0, 0.0, 0.5]),
+            root_quat=np.asarray([0.0, 0.0, 0.0, 1.0]),
+            vec_local=np.asarray([0.2, 0.0, 0.0]),
+            color=[1.0, 0.0, 0.0, 1.0],
+            aligned_frame=True,
+        )
+
+        np.testing.assert_allclose(markers[0]["pos"], [1.0, 3.0, 0.5], atol=1e-7)
+        np.testing.assert_allclose(markers[0]["mat"] @ [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], atol=1e-7)
+
+    def test_beyondmimic_reference_aligns_to_robot_anchor_at_activation(self):
+        from scipy.spatial.transform import Rotation
+
+        from robojudo.config.x2.policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
+        from robojudo.policy.x2_beyondmimic_policy import X2BeyondMimicPolicy
+
+        with self.assertRaisesRegex(ValueError, "override_robot_anchor_pos must be False"):
+            X2BeyondMimicPolicy(
+                X2BeyondMimicPolicyCfg(
+                    max_timestep=6747,
+                    policy_name="Solo_dance",
+                    without_state_estimator=False,
+                    override_robot_anchor_pos=True,
+                ),
+                "cpu",
+            )
+
+        policy = X2BeyondMimicPolicy(
+            X2BeyondMimicPolicyCfg(
+                max_timestep=6747,
+                policy_name="Solo_dance",
+                without_state_estimator=False,
+            ),
+            "cpu",
+        )
+        self.addCleanup(policy.close_progress)
+
+        robot_pos = np.asarray([1.2, -0.7, 0.93], dtype=np.float32)
+        robot_quat = Rotation.from_euler("xyz", [0.08, -0.04, np.pi]).as_quat()
+        env_data = Box({"torso_pos": robot_pos, "torso_quat": robot_quat})
+
+        policy.reset_alignment(env_data)
+        _, _, _, anchor_pos, anchor_quat, _ = policy._get_command(env_data, Box({}))
+
+        np.testing.assert_allclose(anchor_pos, robot_pos, atol=1e-5)
+        anchor_yaw = Rotation.from_quat(anchor_quat).as_euler("xyz")[2]
+        robot_yaw = Rotation.from_quat(robot_quat).as_euler("xyz")[2]
+        yaw_error = np.arctan2(np.sin(anchor_yaw - robot_yaw), np.cos(anchor_yaw - robot_yaw))
+        self.assertAlmostEqual(yaw_error, 0.0, places=5)
+
+        observations = []
+        actions = []
+        for heading in (0.0, np.pi / 2, np.pi):
+            policy.reset()
+            heading_quat = Rotation.from_euler("xyz", [0.08, -0.04, heading]).as_quat()
+            heading_env_data = Box(
+                {
+                    "dof_pos": policy.default_dof_pos.copy(),
+                    "dof_vel": np.zeros(policy.num_dofs, dtype=np.float32),
+                    "base_ang_vel": np.asarray([0.01, -0.02, 0.03], dtype=np.float32),
+                    "base_lin_vel": np.asarray([0.04, -0.01, 0.0], dtype=np.float32),
+                    "torso_pos": robot_pos,
+                    "torso_quat": heading_quat,
+                }
+            )
+            policy.reset_alignment(heading_env_data)
+            observation, _ = policy.get_observation(heading_env_data, Box({}))
+            observations.append(observation)
+            actions.append(policy.get_action(observation))
+
+        for observation in observations[1:]:
+            np.testing.assert_allclose(observation, observations[0], atol=1e-5)
+        for action in actions[1:]:
+            np.testing.assert_allclose(action, actions[0], atol=1e-5)
+
+    def test_x2_real_configures_beyondmimic_without_external_odometry(self):
+        from robojudo.config.x2.x2_cfg import (
+            x2_locomimic_beyondmimic,
+            x2_locomimic_beyondmimic_real,
+        )
+
+        sim_cfg = x2_locomimic_beyondmimic()
+        real_cfg = x2_locomimic_beyondmimic_real()
+
+        self.assertEqual(
+            [(policy.policy_name, policy.without_state_estimator) for policy in sim_cfg.mimic_policies],
+            [
+                ("Walk2_subject1_wose", True),
+                ("Walk2_subject1", False),
+                ("Solo_dance", False),
+                ("Walk1_subject1_wose", True),
+            ],
+        )
+        self.assertEqual(
+            [(policy.policy_name, policy.without_state_estimator) for policy in real_cfg.mimic_policies],
+            [
+                ("Walk2_subject1_wose", True),
+                ("Walk2_subject1", False),
+                ("Solo_dance", False),
+                ("Walk1_subject1_wose", True),
+            ],
+        )
+        self.assertTrue(all(Path(policy.policy_file).is_file() for policy in sim_cfg.mimic_policies))
+        self.assertTrue(all(Path(policy.policy_file).is_file() for policy in real_cfg.mimic_policies))
+        self.assertEqual(real_cfg.env.odometry_type, "DUMMY")
+        self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")
+        self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
+        self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
+
+    def test_aimdk_odometry_supplies_aligned_root_pose(self):
+        from scipy.spatial.transform import Rotation
+
+        from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
+        from robojudo.utils.rotation import TransformAlignment
+
+        raw_heading = Rotation.from_euler("z", 180.0, degrees=True).as_quat()
+        body_velocity = np.asarray([0.4, -0.2, 0.1], dtype=np.float32)
+        raw_position = np.asarray([1.5, 2.25, 0.87], dtype=np.float32)
+        state = SimpleNamespace(
+            motor_state=SimpleNamespace(q=np.zeros(31), dq=np.zeros(31)),
+            imu_state=SimpleNamespace(
+                quaternion=raw_heading,
+                gyroscope=[0.01, -0.02, 0.03],
+                accelerometer=[0.0, 0.0, 9.81],
+            ),
+            odometry_state=SimpleNamespace(
+                valid=True,
+                sequence=1,
+                stamp_sec=10,
+                stamp_nanosec=0,
+                position=raw_position,
+                quaternion=raw_heading,
+                linear_velocity=body_velocity,
+            ),
+        )
+
+        env = AgiBotCppEnv.__new__(AgiBotCppEnv)
+        env.enabled = False
+        env.aimdk = SimpleNamespace(get_robot_state=lambda: state)
+        env.cfg_env = SimpleNamespace(
+            aimdk=SimpleNamespace(
+                state_timeout=0.1,
+                odometry_timeout=0.3,
+                odometry_velocity_filter_time_constant=0.15,
+                shutdown_damping=5.0,
+                torso_to_odometry_sensor_position=[0.0, 0.0, 0.0],
+                torso_to_odometry_sensor_quaternion=[0.0, 0.0, 0.0, 1.0],
+            )
+        )
+        env._odometry_type = "AIMDK"
+        env.born_place_align = True
+        env.base_align = TransformAlignment(
+            quat=raw_heading,
+            pos=np.asarray([1.0, 2.0, 0.0]),
+            yaw_only=True,
+            xy_only=True,
+        )
+        env.update_with_fk = True
+        env._torso_name = "torso_link"
+        env.kinematics = SimpleNamespace(
+            forward=lambda **_: {
+                "torso_link": {
+                    "pos": np.zeros(3),
+                    "quat": np.asarray([0.0, 0.0, 0.0, 1.0]),
+                }
+            }
+        )
+        env._last_odometry_sequence = None
+        env._last_odometry_stamp = None
+        env._last_odometry_root_pos = None
+        env._last_odometry_root_quat = None
+        env._filtered_base_lin_vel = np.zeros(3, dtype=np.float32)
+        env._last_odometry_receipt_time = None
+        env.fk = lambda: {
+            "torso_link": {
+                "pos": env._base_pos.copy(),
+                "quat": np.asarray([0.0, 0.0, 0.0, 1.0]),
+                "ang_vel": np.zeros(3),
+            }
+        }
+
+        env.update()
+
+        expected_position = env.base_align.align_pos(raw_position)
+        np.testing.assert_allclose(env.base_pos, expected_position, atol=1e-6)
+        np.testing.assert_allclose(env.torso_pos, expected_position, atol=1e-6)
+        np.testing.assert_allclose(env.base_lin_vel, np.zeros(3), atol=1e-6)
+        np.testing.assert_allclose(env.base_quat, [0.0, 0.0, 0.0, 1.0], atol=1e-6)
+        np.testing.assert_allclose(env.torso_quat, [0.0, 0.0, 0.0, 1.0], atol=1e-6)
+        np.testing.assert_allclose(env.fk_info["torso_link"]["pos"], expected_position, atol=1e-6)
+
+    def test_superodom_sensor_pose_converts_through_torso_and_waist_to_pelvis(self):
+        from scipy.spatial.transform import Rotation
+
+        from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
+
+        pelvis_pos = np.asarray([1.2, -0.4, 0.72])
+        pelvis_rot = Rotation.from_euler("z", 180.0, degrees=True)
+        pelvis_to_torso_pos = np.asarray([0.0, 0.0, 0.155])
+        pelvis_to_torso_rot = Rotation.from_euler("xyz", [0.08, -0.21, 0.12])
+        torso_to_sensor_pos = np.asarray([0.102632855873251, 0.0, 0.181586916322065])
+        torso_to_sensor_rot = Rotation.from_euler("x", -np.pi / 2)
+
+        world_to_torso_rot = pelvis_rot * pelvis_to_torso_rot
+        world_to_torso_pos = pelvis_pos + pelvis_rot.apply(pelvis_to_torso_pos)
+        world_to_sensor_rot = world_to_torso_rot * torso_to_sensor_rot
+        world_to_sensor_pos = world_to_torso_pos + world_to_torso_rot.apply(torso_to_sensor_pos)
+
+        env = AgiBotCppEnv.__new__(AgiBotCppEnv)
+        env._dof_pos = np.zeros(31)
+        env._torso_name = "torso_link"
+        env.cfg_env = SimpleNamespace(
+            aimdk=SimpleNamespace(
+                torso_to_odometry_sensor_position=torso_to_sensor_pos.tolist(),
+                torso_to_odometry_sensor_quaternion=torso_to_sensor_rot.as_quat().tolist(),
+            )
+        )
+        env.kinematics = SimpleNamespace(
+            forward=lambda **_: {
+                "torso_link": {
+                    "pos": pelvis_to_torso_pos,
+                    "quat": pelvis_to_torso_rot.as_quat(),
+                }
+            }
+        )
+
+        converted_pos, converted_quat = env._odometry_sensor_pose_to_root(
+            world_to_sensor_pos,
+            world_to_sensor_rot.as_quat(),
+        )
+
+        np.testing.assert_allclose(converted_pos, pelvis_pos, atol=1e-7)
+        np.testing.assert_allclose(
+            Rotation.from_quat(converted_quat).as_matrix(),
+            pelvis_rot.as_matrix(),
+            atol=1e-7,
+        )
+
+    def test_odometry_position_delta_produces_body_velocity_at_180_degree_heading(self):
+        from scipy.spatial.transform import Rotation
+
+        from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
+
+        heading = Rotation.from_euler("z", np.pi).as_quat()
+        odometry = SimpleNamespace(
+            sequence=1,
+            stamp_sec=10,
+            stamp_nanosec=0,
+            position=[0.0, 0.0, 0.0],
+            quaternion=heading,
+        )
+        env = AgiBotCppEnv.__new__(AgiBotCppEnv)
+        env.cfg_env = SimpleNamespace(
+            aimdk=SimpleNamespace(
+                odometry_timeout=0.3,
+                odometry_velocity_filter_time_constant=0.0,
+            )
+        )
+        env._last_odometry_sequence = None
+        env._last_odometry_stamp = None
+        env._last_odometry_root_pos = None
+        env._last_odometry_root_quat = None
+        env._filtered_base_lin_vel = np.zeros(3, dtype=np.float32)
+        env._last_odometry_receipt_time = None
+        env._odometry_sensor_pose_to_root = lambda position, quaternion: (position, quaternion)
+
+        env._update_odometry_state(odometry)
+        odometry.sequence = 2
+        odometry.stamp_nanosec = 100_000_000
+        odometry.position = [-0.1, 0.0, 0.0]
+        env._update_odometry_state(odometry)
+
+        np.testing.assert_allclose(env._filtered_base_lin_vel, [1.0, 0.0, 0.0], atol=1e-6)
+
+    def test_relative_start_odometry_removes_superodom_sensor_origin_without_changing_delta(self):
+        from unittest.mock import patch
+
+        from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
+
+        odometry = SimpleNamespace(
+            sequence=1,
+            stamp_sec=10,
+            stamp_nanosec=0,
+            position=[-0.35, 0.12, -0.61],
+            quaternion=[0.0, 0.0, 0.0, 1.0],
+        )
+        env = AgiBotCppEnv.__new__(AgiBotCppEnv)
+        env.cfg_env = SimpleNamespace(
+            aimdk=SimpleNamespace(
+                odometry_timeout=0.3,
+                odometry_velocity_filter_time_constant=0.0,
+                odometry_position_mode="RELATIVE_START",
+            )
+        )
+        env._last_odometry_sequence = None
+        env._last_odometry_stamp = None
+        env._last_odometry_root_pos = None
+        env._last_odometry_root_quat = None
+        env._filtered_base_lin_vel = np.zeros(3, dtype=np.float32)
+        env._last_odometry_receipt_time = None
+        env._odometry_position_origin = None
+        env._odometry_sensor_pose_to_root = lambda position, quaternion: (position, quaternion)
+
+        with patch("robojudo.environment.agibot_cpp_env.time.monotonic", return_value=10.0):
+            first_position, _ = env._update_odometry_state(odometry)
+            odometry.sequence = 2
+            odometry.stamp_nanosec = 100_000_000
+            odometry.position = [-0.25, 0.12, -0.61]
+            second_position, _ = env._update_odometry_state(odometry)
+
+        np.testing.assert_allclose(first_position, np.zeros(3), atol=1e-6)
+        np.testing.assert_allclose(second_position, [0.1, 0.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(env._filtered_base_lin_vel, [1.0, 0.0, 0.0], atol=1e-6)
+
     def test_pipeline_composes_locomanipulation_loco_mimic_and_four_mode_behavior(self):
         from robojudo.pipeline.locomanipulation_loco_mimic_pipeline import (
             LocomanipulationLocoMimicPipelineMixin,
@@ -37,9 +407,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         )
         from robojudo.pipeline.x2_locomanipulation_pipeline import X2FourModePipelineMixin
 
-        self.assertTrue(
-            issubclass(X2LocomanipulationLocoMimicPipeline, LocomanipulationLocoMimicPipelineMixin)
-        )
+        self.assertTrue(issubclass(X2LocomanipulationLocoMimicPipeline, LocomanipulationLocoMimicPipelineMixin))
         self.assertTrue(issubclass(X2LocomanipulationLocoMimicPipeline, X2FourModePipelineMixin))
         self.assertTrue(issubclass(X2LocomanipulationLocoMimicPipeline, RlLocoMimicPipeline))
 
@@ -88,6 +456,9 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertEqual(real_cfg.env.env_type, "AgiBotCppEnv")
         self.assertTrue(real_cfg.do_safety_check)
         self.assertTrue(real_cfg.realign_on_policy_switch)
+        self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")
+        self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
+        self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
         self.assertEqual(real_cfg.ctrl[0].triggers["Back"], "[POLICY_LOCO]")
         self.assertEqual(real_cfg.ctrl[0].triggers["RB"], "[POLICY_SWITCH],NEXT")
         self.assertEqual(real_cfg.ctrl[0].triggers["LB"], "[POLICY_SWITCH],LAST")
@@ -290,9 +661,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         progress = SimpleNamespace(close_calls=0)
         manager = SimpleNamespace(
             reset_to_loco_calls=[],
-            policy=SimpleNamespace(
-                close_progress=lambda: setattr(progress, "close_calls", progress.close_calls + 1)
-            ),
+            policy=SimpleNamespace(close_progress=lambda: setattr(progress, "close_calls", progress.close_calls + 1)),
         )
         manager.reset_to_loco = lambda refresh_env: manager.reset_to_loco_calls.append(refresh_env)
         pipeline.policy_manager = manager

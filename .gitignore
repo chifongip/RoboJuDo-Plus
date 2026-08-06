@@ -130,5 +130,7 @@ profile_output*
 assets/motions
 .gr1t2.jpg
 logs
+benchmark_results/
+captures/
 MUJOCO_LOG.TXT
 assets/resources

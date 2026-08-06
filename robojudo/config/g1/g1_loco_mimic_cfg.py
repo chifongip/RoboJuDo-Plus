@@ -28,8 +28,8 @@ from .pipeline.g1_loco_mimic_pipeline_cfg import (
     G1Locomanipulation29LocoMimicPipelineCfg,
     G1RlLocoMimicPipelineCfg,
 )
-from .policy.g1_amp_recovery_policy_cfg import G1_23AmpRecoveryPolicyCfg, G1AmpRecoveryPolicyCfg
 from .policy.g1_amo_policy_cfg import G1AmoPolicyCfg  # noqa: F401
+from .policy.g1_amp_recovery_policy_cfg import G1_23AmpRecoveryPolicyCfg, G1AmpRecoveryPolicyCfg
 from .policy.g1_asap_policy_cfg import G1AsapLocoPolicyCfg, G1AsapPolicyCfg  # noqa: F401
 from .policy.g1_beyondmimic_policy_cfg import G1BeyondMimicPolicyCfg  # noqa: F401
 from .policy.g1_h2h_policy_cfg import G1H2HPolicyCfg  # noqa: F401
@@ -49,6 +49,30 @@ from .policy.g1_unitree_policy_cfg import G1UnitreePolicyCfg, G1UnitreeWoGaitPol
 
 def _g1_locomanipulation_mimic_policies(pad_missing_dofs: bool):
     return [
+        G1BeyondMimicPolicyCfg(
+            policy_name="Walk2_subject1_23dof_wose",
+            without_state_estimator=True,
+            max_timestep=800,
+            pad_missing_dofs=pad_missing_dofs,
+        ),
+        G1BeyondMimicPolicyCfg(
+            policy_name="Walk2_subject1_23dof",
+            without_state_estimator=False,
+            max_timestep=800,
+            pad_missing_dofs=pad_missing_dofs,
+        ),
+        G1BeyondMimicPolicyCfg(
+            policy_name="Violin",
+            without_state_estimator=False,
+            max_timestep=610,
+            pad_missing_dofs=pad_missing_dofs,
+        ),
+        G1BeyondMimicPolicyCfg(
+            policy_name="Waltz",
+            without_state_estimator=False,
+            max_timestep=940,
+            pad_missing_dofs=pad_missing_dofs,
+        ),
         G1BeyondMimicPolicyCfg(
             policy_name="Jump_wose",
             without_state_estimator=True,

@@ -66,6 +66,8 @@ class RlLocoMimicPipelineCfg(PipelineCfg):
     recovery_policy: PolicyCfg | Any | None = None
     """Optional fall-recovery policy, activated explicitly from damping mode."""
 
+    # Reinitialize policy-local reference alignment at activation. This does
+    # not reset or rotate the environment/state-estimator frame.
     realign_on_policy_switch: bool = False
     """Refresh the environment's born-place frame when a loco-mimic transition activates a policy."""
 

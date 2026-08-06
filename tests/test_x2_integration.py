@@ -51,6 +51,8 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(real_cfg.env.aimdk.publish_dt, 0.002)
         self.assertEqual(real_cfg.env.aimdk.command_timeout, 0.1)
         self.assertEqual(real_cfg.env.aimdk.state_timeout, 0.1)
+        self.assertEqual(real_cfg.env.odometry_type, "NONE")
+        self.assertEqual(real_cfg.env.aimdk.odometry_topic, "/aima/mc/leg_odometry")
         self.assertTrue(real_cfg.env.update_with_fk)
         self.assertIsNotNone(real_cfg.env.forward_kinematic)
         self.assertEqual(sim_cfg.env.elastic_band.body_name, "torso_link")
@@ -68,6 +70,21 @@ class TestX2Integration(unittest.TestCase):
             },
         )
         self.assertEqual(len(real_cfg.ctrl), 1)
+        self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")
+        self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
+        self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
+
+    def test_x2_real_odometry_configuration_rejects_an_empty_aimdk_topic(self):
+        from pydantic import ValidationError
+
+        from robojudo.config.x2.env.x2_real_env_cfg import X2AimdkCfg, X2RealEnvCfg
+
+        for odometry_type in ("NONE", "DUMMY", "AIMDK"):
+            with self.subTest(odometry_type=odometry_type):
+                self.assertEqual(X2RealEnvCfg(odometry_type=odometry_type).odometry_type, odometry_type)
+
+        with self.assertRaisesRegex(ValidationError, "odometry_topic must be set"):
+            X2RealEnvCfg(odometry_type="AIMDK", aimdk=X2AimdkCfg(odometry_topic=""))
 
     def test_x2_joint_default_matches_working_controller(self):
         from robojudo.config.x2.env.x2_env_cfg import X2JointDefaultDoF
@@ -868,11 +885,20 @@ class TestX2Integration(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stiffness must contain only finite"):
             AimdkController(invalid_cfg)
 
+        invalid_odometry_cfg = dict(cfg, enable_odometry=True, odometry_topic="")
+        with self.assertRaisesRegex(ValueError, "odometry_topic must not be empty"):
+            AimdkController(invalid_odometry_cfg)
+
         controller = AimdkController(cfg)
         try:
             self.assertTrue(controller.self_check(0.0))
             self.assertTrue(controller.state_is_fresh(cfg_env.aimdk.state_timeout))
-            self.assertEqual(len(controller.get_robot_state().motor_state.q), 31)
+            state = controller.get_robot_state()
+            self.assertEqual(len(state.motor_state.q), 31)
+            self.assertFalse(state.odometry_state.valid)
+            self.assertEqual(state.odometry_state.position, [0.0, 0.0, 0.0])
+            self.assertEqual(state.odometry_state.quaternion, [0.0, 0.0, 0.0, 1.0])
+            self.assertEqual(state.odometry_state.linear_velocity, [0.0, 0.0, 0.0])
             controller.set_control_joint_names(X2_POLICY_JOINT_NAMES)
             controller.arm_position_control()
             controller.set_passive()

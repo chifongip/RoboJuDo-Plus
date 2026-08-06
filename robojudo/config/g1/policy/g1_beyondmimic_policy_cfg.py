@@ -77,6 +77,7 @@ class G1BeyondMimicPolicyCfg(BeyondMimicPolicyCfg):
     action_beta: float = 1.0
     # ======= POLICY SPECIFIC CONFIGURATION =======
     without_state_estimator: bool = True
+    override_robot_anchor_pos: bool = False
 
     action_scales: list[float] = [
         *[0.548, 0.548, 0.548, 0.351, 0.351, 0.439, 0.548, 0.548, 0.439, 0.351, 0.351],

@@ -83,7 +83,7 @@ You can apply your own controller to control the robot using `AMOPolicy`. Just s
 
 `H2HStudentPolicy` is the policy that controls the robot using the [human2humanoid](https://github.com/LeCAR-Lab/human2humanoid).
 
-> PHC Submodule is needed for motionlib control. check README#setup.
+> PHC Submodule is needed for motionlib control. check [README](../README.md#setup).
 
 script: [h2hstudent_policy.py](../robojudo/policy/h2hstudent_policy.py)
 
@@ -221,7 +221,7 @@ You can refer to `g1_asap` and `g1_asap_loco` config in [g1_asap_cfg.py](../robo
 
 To be noted, this is for **KungfuBot2** general model, for KungfuBot, please use [AsapPolicy](#policy--asappolicy).
 
-> PHC Submodule is needed for motionlib control. check [README](../README.md#2️⃣-install-optional-modules).
+> PHC Submodule is needed for motionlib control. check [README](../README.md#setup).
 
 script: [kungfubot_policy.py](../robojudo/policy/kungfubot_policy.py)
 
@@ -246,7 +246,7 @@ For TwistPolicy, we implement two motion source controllers:
 - `MotionTwistCtrl` at [motion_twist_ctrl.py](../robojudo/controller/motion_twist_ctrl.py): 
     - get motion from local .pkl files. 
     - this is base on the PHC MotionLib, and **uses the same motion format as PHC**. 
-        - PHC Submodule is needed. check [README](../README.md#2️⃣-install-optional-modules).
+        - PHC Submodule is needed. check [README](../README.md#setup).
     - motions from [PBHC](https://github.com/TeleHuman/PBHC) pipeline is supported,  put your motion files in `assets/motions/g1/phc/`.
 
 You can refer to `g1_twist` config in [g1_cfg.py](../robojudo/config/g1/g1_cfg.py) for test and details.

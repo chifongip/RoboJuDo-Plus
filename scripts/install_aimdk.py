@@ -6,7 +6,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 AIMDK_DIR = ROOT_DIR / "third_party" / "aimdk"
 AIMDK_SETUP = AIMDK_DIR / "install" / "setup.bash"
@@ -44,9 +43,17 @@ def validate_environment():
         raise RuntimeError("colcon was not found. Install colcon before building AimDK.")
 
 
+def initialize_missing_submodules(*paths: Path):
+    missing_submodules = [path.relative_to(ROOT_DIR).as_posix() for path in paths if not (path / ".git").exists()]
+    if missing_submodules:
+        run(["git", "submodule", "update", "--init", *missing_submodules])
+    else:
+        print("Preserving existing AimDK submodule worktrees.")
+
+
 def main():
     validate_environment()
-    run(["git", "submodule", "update", "--init", "third_party/aimdk", "packages/aimdk_cpp"])
+    initialize_missing_submodules(AIMDK_DIR, AIMDK_CPP_DIR)
     if not (AIMDK_DIR / "src" / "aimdk_msgs" / "package.xml").is_file():
         raise RuntimeError(f"AimDK submodule is incomplete: {AIMDK_DIR}")
     if not (AIMDK_CPP_DIR / "pyproject.toml").is_file():

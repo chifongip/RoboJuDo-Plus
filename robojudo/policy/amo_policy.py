@@ -93,9 +93,9 @@ class AMOPolicy(Policy):
 
         commands = self.cmd.copy()
         for key in ctrl_data.keys():
-            if key in ["JoystickCtrl", "UnitreeCtrl"]:
+            if key in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
                 axes = ctrl_data[key]["axes"]
-                lx, ly, rx, ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]
+                lx, ly, rx, _ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]
 
                 commands[0] = command_remap(ly, self.commands_map[0])
                 commands[1] = command_remap(rx, self.commands_map[1])

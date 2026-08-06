@@ -49,7 +49,7 @@ class TestInstallDexTeleop(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, "not a Conda environment"):
                             install_dex_teleop.detect_current_conda_environment("conda")
 
-    def test_main_installs_with_conda_then_pip(self):
+    def test_main_installs_with_pip_then_conda(self):
         prefix = Path("/opt/conda/envs/robot")
         python = (prefix / "bin/python").as_posix()
         completed = subprocess.CompletedProcess([], 0)
@@ -68,6 +68,21 @@ class TestInstallDexTeleop(unittest.TestCase):
             run.call_args_list[0],
             call(
                 [
+                    python,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-r",
+                    "requirements.txt",
+                ],
+                cwd=install_dex_teleop.DEX_TELEOP_DIR,
+            ),
+        )
+        self.assertEqual(len(run.call_args_list), 2)
+        self.assertEqual(
+            run.call_args_list[1],
+            call(
+                [
                     "/usr/bin/conda",
                     "install",
                     "--prefix",
@@ -77,14 +92,6 @@ class TestInstallDexTeleop(unittest.TestCase):
                     "--channel",
                     "conda-forge",
                 ],
-                cwd=install_dex_teleop.DEX_TELEOP_DIR,
-            ),
-        )
-        self.assertEqual(len(run.call_args_list), 2)
-        self.assertEqual(
-            run.call_args_list[1],
-            call(
-                [python, "-m", "pip", "install", "-r", "requirements.txt"],
                 cwd=install_dex_teleop.DEX_TELEOP_DIR,
             ),
         )

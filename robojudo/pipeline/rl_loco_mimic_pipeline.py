@@ -49,6 +49,7 @@ class PolicyInterpManager(PolicyManager):
         self.policy_recovery_id = len(cfg_policies_all) - 1 if cfg_policy_recovery is not None else None
         self.policy_mimic_idx = 0
         self.realign_on_policy_switch = realign_on_policy_switch
+        self._latest_env_data = None
 
         # Interpolation variables
         self.interp_state = self.InterpState.IDLE
@@ -63,7 +64,7 @@ class PolicyInterpManager(PolicyManager):
 
     def _activate_policy(self, policy_id: int):
         if self.realign_on_policy_switch:
-            self.env.reset_alignment()
+            self.policy_by_id(policy_id).reset_alignment(self._latest_env_data)
         self.set_policy(policy_id, reset_env=False)
 
     def cancel_interpolation(self):
@@ -211,6 +212,7 @@ class PolicyInterpManager(PolicyManager):
         return True
 
     def step(self, env_data, ctrl_data):
+        self._latest_env_data = env_data
         super().step(env_data, ctrl_data)
         self._interpolate_step()
 

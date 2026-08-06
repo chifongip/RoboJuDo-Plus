@@ -61,7 +61,7 @@ class LocomanipulationPolicyBase(Policy):
         target_vel = np.zeros(3, dtype=np.float32)
 
         for key in ctrl_data.keys():
-            if key in ("JoystickCtrl", "UnitreeCtrl"):
+            if key in ("JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"):
                 axes = ctrl_data[key]["axes"]
                 lx, ly, rx = (
                     axis if abs(axis) >= 0.1 else 0.0

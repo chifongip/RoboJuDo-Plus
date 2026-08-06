@@ -10,6 +10,7 @@ class G1RlLocoMimicPipelineCfg(RlLocoMimicPipelineCfg):
     """Base configuration for the G1 loco-mimic pipeline."""
 
     robot: str = "g1"
+    realign_on_policy_switch: bool = True
 
     upper_dof_num: int = 17
     # fmt: off

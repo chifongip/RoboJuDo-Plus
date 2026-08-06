@@ -35,7 +35,7 @@ from robojudo.environment.utils.unitree_command import (
 from robojudo.environment.utils.unitree_rotation import transform_imu_data
 from robojudo.tools.retarget import HandRetarget
 from robojudo.utils.rotation import TransformAlignment
-from robojudo.utils.util_func import calc_heading_quat_np, quat_rotate_inverse_np
+from robojudo.utils.util_func import calc_heading_quat_np
 
 logger = logging.getLogger(__name__)
 
@@ -260,8 +260,11 @@ class UnitreeEnv(Environment):
             self._base_lin_vel = np.array([0.0, 0.0, 0.0])
         elif self._odometry_type == "UNITREE":
             base_pos = np.array(self.sport_state.position, dtype=np.float32)
-            lin_vel = np.array(self.sport_state.velocity, dtype=np.float32)
-            self._base_lin_vel = quat_rotate_inverse_np(self.base_quat, lin_vel)
+            # Unitree's source-language odometry contract defines velocity along
+            # the robot axes, so it is already in the body frame expected by the
+            # policy. Rotating it with the independently sampled low-state IMU
+            # would corrupt the velocity whenever the robot has a nonzero yaw.
+            self._base_lin_vel = np.array(self.sport_state.velocity, dtype=np.float32)
             self._base_pos = self.base_align.align_pos(base_pos) if self.born_place_align else base_pos
 
         # FK

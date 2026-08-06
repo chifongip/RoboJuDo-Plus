@@ -52,7 +52,7 @@ class MujocoEnv(Environment):
         # self.viewer._paused = True
 
         if cfg_env.visualize_extras:
-            self.visualizer = MujocoVisualizer(self.viewer)
+            self.visualizer = MujocoVisualizer(self.viewer, alignment=self.base_align)
         else:
             self.visualizer = None
 
@@ -163,7 +163,8 @@ class MujocoEnv(Environment):
         if simple:
             return
 
-        quat = self.data.qpos.astype(np.float32)[3:7][[1, 2, 3, 0]]
+        raw_quat = self.data.qpos.astype(np.float32)[3:7][[1, 2, 3, 0]]
+        quat = raw_quat.copy()
         ang_vel = self.data.qvel.astype(np.float32)[3:6]
         base_pos = self.data.qpos.astype(np.float32)[:3]
         lin_vel = self.data.qvel.astype(np.float32)[0:3]
@@ -171,7 +172,10 @@ class MujocoEnv(Environment):
         if self.born_place_align:
             quat, base_pos = self.base_align.align_transform(quat, base_pos)
 
-        lin_vel = quat_rotate_inverse_np(quat, lin_vel)
+        # MuJoCo free-joint translation velocity is expressed in the raw world
+        # frame. Convert it with the physical root orientation, not the
+        # born-place-aligned orientation exposed to policies.
+        lin_vel = quat_rotate_inverse_np(raw_quat, lin_vel)
         rpy = quatToEuler(quat)
 
         self._base_rpy = rpy.copy()

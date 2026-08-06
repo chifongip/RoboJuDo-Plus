@@ -2,10 +2,13 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation as sRot
 
+from robojudo.utils.rotation import TransformAlignment
+
 
 class MujocoVisualizer:
-    def __init__(self, viewer):
+    def __init__(self, viewer, alignment: TransformAlignment | None = None):
         self.viewer = viewer
+        self.alignment = alignment
 
     # TODO: reset: clear all markers
 
@@ -28,7 +31,20 @@ class MujocoVisualizer:
                 id=humanoid_id * 1000 + j,
             )
 
-    def draw_arrow(self, origin, root_quat, vec_local, color, scale=1.0, horizontal_only=False, id=0):
+    def draw_arrow(
+        self,
+        origin,
+        root_quat,
+        vec_local,
+        color,
+        scale=1.0,
+        horizontal_only=False,
+        id=0,
+        aligned_frame=False,
+    ):
+        if aligned_frame and self.alignment is not None:
+            root_quat, origin = self.alignment.unalign_transform(root_quat, origin)
+
         vec_local = np.array(vec_local, dtype=float)
         r = sRot.from_quat(root_quat)
 

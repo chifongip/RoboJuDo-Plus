@@ -27,6 +27,6 @@ class X2BeyondMimicPolicyCfg(BeyondMimicPolicyCfg):
     action_scales: list[float] = [1.0] * 29
 
     without_state_estimator: bool = True
-    override_robot_anchor_pos: bool = True
+    override_robot_anchor_pos: bool = False
     use_modelmeta_config: bool = True
     use_motion_from_model: bool = True

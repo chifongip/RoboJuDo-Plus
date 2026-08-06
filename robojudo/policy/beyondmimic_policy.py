@@ -112,8 +112,8 @@ class BeyondMimicPolicyBase(Policy):
             anchor_pos_w_init = command_init["body_pos_w"][self.motion_anchor_body_index, :]
             anchor_quat_w_init = command_init["body_quat_w"][self.motion_anchor_body_index, :][[1, 2, 3, 0]]
 
-            self.command_init_align = TransformAlignment(
-                quat=anchor_quat_w_init, pos=anchor_pos_w_init, yaw_only=True, xy_only=True
+            self.motion_init_align = TransformAlignment(
+                quat=anchor_quat_w_init, pos=anchor_pos_w_init, yaw_only=True, xy_only=False
             )
 
     @staticmethod
@@ -203,6 +203,11 @@ class BeyondMimicPolicyBase(Policy):
                 f"BeyondMimic model {cfg_policy.policy_name!r} was exported {mode} state-estimator observations, "
                 f"but without_state_estimator={cfg_policy.without_state_estimator}"
             )
+        if not model_without_state_estimator and cfg_policy.override_robot_anchor_pos:
+            raise ValueError(
+                f"BeyondMimic model {cfg_policy.policy_name!r} includes motion_anchor_pos_b, "
+                "so override_robot_anchor_pos must be False"
+            )
 
         expected_observation_names = [
             "command",
@@ -255,7 +260,21 @@ class BeyondMimicPolicyBase(Policy):
         self.play_speed: float = 1.0
         self.flag_motion_done = False
         self.last_action = np.zeros(self.num_actions, dtype=np.float32)
+        self.robot_anchor_align = None
         self._prepare_policy()
+
+    def reset_alignment(self, env_data=None):
+        """Align the reference motion to the current robot anchor without changing estimator state."""
+        self.robot_anchor_align = None
+        if env_data is not None and self.use_motion_from_model:
+            robot_anchor_pos = self._get_robot_anchor_position(env_data)
+            robot_anchor_quat = self._get_robot_anchor_orientation(env_data)
+            self.robot_anchor_align = TransformAlignment(
+                quat=robot_anchor_quat,
+                pos=robot_anchor_pos,
+                yaw_only=True,
+                xy_only=False,
+            )
 
     def close_progress(self):
         pbar = getattr(self, "pbar", None)
@@ -300,14 +319,17 @@ class BeyondMimicPolicyBase(Policy):
             )
         else:
             assert self.command is not None, "command not initialized"
+            if self.robot_anchor_align is None:
+                self.reset_alignment(env_data)
+
             # print(self.command["time_step"])
             command = np.concatenate([self.command["joint_pos"], self.command["joint_vel"]], axis=-1)
 
             anchor_pos_w = self.command["body_pos_w"][self.motion_anchor_body_index, :]
             anchor_quat_w = self.command["body_quat_w"][self.motion_anchor_body_index, :][[1, 2, 3, 0]]
 
-            if self.command_init_align is not None:
-                anchor_quat_w, anchor_pos_w = self.command_init_align.align_transform(anchor_quat_w, anchor_pos_w)
+            anchor_quat_w, anchor_pos_w = self.motion_init_align.align_transform(anchor_quat_w, anchor_pos_w)
+            anchor_quat_w, anchor_pos_w = self.robot_anchor_align.unalign_transform(anchor_quat_w, anchor_pos_w)
 
             if self.override_robot_anchor_pos:
                 robot_anchor_pos_w = anchor_pos_w.copy()
@@ -477,7 +499,15 @@ class BeyondMimicPolicyBase(Policy):
         pos = extras["pos"]
         # ori = extras["ori"]
 
-        visualizer.draw_arrow(anchor_pos_w, anchor_quat_w, [0.2, 0, 0], color=[1, 0, 0, 1], scale=2, id=0)
+        visualizer.draw_arrow(
+            anchor_pos_w,
+            anchor_quat_w,
+            [0.2, 0, 0],
+            color=[1, 0, 0, 1],
+            scale=2,
+            id=0,
+            aligned_frame=True,
+        )
         visualizer.draw_arrow(
             robot_anchor_pos_w,
             robot_anchor_quat_w,
@@ -485,13 +515,30 @@ class BeyondMimicPolicyBase(Policy):
             color=[0, 1, 0, 1],
             scale=2,
             id=1,
+            aligned_frame=True,
         )
-        visualizer.draw_arrow(robot_anchor_pos_w, robot_anchor_quat_w, pos, color=[0, 1, 1, 1], scale=2, id=2)
+        visualizer.draw_arrow(
+            robot_anchor_pos_w,
+            robot_anchor_quat_w,
+            pos,
+            color=[0, 1, 1, 1],
+            scale=2,
+            id=2,
+            aligned_frame=True,
+        )
 
         torso_pos = env_data.get("torso_pos")
         torso_quat = env_data.get("torso_quat")
         if torso_pos is not None and torso_quat is not None:
-            visualizer.draw_arrow(torso_pos, torso_quat, [0.2, 0, 0], color=[1, 1, 0, 1], scale=2, id=3)
+            visualizer.draw_arrow(
+                torso_pos,
+                torso_quat,
+                [0.2, 0, 0],
+                color=[1, 1, 0, 1],
+                scale=2,
+                id=3,
+                aligned_frame=True,
+            )
 
 
 @policy_registry.register

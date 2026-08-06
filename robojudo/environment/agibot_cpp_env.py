@@ -2,6 +2,7 @@ import logging
 import time
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from robojudo.environment import Environment, env_registry
 from robojudo.environment.env_cfgs import AgiBotEnvCfg
@@ -20,6 +21,13 @@ class AgiBotCppEnv(Environment):
         self._last_clamp_log_time = 0.0
         super().__init__(cfg_env=cfg_env, device=device)
         self._validate_gains(self.stiffness, self.damping)
+        self._last_odometry_sequence: int | None = None
+        self._last_odometry_stamp: float | None = None
+        self._last_odometry_root_pos: np.ndarray | None = None
+        self._last_odometry_root_quat: np.ndarray | None = None
+        self._odometry_position_origin: np.ndarray | None = None
+        self._filtered_base_lin_vel = np.zeros(3, dtype=np.float32)
+        self._last_odometry_receipt_time: float | None = None
 
         try:
             from aimdk_cpp import AimdkController
@@ -34,6 +42,7 @@ class AgiBotCppEnv(Environment):
         cfg.update(
             {
                 "act": self.enabled,
+                "enable_odometry": cfg_env.odometry_type in ("AIMDK", "SUPERODOM"),
                 "joint_names": self.joint_names,
                 "leg_joint_names": cfg_env.leg_joint_names,
                 "waist_joint_names": cfg_env.waist_joint_names,
@@ -44,13 +53,17 @@ class AgiBotCppEnv(Environment):
             }
         )
         self.aimdk = AimdkController(cfg)
+        self._odometry_type = cfg_env.odometry_type
         self.self_check()
 
     def self_check(self):
         if self.aimdk is None:
             return
         if not self.aimdk.self_check():
-            raise RuntimeError("AgiBotCppEnv did not receive AimDK joint/IMU state.")
+            required_streams = "joint/IMU"
+            if self._odometry_type in ("AIMDK", "SUPERODOM"):
+                required_streams += "/odometry"
+            raise RuntimeError(f"AgiBotCppEnv did not receive fresh AimDK {required_streams} state.")
 
     def reset(self):
         if self.born_place_align:
@@ -71,7 +84,7 @@ class AgiBotCppEnv(Environment):
 
         if self.enabled and not self.aimdk.state_is_fresh(self.cfg_env.aimdk.state_timeout):
             self.command_damping(self.cfg_env.aimdk.shutdown_damping)
-            raise RuntimeError("AgiBotCppEnv joint or IMU state became stale; damping commands were sent.")
+            raise RuntimeError("AgiBotCppEnv joint, IMU, or odometry state became stale; damping commands were sent.")
 
         state = self.aimdk.get_robot_state()
         self._dof_pos = np.asarray(state.motor_state.q, dtype=np.float32)
@@ -85,10 +98,23 @@ class AgiBotCppEnv(Environment):
         self._base_ang_vel = np.asarray(state.imu_state.gyroscope, dtype=np.float32)
         self._base_lin_acc = np.asarray(state.imu_state.accelerometer, dtype=np.float32)
 
-        if self._base_pos is None:
-            self._base_pos = np.zeros(3, dtype=np.float32)
-        if self._base_lin_vel is None:
+        if self._odometry_type in ("AIMDK", "SUPERODOM"):
+            odometry = state.odometry_state
+            if odometry.valid:
+                root_pos, root_quat = self._update_odometry_state(odometry)
+                if self.born_place_align:
+                    root_pos = self.base_align.align_pos(root_pos)
+                self._base_pos = root_pos
+                self._base_lin_vel = self._filtered_base_lin_vel.copy()
+            else:
+                self._base_pos = None
+                self._base_lin_vel = None
+        elif self._odometry_type == "DUMMY":
+            self._base_pos = np.array([0.0, 0.0, 0.8], dtype=np.float32)
             self._base_lin_vel = np.zeros(3, dtype=np.float32)
+        else:
+            self._base_pos = None
+            self._base_lin_vel = None
 
         if self.update_with_fk:
             fk_info = self.fk()
@@ -96,6 +122,86 @@ class AgiBotCppEnv(Environment):
             self._torso_pos = fk_info[self._torso_name]["pos"]
             self._torso_quat = fk_info[self._torso_name]["quat"]
             self._torso_ang_vel = fk_info[self._torso_name]["ang_vel"]
+
+    def _update_odometry_state(self, odometry) -> tuple[np.ndarray, np.ndarray]:
+        sequence = int(getattr(odometry, "sequence", 0))
+        is_new_sample = sequence != self._last_odometry_sequence
+        if is_new_sample:
+            root_pos, root_quat = self._odometry_sensor_pose_to_root(
+                np.asarray(odometry.position, dtype=np.float64),
+                np.asarray(odometry.quaternion, dtype=np.float64),
+            )
+            position_mode = getattr(self.cfg_env.aimdk, "odometry_position_mode", "ABSOLUTE")
+            if position_mode == "RELATIVE_START":
+                if getattr(self, "_odometry_position_origin", None) is None:
+                    self._odometry_position_origin = root_pos.copy()
+                root_pos = root_pos - self._odometry_position_origin
+            stamp = float(getattr(odometry, "stamp_sec", 0)) + float(getattr(odometry, "stamp_nanosec", 0)) * 1e-9
+            if stamp <= 0.0:
+                stamp = time.monotonic()
+
+            if self._last_odometry_stamp is not None and self._last_odometry_root_pos is not None:
+                dt = stamp - self._last_odometry_stamp
+                if 1e-4 < dt <= self.cfg_env.aimdk.odometry_timeout:
+                    velocity_world = (root_pos - self._last_odometry_root_pos) / dt
+                    velocity_body = Rotation.from_quat(root_quat).inv().apply(velocity_world)
+                    tau = self.cfg_env.aimdk.odometry_velocity_filter_time_constant
+                    alpha = 1.0 if tau <= 0.0 else 1.0 - np.exp(-dt / tau)
+                    self._filtered_base_lin_vel = (
+                        (1.0 - alpha) * self._filtered_base_lin_vel + alpha * velocity_body
+                    ).astype(np.float32)
+
+            self._last_odometry_sequence = sequence
+            self._last_odometry_stamp = stamp
+            self._last_odometry_root_pos = root_pos
+            self._last_odometry_root_quat = root_quat
+            self._last_odometry_receipt_time = time.monotonic()
+
+        if self._last_odometry_root_pos is None or self._last_odometry_root_quat is None:
+            raise RuntimeError("No valid converted X2 odometry sample is available")
+
+        root_pos = self._last_odometry_root_pos.copy()
+        if self._last_odometry_receipt_time is not None:
+            age = min(
+                time.monotonic() - self._last_odometry_receipt_time,
+                self.cfg_env.aimdk.odometry_timeout,
+            )
+            velocity_world = Rotation.from_quat(self._last_odometry_root_quat).apply(self._filtered_base_lin_vel)
+            root_pos += velocity_world * age
+        return root_pos.astype(np.float32), self._last_odometry_root_quat.astype(np.float32)
+
+    def _odometry_sensor_pose_to_root(
+        self,
+        sensor_pos: np.ndarray,
+        sensor_quat: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Convert world->odometry-sensor pose into world->pelvis/root pose."""
+        if sensor_pos.shape != (3,) or sensor_quat.shape != (4,):
+            raise ValueError("Odometry position and quaternion must have shapes (3,) and (4,)")
+        if not np.isfinite(sensor_pos).all() or not np.isfinite(sensor_quat).all():
+            raise ValueError("Odometry pose must contain only finite values")
+
+        torso_to_sensor_pos = np.asarray(
+            self.cfg_env.aimdk.torso_to_odometry_sensor_position,
+            dtype=np.float64,
+        )
+        torso_to_sensor_rot = Rotation.from_quat(
+            self.cfg_env.aimdk.torso_to_odometry_sensor_quaternion
+        )
+        world_to_sensor_rot = Rotation.from_quat(sensor_quat)
+        world_to_torso_rot = world_to_sensor_rot * torso_to_sensor_rot.inv()
+        world_to_torso_pos = sensor_pos - world_to_torso_rot.apply(torso_to_sensor_pos)
+
+        relative_fk = self.kinematics.forward(
+            joint_pos=self._dof_pos,
+            base_pos=np.zeros(3, dtype=np.float64),
+            base_quat=np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float64),
+        )
+        pelvis_to_torso_pos = relative_fk[self._torso_name]["pos"]
+        pelvis_to_torso_rot = Rotation.from_quat(relative_fk[self._torso_name]["quat"])
+        world_to_pelvis_rot = world_to_torso_rot * pelvis_to_torso_rot.inv()
+        world_to_pelvis_pos = world_to_torso_pos - world_to_pelvis_rot.apply(pelvis_to_torso_pos)
+        return world_to_pelvis_pos, world_to_pelvis_rot.as_quat()
 
     def step(self, pd_target, hand_pose=None):
         assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"

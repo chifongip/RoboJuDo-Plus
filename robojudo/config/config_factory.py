@@ -19,6 +19,7 @@ CFG_REGISTRY: dict[str, tuple[str, str]] = {
     # ctrl
     "keyboard_ctrl": ("robojudo.controller.keyboard_ctrl", "KeyboardCtrlCfg"),
     "joystick_ctrl": ("robojudo.controller.joystick_ctrl", "JoystickCtrlCfg"),
+    "ros_joystick_ctrl": ("robojudo.controller.ros_joystick_ctrl", "RosJoystickCtrlCfg"),
     "unitree_ctrl": ("robojudo.controller.unitree_ctrl", "UnitreeCtrlCfg"),
     "beyondmimic_ctrl": ("robojudo.controller.beyondmimic_ctrl", "BeyondMimicCtrlCfg"),
     # pipeline
