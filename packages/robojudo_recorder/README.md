@@ -23,13 +23,21 @@ schema。把灵巧手关节加入 RoboJuDo 的 `UpperBodyZmqCtrlCfg.joint_names`
 ## 架构
 
 ```text
-upper-body teleop ──> RoboJuDo pipeline ── ZMQ control samples ──┐
-                                                               ├─> recorder service ─> LeRobot v3 dataset
-camera / ROS 2 topic ───────── camera backend ──────────────────┘
+GR00T deployment（始终存在）:
+camera backend ─> Gr00tZmqCtrl observation stream ─> GR00T deploy
+
+可选 VLA rollout recording:
+Gr00tZmqCtrl observation stream ── RGB ─────────────┐
+RoboJuDo pipeline ── measured state/action samples ─┴─> recorder service ─> LeRobot v3 dataset
 ```
 
-控制循环只执行有界、非阻塞的 ZMQ 发送。相机读取、图像解码、视频编码和 Parquet 写盘都在 recorder
-进程中完成，不会阻塞机器人控制。
+普通 teleop 录制时，相机读取、图像解码、视频编码和 Parquet 写盘都在 recorder 进程中完成。GR00T
+模式下，相机采集和 observation 编码由 controller 的后台线程完成，recorder 仍负责视频编码和数据写盘；
+两种模式都不会在机器人控制线程执行阻塞式相机 I/O。
+
+GR00T 配置下，相机由 `Gr00tZmqCtrl` 的后台线程读取，并发布包含 RGB、实测关节位置和 task 的 deployment
+observation stream。这个 stream 属于 GR00T 推理闭环，不依赖 recorder，也不需要 `--record`。只有在额外
+录制 VLA rollout 时，recorder 才可以作为可选的第二个 subscriber 复用其中的 RGB payload。
 
 ## 安装
 
@@ -54,6 +62,9 @@ pip install -e "packages/robojudo_recorder[ros2]"
 
 # 测试和 lint
 pip install -e "packages/robojudo_recorder[dev]"
+
+# GR00T + G1 RealSense observation publisher（相机采集和 JPEG 编码）
+pip install -e "packages/robojudo_recorder[realsense,opencv]"
 ```
 
 ## 快速开始：ROS 2 相机
@@ -137,6 +148,30 @@ control_endpoint: tcp://<pipeline-ip>:8560
 ```
 
 pipeline 端可以用 `--record-endpoint` 修改 bind endpoint。
+
+### 可选：录制 VLA rollout 时复用 deployment RGB
+
+仅运行 GR00T deploy 时不需要启动 recorder，也不需要下面的配置。当用户还希望把 VLA rollout 保存为
+LeRobot dataset 时，recorder 不应再次打开 RealSense 或 ROS2 topic，而应作为旁路消费者复用 deployment
+observation 中的 RGB：
+
+```bash
+conda activate robop
+robojudo-recorder --config packages/robojudo_recorder/recorder.gr00t.example.yaml
+```
+
+默认连接关系：
+
+```text
+Gr00tZmqCtrl observation PUB: tcp://*:8561
+GR00T deploy observation SUB: tcp://<robot-ip>:8561
+recorder camera SUB:          tcp://127.0.0.1:8561
+```
+
+`camera.type: zmq` 会从 GR00T header 自动读取 JPEG encoding 和图像尺寸，不需要重复填写 `width`、
+`height`。这个 camera backend 只从 8561 提取 RGB；它不会使用 observation header 中的 joint positions
+作为 dataset state。dataset 的实测 joints 和最终执行 action 仍来自启用 `--record` 后的 8560 control
+sample，并按 timestamp 与 RGB 配对。没有 `--record` 和有效录制 episode 时，recorder 不会写入数据。
 
 ## 手柄录制控制
 
@@ -257,11 +292,9 @@ camera:
 camera:
   type: zmq
   name: head_rgb
-  endpoint: tcp://127.0.0.1:8570
-  encoding: raw_rgb
+  endpoint: tcp://127.0.0.1:8561
+  encoding: auto
   timestamp_mode: receive
-  width: 640
-  height: 480
   fps: 30
 ```
 
@@ -271,7 +304,8 @@ publisher 需要发送 multipart message：
 [JSON header, image bytes]
 ```
 
-JSON header 至少包含 `sequence` 和 `timestamp_ns`。`encoding` 可设为 `raw_rgb` 或 `jpeg`。跨机器时推荐
+header 支持 JSON 或 msgpack，至少包含 `sequence` 和 `timestamp_ns`。`encoding` 可设为 `auto`、
+`raw_rgb` 或 `jpeg`；`auto` 从 header 读取 encoding 和 shape。跨机器时推荐
 `timestamp_mode: receive`；只有 camera publisher 与 recorder 确认共享同一时钟域时才使用 source timestamp。
 
 ## 同步策略
