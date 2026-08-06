@@ -120,6 +120,9 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
         self.assertTrue(x2_sim.policy.without_state_estimator)
         self.assertTrue(set(X2_HEAD_JOINT_NAMES).isdisjoint(x2_sim.policy.obs_dof.joint_names))
         self.assertEqual(x2_real.env.env_type, "AgiBotCppEnv")
+        self.assertEqual(x2_real.ctrl[0].ctrl_type, "RosJoystickCtrl")
+        self.assertEqual(x2_real.ctrl[0].profile, "xbox_bluetooth")
+        self.assertEqual(x2_real.ctrl[0].topic, "/joy")
         self.assertTrue(x2_real.do_safety_check)
 
     def test_robot_specific_policies_share_the_base_runtime(self):

@@ -60,13 +60,15 @@ def install_submodules(selected=None, clean=False):
             print(f"Using repository-local package '{name}'.")
         else:
             print(f"Initializing submodule '{name}'...")
-            if clean and (path / ".git").exists():
+            initialized = (path / ".git").exists()
+            if clean and initialized:
                 print(f"Cleaning existing submodule '{name}'...")
                 run(f"git -C {shlex.quote(path.as_posix())} reset --hard", required=True)
                 run(f"git -C {shlex.quote(path.as_posix())} clean -fd", required=True)
-            elif (path / ".git").exists():
+            elif initialized:
                 print(f"Preserving existing worktree for submodule '{name}'.")
-            run(f"git submodule update --init {shlex.quote(path.as_posix())}", required=True)
+            if clean or not initialized:
+                run(f"git submodule update --init {shlex.quote(path.as_posix())}", required=True)
 
         if not path.exists():
             print(f"Path {path} does not exist. Skipping {name}.")

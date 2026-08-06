@@ -50,7 +50,7 @@ The post-`b43869b` codebase adds or expands:
 
 ## TODO
 
-- [ ] Confirm the real X2 odometry source. On PC1, `/aima/mc/leg_odometry` stops publishing after the native motion-control module is stopped with `aima em stop-app mc`; document the required service or fallback before real deployment.
+- [ ] Confirm the real X2 odometry source. On PC1, `/aima/mc/leg_odometry` stops publishing after the native motion-control module is stopped with `aima em stop-app mc`; find a robust odometry solution.
 - [ ] Validate IMU quaternions in real-robot environments, retain the last valid sample through a short invalid-packet grace window, and force damping only after persistent invalid or stale state; keep pipeline finite checks as a final safety fallback.
 - [ ] Add ZMQ velocity control under [ZMQ Control](#zmq-control).
 
@@ -82,8 +82,8 @@ RoboJuDo-Plus requires Python 3.11 or newer.
 git clone https://github.com/chifongip/RoboJuDo-Plus.git
 cd RoboJuDo-Plus
 
-conda create -n robojudo python=3.11 -y
-conda activate robojudo
+conda create -n robojudo-plus python=3.11 -y
+conda activate robojudo-plus
 
 pip install -e .
 ```
@@ -118,6 +118,9 @@ python submodule_install.py unitree_cpp
 # AgiBot X2 AimDK backend; source ROS 2 Humble first.
 python submodule_install.py aimdk
 
+# ROS 2 Xbox/PS5 joystick controller; source ROS 2 Humble first.
+python submodule_install.py ros2_joy_cpp
+
 # XR/dexterous-hand teleoperation support.
 python submodule_install.py dex_teleop
 
@@ -130,6 +133,27 @@ The optional installers may require an active Conda environment and external SDK
 - [Unitree setup](docs/unitree_setup.md)
 - [X2 sim-to-real setup](docs/x2_sim2real.md)
 - [policy documentation](docs/policy.md)
+
+### Update submodules after pulling
+
+After pulling RoboJuDo-Plus changes, synchronize every tracked submodule to the revisions recorded by the pulled
+commit:
+
+```bash
+git pull
+git submodule update --init --recursive
+```
+
+The submodule command updates source checkouts only; it does not rebuild or reinstall optional packages. Rerun the
+installer for each optional module whose source changed or whose native artifacts are needed on the current machine:
+
+```bash
+python submodule_install.py <module>
+```
+
+For example, use `python submodule_install.py aimdk` after an AimDK update. The installer preserves an existing
+submodule worktree, so always run `git submodule update --init --recursive` first when the pulled commit changes a
+submodule revision. Use `--clean` only when you intentionally want to discard local changes in a module.
 
 ### 3. Verify the base installation
 
@@ -272,13 +296,14 @@ The managed installer expects ROS 2 Humble to be available and an active Conda e
 
 ```bash
 source /opt/ros/humble/setup.bash
-conda activate robojudo
+conda activate robojudo-plus
 python submodule_install.py aimdk
 source third_party/aimdk/install/setup.bash
 ```
 
-Source the generated AimDK setup file in every shell used for real X2 deployment. The installer initializes the pinned
-AimDK and `aimdk_cpp` submodules, builds the required message package, and installs the native Python extension.
+Source the generated AimDK setup file in every shell used for real X2 deployment. The installer initializes missing
+AimDK and `aimdk_cpp` submodules, preserves existing worktrees, builds the required message package, and installs the
+native Python extension.
 
 Verify the native backend explicitly:
 
@@ -286,9 +311,11 @@ Verify the native backend explicitly:
 ROBOJUDO_REQUIRE_AIMDK=1 python -m unittest discover -s tests
 ```
 
-Before enabling commands, confirm that the four joint-state topics, `/aima/hal/imu/torso/state`, and
-`/aima/mc/leg_odometry` are updating. X2 real configurations use `odometry_type="AIMDK"`; stale or missing joint,
-IMU, or odometry data prevents activation and triggers damping.
+Before enabling commands, confirm that the four joint-state topics and `/aima/hal/imu/torso/state` are updating.
+The standard X2 real presets use `odometry_type="NONE"`; the BeyondMimic loco-mimic preset uses `"DUMMY"`. Neither
+requires an odometry topic for activation; stale joint or IMU data still prevents activation and triggers damping.
+Configurations that enable `AIMDK` odometry require
+`/aima/mc/leg_odometry`; the SuperOdom loco-mimic preset requires `/laser_odometry`.
 
 For the complete topic, frame, timeout, and preflight description, see [`docs/x2_sim2real.md`](docs/x2_sim2real.md).
 
@@ -494,6 +521,7 @@ External projects used by RoboJuDo-Plus:
 - [UnitreeCpp](https://github.com/chifongip/unitree_cpp)
 - [AimDK](https://github.com/chifongip/aimdk)
 - [AimDK C++/Python binding](https://github.com/chifongip/aimdk_cpp)
+- [ros2_joy_cpp](https://github.com/chifongip/ros2_joy_cpp)
 - [ZED Proxy](https://github.com/HansZ8/ZED-Proxy)
 - [DEX Teleop](https://github.com/wrfbreeze/dex_teleop)
 - [MuJoCo Python Viewer](https://github.com/rohanpsingh/mujoco-python-viewer)
@@ -503,6 +531,7 @@ External projects used by RoboJuDo-Plus:
 Bundled packages and third-party components:
 
 - [`packages/aimdk_cpp`](packages/aimdk_cpp) — RoboJuDo’s X2 AimDK native binding; see its [build configuration](packages/aimdk_cpp/pyproject.toml).
+- [`packages/ros2_joy_cpp`](packages/ros2_joy_cpp) — native ROS 2 Joy subscriber package.
 - [`packages/unitree_cpp`](packages/unitree_cpp) — Unitree G1 native binding; see its [package README](packages/unitree_cpp/README.md).
 - [`packages/zed_proxy`](packages/zed_proxy) — optional ZED camera odometry submodule.
 - [`third_party/aimdk`](third_party/aimdk) — pinned AimDK SDK used by X2 deployment.

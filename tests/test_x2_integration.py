@@ -51,7 +51,7 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(real_cfg.env.aimdk.publish_dt, 0.002)
         self.assertEqual(real_cfg.env.aimdk.command_timeout, 0.1)
         self.assertEqual(real_cfg.env.aimdk.state_timeout, 0.1)
-        self.assertEqual(real_cfg.env.odometry_type, "AIMDK")
+        self.assertEqual(real_cfg.env.odometry_type, "NONE")
         self.assertEqual(real_cfg.env.aimdk.odometry_topic, "/aima/mc/leg_odometry")
         self.assertTrue(real_cfg.env.update_with_fk)
         self.assertIsNotNone(real_cfg.env.forward_kinematic)
@@ -70,6 +70,9 @@ class TestX2Integration(unittest.TestCase):
             },
         )
         self.assertEqual(len(real_cfg.ctrl), 1)
+        self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")
+        self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
+        self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
 
     def test_x2_real_odometry_configuration_rejects_an_empty_aimdk_topic(self):
         from pydantic import ValidationError

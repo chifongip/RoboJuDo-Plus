@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -157,7 +158,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         for action in actions[1:]:
             np.testing.assert_allclose(action, actions[0], atol=1e-5)
 
-    def test_x2_real_enables_estimator_policy_with_aimdk_odometry(self):
+    def test_x2_real_configures_beyondmimic_without_external_odometry(self):
         from robojudo.config.x2.x2_cfg import (
             x2_locomimic_beyondmimic,
             x2_locomimic_beyondmimic_real,
@@ -168,22 +169,28 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
 
         self.assertEqual(
             [(policy.policy_name, policy.without_state_estimator) for policy in sim_cfg.mimic_policies],
-            [("Solo_dance", False), ("Walk1_subject1_wose", True)],
+            [
+                ("Walk2_subject1_wose", True),
+                ("Walk2_subject1", False),
+                ("Solo_dance", False),
+                ("Walk1_subject1_wose", True),
+            ],
         )
         self.assertEqual(
             [(policy.policy_name, policy.without_state_estimator) for policy in real_cfg.mimic_policies],
-            [("Solo_dance", False), ("Walk1_subject1_wose", True)],
+            [
+                ("Walk2_subject1_wose", True),
+                ("Walk2_subject1", False),
+                ("Solo_dance", False),
+                ("Walk1_subject1_wose", True),
+            ],
         )
-        self.assertEqual(real_cfg.env.odometry_type, "SUPERODOM")
-        self.assertEqual(real_cfg.env.aimdk.odometry_topic, "/laser_odometry")
-        self.assertEqual(real_cfg.env.aimdk.base_imu_topic, "/aima/hal/imu/torso/state")
-        self.assertEqual(real_cfg.env.aimdk.odometry_parent_frame, "map")
-        self.assertEqual(real_cfg.env.aimdk.odometry_child_frame, "lidar_chest_front")
-        self.assertEqual(real_cfg.env.aimdk.odometry_position_mode, "RELATIVE_START")
-        np.testing.assert_allclose(
-            real_cfg.env.aimdk.torso_to_odometry_sensor_quaternion,
-            [-np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)],
-        )
+        self.assertTrue(all(Path(policy.policy_file).is_file() for policy in sim_cfg.mimic_policies))
+        self.assertTrue(all(Path(policy.policy_file).is_file() for policy in real_cfg.mimic_policies))
+        self.assertEqual(real_cfg.env.odometry_type, "DUMMY")
+        self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")
+        self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
+        self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
 
     def test_aimdk_odometry_supplies_aligned_root_pose(self):
         from scipy.spatial.transform import Rotation
@@ -351,6 +358,8 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         np.testing.assert_allclose(env._filtered_base_lin_vel, [1.0, 0.0, 0.0], atol=1e-6)
 
     def test_relative_start_odometry_removes_superodom_sensor_origin_without_changing_delta(self):
+        from unittest.mock import patch
+
         from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
 
         odometry = SimpleNamespace(
@@ -377,11 +386,12 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         env._odometry_position_origin = None
         env._odometry_sensor_pose_to_root = lambda position, quaternion: (position, quaternion)
 
-        first_position, _ = env._update_odometry_state(odometry)
-        odometry.sequence = 2
-        odometry.stamp_nanosec = 100_000_000
-        odometry.position = [-0.25, 0.12, -0.61]
-        second_position, _ = env._update_odometry_state(odometry)
+        with patch("robojudo.environment.agibot_cpp_env.time.monotonic", return_value=10.0):
+            first_position, _ = env._update_odometry_state(odometry)
+            odometry.sequence = 2
+            odometry.stamp_nanosec = 100_000_000
+            odometry.position = [-0.25, 0.12, -0.61]
+            second_position, _ = env._update_odometry_state(odometry)
 
         np.testing.assert_allclose(first_position, np.zeros(3), atol=1e-6)
         np.testing.assert_allclose(second_position, [0.1, 0.0, 0.0], atol=1e-6)
@@ -446,6 +456,9 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertEqual(real_cfg.env.env_type, "AgiBotCppEnv")
         self.assertTrue(real_cfg.do_safety_check)
         self.assertTrue(real_cfg.realign_on_policy_switch)
+        self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")
+        self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
+        self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
         self.assertEqual(real_cfg.ctrl[0].triggers["Back"], "[POLICY_LOCO]")
         self.assertEqual(real_cfg.ctrl[0].triggers["RB"], "[POLICY_SWITCH],NEXT")
         self.assertEqual(real_cfg.ctrl[0].triggers["LB"], "[POLICY_SWITCH],LAST")

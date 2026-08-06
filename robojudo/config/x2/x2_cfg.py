@@ -1,11 +1,11 @@
 from robojudo.config import cfg_registry
-from robojudo.controller.ctrl_cfgs import JoystickCtrlCfg, KeyboardCtrlCfg, UpperBodyZmqCtrlCfg
+from robojudo.controller.ctrl_cfgs import JoystickCtrlCfg, KeyboardCtrlCfg, RosJoystickCtrlCfg, UpperBodyZmqCtrlCfg
 from robojudo.environment.env_cfgs import ElasticBandCfg
 from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 
 from .env.x2_env_cfg import X2_ARM_JOINT_NAMES, X2JointDefaultDoF
 from .env.x2_mujuco_env_cfg import X2MujocoEnvCfg
-from .env.x2_real_env_cfg import X2RealEnvCfg, X2SuperOdomCfg
+from .env.x2_real_env_cfg import X2RealEnvCfg
 from .pipeline.x2_loco_mimic_pipeline_cfg import X2LocomanipulationLocoMimicPipelineCfg
 from .policy.x2_amp_recovery_policy_cfg import X2AmpRecoveryPolicyCfg
 from .policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
@@ -61,9 +61,14 @@ class x2_real(x2):
     AgiBot X2 configuration, X2 deploy policy, Sim2Real through AimDK.
     """
 
-    env: X2RealEnvCfg = X2RealEnvCfg()
-    ctrl: list[JoystickCtrlCfg] = [
-        JoystickCtrlCfg(
+    env: X2RealEnvCfg = X2RealEnvCfg(
+        odometry_type="NONE",
+    )
+    ctrl: list[RosJoystickCtrlCfg] = [
+        RosJoystickCtrlCfg(
+            profile="xbox_bluetooth",
+            topic="/joy",
+            timeout_s=0.5,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -109,9 +114,14 @@ class x2_beyondmimic(x2):
 class x2_beyondmimic_real(x2_beyondmimic):
     """Shared BeyondMimic runtime with torso-IMU orientation, Sim2Real through AimDK."""
 
-    env: X2RealEnvCfg = X2RealEnvCfg()
-    ctrl: list[JoystickCtrlCfg] = [
-        JoystickCtrlCfg(
+    env: X2RealEnvCfg = X2RealEnvCfg(
+        odometry_type="NONE",
+    )
+    ctrl: list[RosJoystickCtrlCfg] = [
+        RosJoystickCtrlCfg(
+            profile="xbox_bluetooth",
+            topic="/joy",
+            timeout_s=0.5,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -167,9 +177,15 @@ class x2_locomanipulation(x2):
 class x2_locomanipulation_real(x2_locomanipulation):
     """AgiBot X2 locomanipulation policy, Sim2Real through AimDK."""
 
-    env: X2RealEnvCfg = X2RealEnvCfg(dof=X2LocomanipulationEnvDoF())
-    ctrl: list[JoystickCtrlCfg | UpperBodyZmqCtrlCfg] = [
-        JoystickCtrlCfg(
+    env: X2RealEnvCfg = X2RealEnvCfg(
+        dof=X2LocomanipulationEnvDoF(),
+        odometry_type="NONE",
+    )
+    ctrl: list[RosJoystickCtrlCfg | UpperBodyZmqCtrlCfg] = [
+        RosJoystickCtrlCfg(
+            profile="xbox_bluetooth",
+            topic="/joy",
+            timeout_s=0.5,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -241,9 +257,15 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
 class x2_locomimic_real(x2_locomimic):
     """X2 locomanipulation locomotion with x2_rl_deploy as the test mimic, Sim2Real."""
 
-    env: X2RealEnvCfg = X2RealEnvCfg(dof=X2LocomanipulationEnvDoF())
-    ctrl: list[JoystickCtrlCfg | UpperBodyZmqCtrlCfg] = [
-        JoystickCtrlCfg(
+    env: X2RealEnvCfg = X2RealEnvCfg(
+        dof=X2LocomanipulationEnvDoF(),
+        odometry_type="NONE",
+    )
+    ctrl: list[RosJoystickCtrlCfg | UpperBodyZmqCtrlCfg] = [
+        RosJoystickCtrlCfg(
+            profile="xbox_bluetooth",
+            topic="/joy",
+            timeout_s=0.5,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -310,6 +332,8 @@ class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
     ]
     loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg()
     mimic_policies: list[X2BeyondMimicPolicyCfg] = [
+        X2BeyondMimicPolicyCfg(max_timestep=800, policy_name="Walk2_subject1_wose", without_state_estimator=True),
+        X2BeyondMimicPolicyCfg(max_timestep=800, policy_name="Walk2_subject1", without_state_estimator=False),
         X2BeyondMimicPolicyCfg(max_timestep=6747, policy_name="Solo_dance", without_state_estimator=False),
         X2BeyondMimicPolicyCfg(max_timestep=1800, policy_name="Walk1_subject1_wose", without_state_estimator=True),
     ]
@@ -322,11 +346,13 @@ class x2_locomimic_beyondmimic_real(x2_locomimic_beyondmimic):
 
     env: X2RealEnvCfg = X2RealEnvCfg(
         dof=X2LocomanipulationEnvDoF(),
-        odometry_type="SUPERODOM",
-        aimdk=X2SuperOdomCfg(),
+        odometry_type="DUMMY",
     )
-    ctrl: list[JoystickCtrlCfg | UpperBodyZmqCtrlCfg] = [
-        JoystickCtrlCfg(
+    ctrl: list[RosJoystickCtrlCfg | UpperBodyZmqCtrlCfg] = [
+        RosJoystickCtrlCfg(
+            profile="xbox_bluetooth",
+            topic="/joy",
+            timeout_s=0.5,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -343,4 +369,5 @@ class x2_locomimic_beyondmimic_real(x2_locomimic_beyondmimic):
         ),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
+    # WARNING: X2 BeyondMimic policy does not support state estimator currently.
     do_safety_check: bool = True

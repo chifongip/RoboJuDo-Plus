@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -107,6 +108,8 @@ class TestG1LocomanipulationLocoMimic(unittest.TestCase):
                         for policy in cfg.mimic_policies
                     ],
                     [
+                        ("Walk2_subject1_23dof_wose", True, 800),
+                        ("Walk2_subject1_23dof", False, 800),
                         ("Violin", False, 610),
                         ("Waltz", False, 940),
                         ("Jump_wose", True, 140),
@@ -114,6 +117,7 @@ class TestG1LocomanipulationLocoMimic(unittest.TestCase):
                     ],
                 )
                 self.assertTrue(all(policy.pad_missing_dofs is padded for policy in cfg.mimic_policies))
+                self.assertTrue(all(Path(policy.policy_file).is_file() for policy in cfg.mimic_policies))
 
         for cfg, num_dofs in (
             (g1_23_locomanipulation_default_locomimic_real(), 23),

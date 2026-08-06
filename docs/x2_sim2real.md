@@ -21,16 +21,16 @@ Initialize and build the pinned AimDK SDK, then install the ROS 2 extension with
 
 ```bash
 source /opt/ros/humble/setup.bash
-conda activate robojudo_test
+conda activate robojudo-plus
 python submodule_install.py aimdk
 source third_party/aimdk/install/setup.bash
 ```
 
-The installer initializes both the AimDK SDK and the `aimdk_cpp` backend submodules, builds only `aimdk_msgs`, installs
-the Python/CMake build tools into the active environment, and installs `aimdk_cpp` without PEP 517 build isolation.
-Source the generated AimDK setup file in every shell used for real X2 deployment. Existing changes inside the AimDK
-submodules are preserved; use `python submodule_install.py --clean aimdk` only when you intentionally want to discard
-them.
+The installer initializes missing AimDK SDK and `aimdk_cpp` backend submodules, preserves existing worktrees, builds
+only `aimdk_msgs`, installs the Python/CMake build tools into the active environment, and installs `aimdk_cpp` without
+PEP 517 build isolation. Source the generated AimDK setup file in every shell used for real X2 deployment. Use
+`python submodule_install.py --clean aimdk` only when you intentionally want to discard AimDK C++ backend changes and
+restore its repository-pinned revision.
 
 Verify the native backend explicitly after installation:
 
@@ -40,10 +40,12 @@ ROBOJUDO_REQUIRE_AIMDK=1 python -m unittest discover -s tests
 
 This strict test mode fails instead of skipping when `aimdk_cpp` or one of its ROS 2 libraries cannot be loaded.
 
-Confirm that all four joint-state topics, `/aima/hal/imu/torso/state`, and
-`/aima/mc/leg_odometry` are updating before enabling commands. Real X2 configurations use
-`odometry_type="AIMDK"` and require `nav_msgs/msg/Odometry` from that topic. Missing or stale
-joint, IMU, or odometry state prevents activation and triggers damping.
+Confirm that all four joint-state topics and `/aima/hal/imu/torso/state` are updating before enabling commands.
+The standard real X2 presets use `odometry_type="NONE"`; the BeyondMimic loco-mimic preset uses `"DUMMY"`. Both
+require fresh joint and IMU state only. When a configuration enables `odometry_type="AIMDK"`, it requires
+`nav_msgs/msg/Odometry` on
+`/aima/mc/leg_odometry`; the SuperOdom loco-mimic preset requires `/laser_odometry`. Missing or stale required state
+prevents activation and triggers damping.
 
 The leg-odometry publisher reports its pose in `leg_odom` for
 `child_frame_id=lidar_imu_chest_front`. RoboJuDo therefore uses the pose directly as the

@@ -44,7 +44,9 @@ class TestX2Locomanipulation(unittest.TestCase):
         self.assertEqual(sim_cfg.ctrl[0].triggers["Start"], "[UPPER_BODY_TOGGLE]")
         self.assertEqual(sim_cfg.ctrl[1].triggers["t"], "[UPPER_BODY_TOGGLE]")
         self.assertEqual(real_cfg.env.env_type, "AgiBotCppEnv")
-        self.assertEqual([ctrl.ctrl_type for ctrl in real_cfg.ctrl], ["JoystickCtrl", "UpperBodyZmqCtrl"])
+        self.assertEqual([ctrl.ctrl_type for ctrl in real_cfg.ctrl], ["RosJoystickCtrl", "UpperBodyZmqCtrl"])
+        self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
+        self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
         self.assertTrue(real_cfg.do_safety_check)
 
     def test_upper_body_zmq_override_changes_only_arms(self):
