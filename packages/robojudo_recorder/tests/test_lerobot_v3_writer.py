@@ -85,6 +85,57 @@ class TestLeRobotV3Writer(unittest.TestCase):
         self.assertFalse(video_path.exists())
         self.assertFalse(self.writer.has_pending_frames)
 
+    def test_writes_one_video_feature_per_camera(self):
+        root = Path(self.temporary_dir.name) / "multi-camera-dataset"
+        writer = LeRobotV3Writer(
+            root=root,
+            repo_id="local/test",
+            robot_type="x2",
+            fps=10,
+            state_names=["left.pos", "right.pos"],
+            action_names=self.writer.action_names,
+            camera_shapes={"head_rgb": (48, 64, 3), "wrist_rgb": (24, 32, 3)},
+        )
+        writer.start_episode("multi camera")
+        for index in range(3):
+            writer.add_frame(
+                np.asarray([index, index + 1]),
+                np.zeros(6),
+                {
+                    "head_rgb": np.full((48, 64, 3), index, dtype=np.uint8),
+                    "wrist_rgb": np.full((24, 32, 3), index + 10, dtype=np.uint8),
+                },
+            )
+        writer.save_episode()
+
+        info = json.loads((root / "meta/info.json").read_text())
+        self.assertEqual(info["features"]["observation.images.head_rgb"]["shape"], [48, 64, 3])
+        self.assertEqual(info["features"]["observation.images.wrist_rgb"]["shape"], [24, 32, 3])
+
+        episodes = pd.read_parquet(root / "meta/episodes/chunk-000/file-000.parquet")
+        self.assertEqual(episodes.loc[0, "videos/observation.images.head_rgb/to_timestamp"], 0.3)
+        self.assertEqual(episodes.loc[0, "videos/observation.images.wrist_rgb/to_timestamp"], 0.3)
+        for name in ("head_rgb", "wrist_rgb"):
+            video_path = root / f"videos/observation.images.{name}/chunk-000/file-000.mp4"
+            with av.open(str(video_path)) as container:
+                self.assertEqual(len(list(container.decode(video=0))), 3)
+
+    def test_multi_camera_requires_all_named_images(self):
+        writer = LeRobotV3Writer(
+            root=Path(self.temporary_dir.name) / "multi-camera-dataset",
+            repo_id="local/test",
+            robot_type="x2",
+            fps=10,
+            state_names=["left.pos", "right.pos"],
+            action_names=self.writer.action_names,
+            camera_shapes={"head_rgb": (48, 64, 3), "wrist_rgb": (24, 32, 3)},
+        )
+        writer.start_episode("multi camera")
+
+        with self.assertRaisesRegex(ValueError, "image cameras"):
+            writer.add_frame(np.zeros(2), np.zeros(6), {"head_rgb": np.zeros((48, 64, 3))})
+        writer.discard_episode()
+
     def test_resume_appends_episode_and_preserves_global_indices(self):
         self.writer.start_episode("first task")
         self.writer.add_frame(np.zeros(2), np.zeros(6), np.zeros((48, 64, 3), dtype=np.uint8))

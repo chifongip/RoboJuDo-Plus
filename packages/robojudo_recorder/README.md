@@ -231,13 +231,37 @@ sync:
 | `dataset.fps` | dataset 和视频 FPS |
 | `dataset.codec` | PyAV/FFmpeg encoder，例如 `libx264` |
 | `dataset.resume` | 是否在已有兼容 dataset 后追加 episode |
-| `camera.type` | `opencv`、`realsense`、`ros2` 或 `zmq` |
-| `camera.name` | LeRobot image feature 名称的一部分 |
+| `camera.type` / `cameras[].type` | `opencv`、`realsense`、`ros2` 或 `zmq` |
+| `camera.name` / `cameras[].name` | LeRobot image feature 名称的一部分，同一配置内必须唯一 |
 | `sync.clock` | control sample 使用 `source` 或 `receive` timestamp |
 | `sync.max_control_age_ms` | 相机帧允许匹配的最大控制样本年龄 |
 | `sync.poll_timeout_ms` | 每次等待相机帧的最长时间 |
 
-如果 camera 配置中存在 `fps`，它必须等于 `dataset.fps`。
+单相机配置继续使用 `camera:`。同时采集多个相机时改用 `cameras:`：
+
+```yaml
+cameras:
+  - type: ros2
+    name: head_rgb
+    topic: /aima/hal/sensor/stereo_head_front_right/rgb_image/compressed
+    node_name: robojudo_recorder_head_rgb
+    qos_reliability: best_effort
+    qos_depth: 1
+    ros_python_executable: /usr/bin/python3
+    fps: 30
+  - type: ros2
+    name: wrist_rgb
+    topic: /aima/hal/sensor/right_wrist/rgb_image/compressed
+    node_name: robojudo_recorder_wrist_rgb
+    qos_reliability: best_effort
+    qos_depth: 1
+    ros_python_executable: /usr/bin/python3
+    fps: 30
+```
+
+第一项是主相机，其 timestamp 用于匹配 control sample。每轮只有在所有相机都返回新 sequence 时才写入一条
+dataset frame，因此所有视频的帧数与 Parquet 行数保持一致；某台相机缺帧时整组跳过。不能同时配置
+`camera:` 和 `cameras:`。如果相机配置中存在 `fps`，它必须等于 `dataset.fps`。
 
 ## 相机 backend
 
@@ -327,6 +351,7 @@ header 支持 JSON 或 msgpack，至少包含 `sequence` 和 `timestamp_ns`。`e
 <dataset.root>/
 ├── data/chunk-000/file-000.parquet
 ├── videos/observation.images.head_rgb/chunk-000/file-000.mp4
+├── videos/observation.images.wrist_rgb/chunk-000/file-000.mp4
 └── meta/
     ├── info.json
     ├── stats.json
@@ -343,10 +368,27 @@ dataset:
   resume: true
 ```
 
-追加前会校验 LeRobot 版本、FPS、robot type、关节名称、action 名称和 camera shape。任一 schema 不一致都会
-拒绝追加，避免在同一 dataset 中混入不兼容数据。
+追加前会校验 LeRobot 版本、FPS、robot type、关节名称、action 名称，以及完整的 camera 名称和 shape。
+任一 schema 不一致都会拒绝追加，避免在同一 dataset 中混入不兼容数据。
 
 ## 常见问题
+
+### 如何确认 recorder 正在实际录制
+
+Recorder 终端会按生命周期输出以下日志：
+
+```text
+Camera backend connected: name=head_rgb type=ros2
+Camera stream ready: head_rgb=(1552, 2064, 3)
+Episode 1 armed: pick up the box
+Episode 1 recording first synchronized frame from cameras: head_rgb
+Episode 1 recording progress: 150 frames (5.0 s dataset time)
+Episode 1 saved: 300 frames, 0 stale frames dropped, root=record_data/example
+```
+
+`Camera backend connected` 只说明 backend/helper 已启动；必须出现 `Camera stream ready` 才表示已收到图像。
+如果持续没有图像，会每 5 秒输出 `Waiting for camera frames: ...`。episode 结束时没有任何可配对帧，则明确输出
+`was not saved because no synchronized camera/control frames were recorded`。
 
 ### `Recorder unavailable or saturated; dropped ... samples`
 

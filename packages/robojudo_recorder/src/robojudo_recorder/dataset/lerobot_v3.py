@@ -129,8 +129,9 @@ class LeRobotV3Writer:
         fps: int,
         state_names: list[str],
         action_names: list[str],
-        camera_name: str,
-        camera_shape: tuple[int, int, int],
+        camera_shapes: dict[str, tuple[int, int, int]] | None = None,
+        camera_name: str | None = None,
+        camera_shape: tuple[int, int, int] | None = None,
         codec: str = "libx264",
         resume: bool = False,
     ):
@@ -144,9 +145,18 @@ class LeRobotV3Writer:
         self.fps = fps
         self.state_names = list(state_names)
         self.action_names = list(action_names)
-        self.camera_name = camera_name
-        self.camera_key = f"observation.images.{camera_name}"
-        self.camera_shape = camera_shape
+        if camera_shapes is not None and (camera_name is not None or camera_shape is not None):
+            raise ValueError("provide camera_shapes or camera_name/camera_shape, not both")
+        if camera_shapes is None:
+            if camera_name is None or camera_shape is None:
+                raise ValueError("at least one camera shape must be provided")
+            camera_shapes = {camera_name: camera_shape}
+        if not camera_shapes:
+            raise ValueError("at least one camera shape must be provided")
+        if any(not name for name in camera_shapes):
+            raise ValueError("camera names must not be empty")
+        self.camera_shapes = {name: tuple(shape) for name, shape in camera_shapes.items()}
+        self.camera_keys = {name: f"observation.images.{name}" for name in self.camera_shapes}
         self.codec = codec
         self._episode_index = 0
         self._total_frames = 0
@@ -156,7 +166,7 @@ class LeRobotV3Writer:
         self._state_frames: list[np.ndarray] = []
         self._action_frames: list[np.ndarray] = []
         self._task: str | None = None
-        self._video: _EpisodeVideoWriter | None = None
+        self._videos: dict[str, _EpisodeVideoWriter] = {}
         if has_existing_data:
             self._load_existing()
         else:
@@ -168,31 +178,34 @@ class LeRobotV3Writer:
 
     @property
     def episode_open(self) -> bool:
-        return self._video is not None
+        return bool(self._videos)
 
     def _features(self) -> dict:
-        video_info = {
-            "is_depth_map": False,
-            "video.height": self.camera_shape[0],
-            "video.width": self.camera_shape[1],
-            "video.fps": self.fps,
-            "video.channels": 3,
-            "video.codec": "h264" if "264" in self.codec else self.codec,
-            "video.pix_fmt": "yuv420p",
-            "has_audio": False,
-        }
+        camera_features = {}
+        for name, shape in self.camera_shapes.items():
+            video_info = {
+                "is_depth_map": False,
+                "video.height": shape[0],
+                "video.width": shape[1],
+                "video.fps": self.fps,
+                "video.channels": 3,
+                "video.codec": "h264" if "264" in self.codec else self.codec,
+                "video.pix_fmt": "yuv420p",
+                "has_audio": False,
+            }
+            camera_features[self.camera_keys[name]] = {
+                "dtype": "video",
+                "shape": list(shape),
+                "names": ["height", "width", "channels"],
+                "info": video_info,
+            }
         return {
             "observation.state": {
                 "dtype": "float32",
                 "shape": [len(self.state_names)],
                 "names": self.state_names,
             },
-            self.camera_key: {
-                "dtype": "video",
-                "shape": list(self.camera_shape),
-                "names": ["height", "width", "channels"],
-                "info": video_info,
-            },
+            **camera_features,
             "action": {
                 "dtype": "float32",
                 "shape": [len(self.action_names)],
@@ -223,14 +236,19 @@ class LeRobotV3Writer:
         info = json.loads((self.root / "meta/info.json").read_text())
         state_feature = info["features"]["observation.state"]
         action_feature = info["features"]["action"]
-        camera_feature = info["features"][self.camera_key]
+        existing_camera_features = {
+            key: feature for key, feature in info["features"].items() if key.startswith("observation.images.")
+        }
         expected = {
             "codebase_version": (info["codebase_version"], "v3.0"),
             "fps": (int(info["fps"]), self.fps),
             "robot_type": (info.get("robot_type"), self.robot_type),
             "state_names": (state_feature["names"], self.state_names),
             "action_names": (action_feature["names"], self.action_names),
-            "camera_shape": (tuple(camera_feature["shape"]), self.camera_shape),
+            "camera_shapes": (
+                {key: tuple(feature["shape"]) for key, feature in existing_camera_features.items()},
+                {self.camera_keys[name]: shape for name, shape in self.camera_shapes.items()},
+            ),
         }
         mismatches = {key: values for key, values in expected.items() if values[0] != values[1]}
         if mismatches:
@@ -258,30 +276,56 @@ class LeRobotV3Writer:
             raise RuntimeError("cannot start a new episode while frames are pending")
         self._task = task
         chunk_index, file_index = self._episode_location()
-        video_path = (
-            self.root
-            / "videos"
-            / self.camera_key
-            / f"chunk-{chunk_index:03d}"
-            / f"file-{file_index:03d}.mp4"
-        )
-        self._video = _EpisodeVideoWriter(video_path, self.fps, self.camera_shape, self.codec)
+        try:
+            for name, shape in self.camera_shapes.items():
+                video_path = (
+                    self.root
+                    / "videos"
+                    / self.camera_keys[name]
+                    / f"chunk-{chunk_index:03d}"
+                    / f"file-{file_index:03d}.mp4"
+                )
+                self._videos[name] = _EpisodeVideoWriter(video_path, self.fps, shape, self.codec)
+        except Exception:
+            self.discard_episode()
+            raise
 
-    def add_frame(self, state: np.ndarray, action: np.ndarray, image: np.ndarray):
-        if self._video is None or self._task is None:
+    def add_frame(
+        self,
+        state: np.ndarray,
+        action: np.ndarray,
+        images: dict[str, np.ndarray] | np.ndarray | None = None,
+        *,
+        image: np.ndarray | None = None,
+    ):
+        if not self._videos or self._task is None:
             raise RuntimeError("start_episode() must be called before add_frame()")
         state = np.asarray(state, dtype=np.float32)
         action = np.asarray(action, dtype=np.float32)
-        image = np.asarray(image, dtype=np.uint8)
+        if images is not None and image is not None:
+            raise ValueError("provide images or image, not both")
+        if image is not None:
+            images = image
+        if images is None:
+            raise ValueError("camera images are required")
+        if isinstance(images, np.ndarray):
+            if len(self.camera_shapes) != 1:
+                raise ValueError("a camera image mapping is required for a multi-camera dataset")
+            images = {next(iter(self.camera_shapes)): images}
+        if set(images) != set(self.camera_shapes):
+            raise ValueError(f"image cameras {sorted(images)} do not match {sorted(self.camera_shapes)}")
+        normalized_images = {name: np.asarray(image, dtype=np.uint8) for name, image in images.items()}
         if state.shape != (len(self.state_names),):
             raise ValueError(f"state shape {state.shape} does not match {(len(self.state_names),)}")
         if action.shape != (len(self.action_names),):
             raise ValueError(f"action shape {action.shape} does not match {(len(self.action_names),)}")
-        if image.shape != self.camera_shape:
-            raise ValueError(f"image shape {image.shape} does not match {self.camera_shape}")
+        for name, image in normalized_images.items():
+            if image.shape != self.camera_shapes[name]:
+                raise ValueError(f"camera {name!r} image shape {image.shape} does not match {self.camera_shapes[name]}")
         self._state_frames.append(state.copy())
         self._action_frames.append(action.copy())
-        self._video.add(image)
+        for name, image in normalized_images.items():
+            self._videos[name].add(image)
 
     def _write_data(self, states: np.ndarray, actions: np.ndarray, task_index: int):
         length = len(states)
@@ -338,7 +382,8 @@ class LeRobotV3Writer:
     def save_episode(self):
         if not self.has_pending_frames:
             raise ValueError("cannot save an empty episode")
-        self._video.close()
+        for video in self._videos.values():
+            video.close()
         states = np.stack(self._state_frames).astype(np.float32)
         actions = np.stack(self._action_frames).astype(np.float32)
         task = self._task
@@ -357,13 +402,14 @@ class LeRobotV3Writer:
             "data/file_index": file_index,
             "dataset_from_index": self._total_frames,
             "dataset_to_index": self._total_frames + length,
-            f"videos/{self.camera_key}/chunk_index": chunk_index,
-            f"videos/{self.camera_key}/file_index": file_index,
-            f"videos/{self.camera_key}/from_timestamp": 0.0,
-            f"videos/{self.camera_key}/to_timestamp": length / self.fps,
             "meta/episodes/chunk_index": 0,
             "meta/episodes/file_index": 0,
         }
+        for camera_key in self.camera_keys.values():
+            row[f"videos/{camera_key}/chunk_index"] = chunk_index
+            row[f"videos/{camera_key}/file_index"] = file_index
+            row[f"videos/{camera_key}/from_timestamp"] = 0.0
+            row[f"videos/{camera_key}/to_timestamp"] = length / self.fps
         for feature_name, stats in episode_stats.items():
             for stat_name, value in stats.serialize().items():
                 row[f"stats/{feature_name}/{stat_name}"] = value
@@ -377,22 +423,22 @@ class LeRobotV3Writer:
         self._clear_buffer()
 
     def discard_episode(self):
-        if self._video is not None:
-            self._video.close()
-            if self._video.path.exists():
-                self._video.path.unlink()
+        for video in self._videos.values():
+            video.close()
+            if video.path.exists():
+                video.path.unlink()
         self._clear_buffer()
 
     def _clear_buffer(self):
         self._state_frames.clear()
         self._action_frames.clear()
         self._task = None
-        self._video = None
+        self._videos = {}
 
     def finalize(self):
         if self.has_pending_frames:
             self.save_episode()
-        elif self._video is not None:
+        elif self._videos:
             self.discard_episode()
 
     def abort(self):
