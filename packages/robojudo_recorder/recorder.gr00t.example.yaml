@@ -1,0 +1,23 @@
+control_endpoint: tcp://127.0.0.1:8560
+
+dataset:
+  root: record_data/g1_23dof_upper_body
+  repo_id: local/g1_23dof_upper_body
+  fps: 30
+  codec: libx264
+  resume: false
+
+# Reuse the exact RGB stream published by Gr00tZmqCtrl. The recorder does not
+# open the hardware camera in this mode.
+camera:
+  type: zmq
+  name: head_rgb
+  endpoint: tcp://127.0.0.1:8561
+  encoding: auto
+  timestamp_mode: receive
+  fps: 30
+
+sync:
+  clock: receive
+  max_control_age_ms: 50
+  poll_timeout_ms: 10
