@@ -4,6 +4,7 @@ from robojudo.controller.ctrl_cfgs import (
     KeyboardCtrlCfg,  # noqa: F401
     UnitreeCtrlCfg,  # noqa: F401
     UpperBodyZmqCtrlCfg,
+    VelocityZmqCtrlCfg,
 )
 from robojudo.environment.env_cfgs import ElasticBandCfg
 from robojudo.pipeline.pipeline_cfgs import (
@@ -94,6 +95,26 @@ class g1_real(g1):
     ]
 
     do_safety_check: bool = True  # enable safety check for real robot
+
+
+@cfg_registry.register
+class g1_zmq(g1):
+    """Unitree G1 policy with opt-in ZMQ velocity control, Sim2Sim."""
+
+    ctrl: list[VelocityZmqCtrlCfg | JoystickCtrlCfg] = [
+        VelocityZmqCtrlCfg(),
+        JoystickCtrlCfg(),
+    ]
+
+
+@cfg_registry.register
+class g1_real_zmq(g1_real):
+    """Unitree G1 policy with ZMQ velocity control and remote fallback, Sim2Real."""
+
+    ctrl: list[VelocityZmqCtrlCfg | UnitreeCtrlCfg] = [
+        VelocityZmqCtrlCfg(),
+        UnitreeCtrlCfg(),
+    ]
 
 
 @cfg_registry.register

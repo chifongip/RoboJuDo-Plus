@@ -8,6 +8,7 @@ import onnxruntime as ort
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 from robojudo.policy import Policy, policy_registry
 from robojudo.policy.policy_cfgs import AsapLocoPolicyCfg, AsapPolicyCfg
+from robojudo.policy.utils.velocity_command import get_fresh_zmq_velocity
 from robojudo.utils.progress import ProgressBar
 from robojudo.utils.util_func import command_remap, quat_rotate_inverse_np
 
@@ -319,7 +320,19 @@ class AsapLocoPolicy(Policy):
     def _update_commands(self, ctrl_data):
         if (ref_dof_pos := ctrl_data.get("ref_dof_pos", None)) is not None:
             self.ref_upper_dof_pos = ref_dof_pos.copy()[-self.num_upper_dofs :]
+        zmq_configured = False
+        selected = False
         for key in ctrl_data.keys():
+            if key == "VelocityZmqCtrl":
+                zmq_configured = True
+                velocity = get_fresh_zmq_velocity(ctrl_data[key])
+                if velocity is None or selected:
+                    continue
+                self.lin_vel_command[:] = np.clip(velocity[:2], [-0.5, -0.5], [0.5, 0.5])
+                self.ang_vel_command[0] = np.clip(velocity[2], -1.0, 1.0)
+                self.stand_command[0] = int(np.linalg.norm(velocity) > 1e-6)
+                selected = True
+                break
             if key in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
                 axes = ctrl_data[key]["axes"]
                 lx, ly, rx, _ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]
@@ -329,6 +342,7 @@ class AsapLocoPolicy(Policy):
                 self.ang_vel_command[0] = command_remap(rx, [1, 0, -1]) * self.stand_command[0]
 
                 button_event = ctrl_data[key]["button_event"]
+                selected = True
                 for event in button_event:
                     if event["type"] == "button" and event["pressed"]:
                         match event["name"]:
@@ -344,6 +358,7 @@ class AsapLocoPolicy(Policy):
                                 self.base_height_command[0] -= 0.05
                 break
             elif key == "KeyboardCtrl":
+                selected = True
                 for event in ctrl_data[key]["keyboard_event"]:
                     if event["type"] == "keyboard" and event["pressed"]:
                         match event["name"]:
@@ -373,6 +388,10 @@ class AsapLocoPolicy(Policy):
                                     self.ang_vel_command[0] = 0.0
                                     self.lin_vel_command[0] = 0.0
                                     self.lin_vel_command[1] = 0.0
+        if zmq_configured and not selected:
+            self.lin_vel_command.fill(0.0)
+            self.ang_vel_command.fill(0.0)
+            self.stand_command.fill(0)
 
     def debug_viz(self, visualizer: MujocoVisualizer, env_data, ctrl_data, extras):
         base_pos = env_data["base_pos"]

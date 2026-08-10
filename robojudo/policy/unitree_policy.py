@@ -3,6 +3,7 @@ import numpy as np
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 from robojudo.policy import Policy, policy_registry
 from robojudo.policy.policy_cfgs import UnitreePolicyCfg, UnitreeWoGaitPolicyCfg
+from robojudo.policy.utils.velocity_command import clip_velocity, get_fresh_zmq_velocity
 from robojudo.utils.util_func import command_remap, get_gravity_orientation
 
 
@@ -35,6 +36,13 @@ class UnitreePolicy(Policy):
     def _get_commands(self, ctrl_data):
         commands = np.zeros(3)
         for key in ctrl_data.keys():
+            if key == "VelocityZmqCtrl":
+                velocity = get_fresh_zmq_velocity(ctrl_data[key])
+                if velocity is None:
+                    continue
+                max_cmd = np.asarray(self.max_cmd, dtype=np.float32)
+                commands = clip_velocity(velocity / max_cmd, self.commands_map[:3])
+                break
             if key in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
                 axes = ctrl_data[key]["axes"]
                 lx, ly, rx, _ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]

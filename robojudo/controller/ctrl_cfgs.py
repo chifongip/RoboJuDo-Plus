@@ -201,3 +201,17 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
         if len(self.joint_names) != len(set(self.joint_names)):
             raise ValueError("Upper-body ZMQ joint_names must be unique")
         return self
+
+
+class VelocityZmqCtrlCfg(CtrlCfg):
+    """ROS Twist-shaped velocity commands received from a ZMQ publisher."""
+
+    ctrl_type: str = "VelocityZmqCtrl"
+    endpoint: str = "tcp://127.0.0.1:8558"
+    timeout_s: float = Field(default=0.25, gt=0.0)
+
+    @model_validator(mode="after")
+    def validate_velocity_zmq(self):
+        if not self.endpoint.startswith("tcp://") or not self.endpoint.removeprefix("tcp://").strip():
+            raise ValueError("Velocity ZMQ endpoint must be a non-empty tcp:// endpoint")
+        return self
