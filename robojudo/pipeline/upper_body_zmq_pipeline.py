@@ -1,8 +1,10 @@
 import logging
+import time
 
 import numpy as np
 
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
+from robojudo.recording import RecorderClient
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +22,22 @@ class UpperBodyZmqPipelineMixin:
         self._upper_body_indices = np.asarray([], dtype=np.int32)
         self._upper_body_default = np.asarray([], dtype=np.float32)
         self._upper_body_filtered = np.asarray([], dtype=np.float32)
+        self._recorder_client = None
+        self._recording_active = False
+        self._recording_paused = False
         super().__init__(cfg=cfg)
         self._configure_upper_body_override()
+        if cfg.record.enabled:
+            if self._upper_body_cfg is None:
+                raise ValueError("recording requires an UpperBodyZmqCtrl configuration")
+            self._recorder_client = RecorderClient(cfg.record, robot_type=cfg.robot)
 
     def reset(self):
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is not None and getattr(self, "_recording_active", False):
+            recorder_client.finish_episode(save=True)
+        self._recording_active = False
+        self._recording_paused = False
         self._upper_body_enabled = False
         self._upper_body_stream_was_fresh = False
         super().reset()
@@ -109,3 +123,69 @@ class UpperBodyZmqPipelineMixin:
         target = np.asarray(pd_target, dtype=np.float32).copy()
         target[self._upper_body_indices] = self._upper_body_filtered
         return target
+
+    def _record_upper_body_sample(self, env_data, extras, pd_target, *, rl_active: bool):
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is None:
+            return
+
+        if not self._recording_active:
+            return
+
+        can_record = rl_active and self._upper_body_enabled and self._upper_body_control_available()
+        if not can_record:
+            self._finish_recording_episode()
+            return
+        if self._recording_paused or not self._upper_body_stream_was_fresh:
+            return
+
+        locomotion_command = extras.get("locomotion_command")
+        if locomotion_command is None or len(locomotion_command) < 4:
+            logger.warning("Skipped recording frame without a velocity/height command")
+            return
+        recorder_client.submit(
+            joint_names=list(self._upper_body_cfg.joint_names),
+            joint_positions=np.asarray(env_data.dof_pos, dtype=np.float32)[self._upper_body_indices],
+            joint_position_commands=np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices],
+            velocity_height_command=np.asarray(locomotion_command, dtype=np.float32)[:4],
+            timestamp_ns=time.monotonic_ns(),
+        )
+
+    def _toggle_recording_episode(self):
+        if getattr(self, "_recorder_client", None) is None:
+            logger.warning("Ignored record command: recorder is not enabled")
+            return
+        if self._recording_active:
+            self._finish_recording_episode()
+            return
+        if not self._upper_body_enabled:
+            logger.warning("Ignored record start: upper-body control is not enabled")
+            return
+        if not self._upper_body_enable_available():
+            return
+        self._recording_active = True
+        self._recording_paused = False
+        logger.warning("Recording started; waiting for a fresh upper-body sample")
+
+    def _toggle_recording_pause(self):
+        if not getattr(self, "_recording_active", False):
+            logger.warning("Ignored record pause/resume: no recording is active")
+            return
+        self._recording_paused = not self._recording_paused
+        logger.warning("Recording %s", "paused" if self._recording_paused else "resumed")
+
+    def _finish_recording_episode(self):
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is not None:
+            recorder_client.finish_episode(save=True)
+        self._recording_active = False
+        self._recording_paused = False
+        logger.warning("Recording stopped and episode saved")
+
+    def close_recording(self):
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is not None:
+            self._recording_active = False
+            self._recording_paused = False
+            recorder_client.close()
+            self._recorder_client = None

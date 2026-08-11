@@ -207,6 +207,7 @@ class LocomanipulationLocoMimicPipelineMixin:
                 # extras belongs to the policy that produced this frame. Draw it before
                 # policy_manager.step() can complete an interpolation and change policy.
                 self.policy.debug_viz(self.visualizer, env_data, ctrl_data, extras)
+        self._record_upper_body_sample(env_data, extras, pd_target, rl_active=rl_active)
         if rl_active or self.policy_manager.warmup_policy_indices:
             self.policy_manager.step(env_data, ctrl_data)
         if self.cfg.debug.log_obs:

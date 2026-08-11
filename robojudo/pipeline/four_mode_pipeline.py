@@ -178,6 +178,12 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             return
 
         for command in commands:
+            if command == "[RECORD_START_STOP]":
+                self._toggle_recording_episode()
+                continue
+            if command == "[RECORD_PAUSE_RESUME]":
+                self._toggle_recording_pause()
+                continue
             if command == "[UPPER_BODY_TOGGLE]":
                 self._toggle_upper_body()
                 continue
@@ -250,6 +256,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         self.timestep += 1
         self.ctrl_manager.post_step_callback(ctrl_data)
         self.policy.post_step_callback(commands)
+        self._record_upper_body_sample(env_data, extras, pd_target, rl_active=rl_active)
         if self.visualizer is not None and rl_active:
             self.policy.debug_viz(self.visualizer, env_data, ctrl_data, extras)
         if self.cfg.debug.log_obs:

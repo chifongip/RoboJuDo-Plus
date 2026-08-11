@@ -1,0 +1,23 @@
+control_endpoint: tcp://127.0.0.1:8560
+
+dataset:
+  root: record_data/x2_upper_body
+  repo_id: local/x2_upper_body
+  fps: 30
+  codec: libx264
+  resume: false
+
+camera:
+  type: opencv
+  name: head_rgb
+  device: 0
+  width: 640
+  height: 480
+  fps: 30
+
+sync:
+  # Use source when recorder and RoboJuDo share a monotonic clock. Use receive
+  # when control samples arrive over the network from another machine.
+  clock: receive
+  max_control_age_ms: 50
+  poll_timeout_ms: 10
