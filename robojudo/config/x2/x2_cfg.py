@@ -4,8 +4,8 @@ from robojudo.controller.ctrl_cfgs import (
     Gr00tZmqCtrlCfg,
     JoystickCtrlCfg,
     KeyboardCtrlCfg,
+    RosJoystickCtrlCfg,
     UpperBodyZmqCtrlCfg,
-    RosJoystickCtrlCfg
 )
 from robojudo.environment.env_cfgs import ElasticBandCfg
 from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
@@ -83,7 +83,7 @@ class x2_real(x2):
                 "Y": "[JOINT_DEFAULT]",
                 "X": "[RL_DEFAULT]",
                 "LB+RB+A": "[SHUTDOWN]",
-            }
+            },
         )
     ]
     do_safety_check: bool = True
@@ -136,7 +136,7 @@ class x2_beyondmimic_real(x2_beyondmimic):
                 "Y": "[JOINT_DEFAULT]",
                 "X": "[RL_DEFAULT]",
                 "LB+RB+A": "[SHUTDOWN]",
-            }
+            },
         )
     ]
     do_safety_check: bool = True
@@ -201,7 +201,7 @@ class x2_locomanipulation_real(x2_locomanipulation):
                 "X": "[RL_DEFAULT]",
                 "Start": "[UPPER_BODY_TOGGLE]",
                 "LB+RB+A": "[SHUTDOWN]",
-            }
+            },
         ),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
@@ -372,7 +372,7 @@ class x2_locomimic_real(x2_locomimic):
                 "L": "[UPPER_BODY_TOGGLE]",
                 "R": "[POLICY_RECOVERY]",
                 "LB+RB+A": "[SHUTDOWN]",
-            }
+            },
         ),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
@@ -459,7 +459,7 @@ class x2_locomimic_beyondmimic_real(x2_locomimic_beyondmimic):
                 "L": "[UPPER_BODY_TOGGLE]",
                 "R": "[POLICY_RECOVERY]",
                 "LB+RB+A": "[SHUTDOWN]",
-            }
+            },
         ),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
