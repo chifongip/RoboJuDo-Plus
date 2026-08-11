@@ -10,7 +10,7 @@ dataset:
 camera:
   type: opencv
   name: head_rgb
-  serial_number: ""
+  device: 0
   width: 640
   height: 480
   fps: 30

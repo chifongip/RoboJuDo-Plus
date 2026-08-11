@@ -60,7 +60,9 @@ class ZmqCameraSource(CameraSource):
 
         encoding = str(header.get("encoding", self.encoding)) if self.encoding == "auto" else self.encoding
         if encoding == "raw_rgb":
-            image = np.frombuffer(payload, dtype=np.uint8).reshape(self.shape).copy()
+            if self._shape is None:
+                raise ValueError("raw_rgb ZMQ camera requires a shape (config width/height or header.shape)")
+            image = np.frombuffer(payload, dtype=np.uint8).reshape(self._shape).copy()
         elif encoding == "jpeg":
             try:
                 import cv2

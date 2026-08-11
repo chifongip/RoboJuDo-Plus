@@ -88,15 +88,15 @@ class _EpisodeVideoWriter:
     def __init__(self, path: Path, fps: int, shape: tuple[int, int, int], codec: str):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        height, width, channels = shape
+        if channels != 3:
+            raise ValueError("RGB video shape must end in 3 channels")
         self.container = av.open(str(path), mode="w")
         try:
             self.stream = self.container.add_stream(codec, rate=fps)
         except Exception as exc:
             self.container.close()
             raise RuntimeError(f"PyAV/FFmpeg does not provide the requested encoder {codec!r}") from exc
-        height, width, channels = shape
-        if channels != 3:
-            raise ValueError("RGB video shape must end in 3 channels")
         self.stream.width = width
         self.stream.height = height
         self.stream.pix_fmt = "yuv420p"
