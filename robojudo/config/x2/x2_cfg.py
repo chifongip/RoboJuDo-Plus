@@ -7,6 +7,7 @@ from robojudo.controller.ctrl_cfgs import (
     UpperBodyZmqCtrlCfg,
     RosJoystickCtrlCfg
 )
+from robojudo.environment.env_cfgs import ElasticBandCfg
 from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 
 from .env.x2_env_cfg import X2_ARM_JOINT_NAMES, X2JointDefaultDoF
