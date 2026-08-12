@@ -1,0 +1,144 @@
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+MONITOR_PATH = Path(__file__).resolve().parents[1] / "scripts" / "monitor_x2_state.py"
+MONITOR_SPEC = importlib.util.spec_from_file_location("monitor_x2_state", MONITOR_PATH)
+assert MONITOR_SPEC is not None and MONITOR_SPEC.loader is not None
+monitor = importlib.util.module_from_spec(MONITOR_SPEC)
+MONITOR_SPEC.loader.exec_module(monitor)
+
+
+def freshness_report(**overrides):
+    values = {
+        "required_streams_fresh": False,
+        "reasons": ["imu_stale", "joints_missing", "joints_stale", "odometry_missing"],
+        "imu_received": True,
+        "imu_age_sec": 0.125,
+        "missing_joint_names": ["head_yaw_joint"],
+        "stale_joint_names": ["left_knee_joint"],
+        "joint_age_sec": {"left_knee_joint": 0.142},
+        "odometry_required": True,
+        "odometry_received": False,
+        "odometry_valid": False,
+        "odometry_degenerate": False,
+        "odometry_age_sec": None,
+        "last_odometry_rejection_reason": "frame_mismatch",
+        "last_odometry_rejection_age_sec": 0.02,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class TestX2StateMonitor(unittest.TestCase):
+    def test_real_config_builds_a_passive_controller(self):
+        controller_cfg, cfg_env = monitor.build_controller_config("x2_real")
+
+        self.assertFalse(controller_cfg["act"])
+        self.assertTrue(controller_cfg["node_name"].startswith("robojudo_x2_state_monitor_"))
+        self.assertFalse(controller_cfg["enable_odometry"])
+        self.assertEqual(controller_cfg["joint_names"], cfg_env.dof.joint_names)
+
+    def test_sim_config_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "not a real X2"):
+            monitor.build_controller_config("x2")
+
+    def test_report_serialization_preserves_timeout_evidence(self):
+        serialized = monitor.report_to_dict(freshness_report())
+
+        self.assertEqual(serialized["imu"]["age_sec"], 0.125)
+        self.assertEqual(serialized["joints"]["missing"], ["head_yaw_joint"])
+        self.assertEqual(serialized["joints"]["age_sec"]["left_knee_joint"], 0.142)
+        self.assertEqual(serialized["odometry"]["last_rejection_reason"], "frame_mismatch")
+
+    def test_age_only_changes_do_not_create_state_transitions(self):
+        first = freshness_report(imu_age_sec=0.125)
+        second = freshness_report(imu_age_sec=0.225)
+
+        self.assertEqual(monitor.report_fingerprint(first), monitor.report_fingerprint(second))
+
+    def test_error_detail_names_each_failed_stream(self):
+        detail = monitor.format_state_freshness_report(freshness_report())
+
+        self.assertIn("IMU stale (0.125s old)", detail)
+        self.assertIn("joints never received: head_yaw_joint", detail)
+        self.assertIn("stale joints: left_knee_joint (0.142s)", detail)
+        self.assertIn("odometry never accepted", detail)
+        self.assertIn("last odometry rejection: frame_mismatch (0.020s ago)", detail)
+
+    def test_environment_timeout_reports_cause_and_sends_damping(self):
+        from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
+
+        report = freshness_report(
+            reasons=["imu_stale"],
+            missing_joint_names=[],
+            stale_joint_names=[],
+            odometry_required=False,
+            last_odometry_rejection_reason="",
+            last_odometry_rejection_age_sec=None,
+        )
+        backend = SimpleNamespace(
+            damping=None,
+            get_state_freshness_report=lambda timeout: report,
+            set_damping=lambda damping: setattr(backend, "damping", damping),
+        )
+        env = AgiBotCppEnv.__new__(AgiBotCppEnv)
+        env.enabled = True
+        env.aimdk = backend
+        env.cfg_env = SimpleNamespace(aimdk=SimpleNamespace(state_timeout=0.1, shutdown_damping=5.0))
+
+        with self.assertRaisesRegex(RuntimeError, r"IMU stale \(0.125s old\).+damping commands were sent"):
+            env.update()
+
+        self.assertEqual(backend.damping, 5.0)
+
+    def test_startup_recheck_accepts_state_that_recovered_after_timeout(self):
+        from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
+
+        backend = SimpleNamespace(
+            self_check=lambda: False,
+            get_state_freshness_report=lambda timeout: freshness_report(
+                required_streams_fresh=True,
+                reasons=[],
+                missing_joint_names=[],
+                stale_joint_names=[],
+                odometry_required=False,
+                last_odometry_rejection_reason="",
+                last_odometry_rejection_age_sec=None,
+            ),
+        )
+        env = AgiBotCppEnv.__new__(AgiBotCppEnv)
+        env.aimdk = backend
+        env._odometry_type = "NONE"
+        env.cfg_env = SimpleNamespace(aimdk=SimpleNamespace(state_timeout=0.1))
+
+        env.self_check()
+
+    def test_existing_output_requires_an_explicit_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "state.jsonl"
+            output_path.write_text("original\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(SystemExit, "--append or --overwrite"):
+                monitor.open_output_file(output_path)
+
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "original\n")
+
+    def test_output_append_and_overwrite_are_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "state.jsonl"
+            output_path.write_text("old\n", encoding="utf-8")
+
+            with monitor.open_output_file(output_path, append=True) as output:
+                output.write("new\n")
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "old\nnew\n")
+
+            with monitor.open_output_file(output_path, overwrite=True) as output:
+                output.write("replacement\n")
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "replacement\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

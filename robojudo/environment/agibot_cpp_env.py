@@ -10,6 +10,36 @@ from robojudo.environment.env_cfgs import AgiBotEnvCfg
 logger = logging.getLogger(__name__)
 
 
+def format_state_freshness_report(report) -> str:
+    """Render an AimDK freshness report as a compact, actionable error detail."""
+    details: list[str] = []
+    if "imu_missing" in report.reasons:
+        details.append("IMU never received")
+    elif "imu_stale" in report.reasons:
+        details.append(f"IMU stale ({report.imu_age_sec:.3f}s old)")
+
+    if report.missing_joint_names:
+        details.append(f"joints never received: {', '.join(report.missing_joint_names)}")
+    if report.stale_joint_names:
+        stale = ", ".join(f"{name} ({report.joint_age_sec[name]:.3f}s)" for name in report.stale_joint_names)
+        details.append(f"stale joints: {stale}")
+
+    if "odometry_missing" in report.reasons:
+        details.append("odometry never accepted")
+    elif "odometry_invalid" in report.reasons:
+        state = "degenerate" if report.odometry_degenerate else "invalid"
+        details.append(f"odometry {state}")
+    elif "odometry_stale" in report.reasons:
+        details.append(f"odometry stale ({report.odometry_age_sec:.3f}s old)")
+
+    if report.last_odometry_rejection_reason:
+        rejection_age = report.last_odometry_rejection_age_sec
+        age = "unknown age" if rejection_age is None else f"{rejection_age:.3f}s ago"
+        details.append(f"last odometry rejection: {report.last_odometry_rejection_reason} ({age})")
+
+    return "; ".join(details) if details else "all required streams are fresh"
+
+
 @env_registry.register
 class AgiBotCppEnv(Environment):
     cfg_env: AgiBotEnvCfg
@@ -59,11 +89,19 @@ class AgiBotCppEnv(Environment):
     def self_check(self):
         if self.aimdk is None:
             return
-        if not self.aimdk.self_check():
-            required_streams = "joint/IMU"
-            if self._odometry_type in ("AIMDK", "SUPERODOM"):
-                required_streams += "/odometry"
-            raise RuntimeError(f"AgiBotCppEnv did not receive fresh AimDK {required_streams} state.")
+        if self.aimdk.self_check():
+            return
+
+        report = self.aimdk.get_state_freshness_report(self.cfg_env.aimdk.state_timeout)
+        if report.required_streams_fresh:
+            logger.warning("AimDK state recovered immediately after the startup self-check timeout; continuing.")
+            return
+
+        required_streams = "joint/IMU"
+        if self._odometry_type in ("AIMDK", "SUPERODOM"):
+            required_streams += "/odometry"
+        detail = format_state_freshness_report(report)
+        raise RuntimeError(f"AgiBotCppEnv did not receive fresh AimDK {required_streams} state: {detail}.")
 
     def reset(self):
         if self.born_place_align:
@@ -82,9 +120,12 @@ class AgiBotCppEnv(Environment):
         if self.aimdk is None:
             return
 
-        if self.enabled and not self.aimdk.state_is_fresh(self.cfg_env.aimdk.state_timeout):
-            self.command_damping(self.cfg_env.aimdk.shutdown_damping)
-            raise RuntimeError("AgiBotCppEnv joint, IMU, or odometry state became stale; damping commands were sent.")
+        if self.enabled:
+            report = self.aimdk.get_state_freshness_report(self.cfg_env.aimdk.state_timeout)
+            if not report.required_streams_fresh:
+                self.command_damping(self.cfg_env.aimdk.shutdown_damping)
+                detail = format_state_freshness_report(report)
+                raise RuntimeError(f"AgiBotCppEnv state became stale ({detail}); damping commands were sent.")
 
         state = self.aimdk.get_robot_state()
         self._dof_pos = np.asarray(state.motor_state.q, dtype=np.float32)
