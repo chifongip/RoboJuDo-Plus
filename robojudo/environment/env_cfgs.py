@@ -150,6 +150,7 @@ class AgiBotEnvCfg(RobotEnvCfg):
     class AimdkCfg(Config):
         """AimDK ROS 2 topic and timing configuration."""
 
+        node_name: str = "robojudo_aimdk_cpp"
         control_dt: float = 0.02
         publish_dt: float = 0.002
         command_timeout: float = 0.1

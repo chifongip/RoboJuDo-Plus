@@ -52,7 +52,7 @@ The post-`b43869b` codebase adds or expands:
 
 - [ ] Confirm the real X2 odometry source. On PC1, `/aima/mc/leg_odometry` stops publishing after the native motion-control module is stopped with `aima em stop-app mc`; find a robust odometry solution.
 - [ ] Validate IMU quaternions in real-robot environments, retain the last valid sample through a short invalid-packet grace window, and force damping only after persistent invalid or stale state; keep pipeline finite checks as a final safety fallback.
-- [ ] Add ZMQ velocity control under [ZMQ Control](#zmq-control).
+- [x] Add ZMQ velocity control under [ZMQ Control](#zmq-control).
 
 ## Architecture
 
@@ -451,7 +451,37 @@ or 29-DOF layout. See [`docs/x2_sim2real.md`](docs/x2_sim2real.md) and [`docs/po
 
 ### Velocity Control
 
-Not implemented yet.
+`VelocityZmqCtrl` receives body-frame velocity commands using the JSON shape and SI units of ROS
+`geometry_msgs/Twist`, without requiring ROS:
+
+```json
+{
+  "linear": {"x": 0.5, "y": 0.0, "z": 0.0},
+  "angular": {"x": 0.0, "y": 0.0, "z": 0.3}
+}
+```
+
+The controller subscribes to `tcp://127.0.0.1:8558` by default. Positive `x` is forward, positive `y` is left, and
+positive angular `z` is counter-clockwise yaw. Locomotion policies use those three planar components, clamp them to
+their trained ranges, and ignore the remaining validated Twist components.
+
+Messages older than `0.25` seconds are stale. Controller-list order determines priority: the first fresh velocity
+source wins, so the opt-in `g1_zmq` and `g1_real_zmq` configurations put ZMQ first and use the joystick or Unitree
+remote as fallback. A stale stream with no fallback produces zero planar velocity. Current configurations remain
+unchanged.
+
+Test in MuJoCo before using a real robot:
+
+```bash
+python scripts/run_pipeline.py -c g1_zmq
+# In another terminal:
+python scripts/test_velocity_zmq.py
+```
+
+For a custom configuration, place `VelocityZmqCtrlCfg()` before the desired local controller. Use
+`VelocityZmqCtrlCfg(endpoint="tcp://127.0.0.1:9000", timeout_s=0.5)` to override transport settings. The interface is
+supported by Unitree, Unitree-without-gait, Smooth, AMO, ASAP Loco, and G1/X2 Locomanipulation policies; motion mimic,
+tracking, recovery, H2H, X2 deploy, and TWIST motion-stream policies do not consume velocity commands.
 
 ## Safety and troubleshooting
 

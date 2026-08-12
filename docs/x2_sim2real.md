@@ -47,6 +47,27 @@ require fresh joint and IMU state only. When a configuration enables `odometry_t
 `/aima/mc/leg_odometry`; the SuperOdom loco-mimic preset requires `/laser_odometry`. Missing or stale required state
 prevents activation and triggers damping.
 
+To capture the exact inputs to the freshness decision, run the passive monitor in a second terminal with the same
+deployment config:
+
+```bash
+python scripts/monitor_x2_state.py --config x2_real --output /tmp/x2-state.jsonl
+```
+
+The monitor forces its AimDK controller to `act=False`; it subscribes with the same native callbacks and sensor-data
+QoS but never publishes robot commands. It prints health transitions and writes one JSON object per line containing
+IMU age, missing or stale joint names and ages, and odometry validity, age, and rejection context. Omit `--output` to
+create a UTC-timestamped file in the current directory. Use the actual deployment preset so odometry topics, expected
+frames, joint names, and timeouts match. Reinstall `packages/aimdk_cpp` before using the monitor after pulling this
+diagnostic API. Existing output files are preserved by default; pass `--append` to add another run or `--overwrite` to
+replace one explicitly.
+
+The exception raised by the running deployment now includes the controller's in-process freshness snapshot and is
+authoritative if its result differs from the independently subscribed monitor. A `frame_mismatch` odometry rejection
+means the received parent or child frame differs from the configured values; `invalid_values_or_quaternion` means the
+sample contained non-finite data or a near-zero quaternion. Odometry covariance entry 0 at or above `0.5` is reported
+as degenerate and therefore invalid for the freshness check.
+
 The leg-odometry publisher reports its pose in `leg_odom` for
 `child_frame_id=lidar_imu_chest_front`. RoboJuDo therefore uses the pose directly as the
 measured torso pose. The message twist follows the ROS `Odometry` convention and is already

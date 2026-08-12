@@ -5,6 +5,7 @@ import numpy as np
 import onnxruntime as ort
 
 from robojudo.policy import Policy, PolicyCfg
+from robojudo.policy.utils.velocity_command import clip_velocity, get_fresh_zmq_velocity
 from robojudo.utils.util_func import command_remap, quat_rotate_inverse_np
 
 logger = logging.getLogger(__name__)
@@ -59,9 +60,17 @@ class LocomanipulationPolicyBase(Policy):
     def _get_commands(self, ctrl_data) -> np.ndarray:
         commands = self.cmd.copy()
         target_vel = np.zeros(3, dtype=np.float32)
+        local_velocity_seen = False
 
         for key in ctrl_data.keys():
+            if key == "VelocityZmqCtrl":
+                velocity = get_fresh_zmq_velocity(ctrl_data[key])
+                if velocity is not None and not local_velocity_seen:
+                    target_vel = clip_velocity(velocity, self.commands_map[:3])
+                    break
+                continue
             if key in ("JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"):
+                local_velocity_seen = True
                 axes = ctrl_data[key]["axes"]
                 lx, ly, rx = (
                     axis if abs(axis) >= 0.1 else 0.0
@@ -89,6 +98,7 @@ class LocomanipulationPolicyBase(Policy):
                     elif event["name"] in ("Back", "Select", "F1"):
                         self._reset_commands()
             if key == "KeyboardCtrl":
+                local_velocity_seen = True
                 events = ctrl_data[key]["keyboard_event"]
                 for event in events:
                     if event["type"] != "keyboard":
