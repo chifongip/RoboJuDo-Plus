@@ -57,7 +57,7 @@ pip install -e "packages/robojudo_recorder[opencv]"
 # Intel RealSense
 pip install -e "packages/robojudo_recorder[realsense]"
 
-# ROS 2 CompressedImage，extra 安装 recorder 侧的 OpenCV 解码依赖
+# ROS 2 CompressedImage 或 raw Image；OpenCV 用于压缩图像解码
 pip install -e "packages/robojudo_recorder[ros2]"
 
 # 测试和 lint
@@ -76,8 +76,8 @@ recorder 不会在 Python 3.11 中直接导入 `rclpy`：
 
 ```text
 /usr/bin/python3 (ROS 2 helper)
-    └─ subscribe sensor_msgs/msg/CompressedImage
-        └─ compressed bytes over loopback ZMQ
+    └─ subscribe sensor_msgs/msg/CompressedImage 或 sensor_msgs/msg/Image
+        └─ image bytes + metadata over loopback ZMQ
             └─ robop Python 3.11 recorder
 ```
 
@@ -85,7 +85,7 @@ ROS helper 由 recorder 自动启动，不需要手动运行。系统 ROS Python
 `sensor_msgs` 和 `zmq`：
 
 ```bash
-/usr/bin/python3 -c "import rclpy, zmq; from sensor_msgs.msg import CompressedImage; print('ROS bridge ready')"
+/usr/bin/python3 -c "import rclpy, zmq; from sensor_msgs.msg import CompressedImage, Image; print('ROS bridge ready')"
 ```
 
 使用现成的配置：
@@ -98,14 +98,17 @@ robojudo-recorder \
   --config packages/robojudo_recorder/recorder.ros2.example.yaml
 ```
 
+Use `ros2 topic info -v /aima/hal/sensor/stereo_head_front_right/rgb_image/compressed` to check the Reliability of your camera stream is RELIABLE or BEST-EFFORT
+
 关键相机配置如下：
 
 ```yaml
 camera:
   type: ros2
   name: head_rgb
-  topic: /aima/hal/sensor/stereo_head_front_right/rgb_image/compressed
-  qos_reliability: best_effort
+  topic: /aima/hal/sensor/rgbd_head_front/rgb_image
+  message_type: raw
+  qos_reliability: reliable
   qos_depth: 1
   ros_python_executable: /usr/bin/python3
   fps: 30
@@ -113,7 +116,10 @@ camera:
   # height: 480
 ```
 
-`width` 和 `height` 可以省略，recorder 会从第一帧推断。指定后，每帧都会进行尺寸校验。ROS 图像使用
+`message_type` 可设为 `raw`（`sensor_msgs/msg/Image`）或 `compressed`
+（`sensor_msgs/msg/CompressedImage`），省略时默认 `compressed`，兼容已有配置。raw 模式支持
+`rgb8`、`bgr8`、`rgba8`、`bgra8` 和 `mono8`，输出统一转换为 RGB。`width` 和 `height` 可以省略，
+recorder 会从第一帧推断；指定后，每帧都会进行尺寸校验。ROS 图像使用
 本机 monotonic 接收时间，因此 `sync.clock` 应设置为 `receive`。
 
 如果 ROS publisher 使用非默认 domain，启动前设置：
@@ -211,8 +217,9 @@ dataset:
 camera:
   type: ros2
   name: head_rgb
-  topic: /camera/rgb/compressed
-  qos_reliability: best_effort
+  topic: /camera/rgb
+  message_type: raw
+  qos_reliability: reliable
   qos_depth: 1
   ros_python_executable: /usr/bin/python3
   fps: 30
@@ -245,7 +252,7 @@ cameras:
     name: head_rgb
     topic: /aima/hal/sensor/stereo_head_front_right/rgb_image/compressed
     node_name: robojudo_recorder_head_rgb
-    qos_reliability: best_effort
+    qos_reliability: reliable
     qos_depth: 1
     ros_python_executable: /usr/bin/python3
     fps: 30
@@ -253,7 +260,7 @@ cameras:
     name: wrist_rgb
     topic: /aima/hal/sensor/right_wrist/rgb_image/compressed
     node_name: robojudo_recorder_wrist_rgb
-    qos_reliability: best_effort
+    qos_reliability: reliable
     qos_depth: 1
     ros_python_executable: /usr/bin/python3
     fps: 30
@@ -270,7 +277,7 @@ dataset frame，因此所有视频的帧数与 Parquet 行数保持一致；某�
 支持 `sensor_msgs/msg/CompressedImage`，包括 OpenCV 能解码的 JPEG/PNG 数据。推荐 sensor-data QoS：
 
 ```yaml
-qos_reliability: best_effort
+qos_reliability: reliable
 qos_depth: 1
 ```
 

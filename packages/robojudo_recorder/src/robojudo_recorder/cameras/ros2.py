@@ -12,8 +12,8 @@ from .base import CameraFrame, CameraSource
 
 
 @register_camera("ros2")
-class Ros2CompressedCameraSource(CameraSource):
-    """Receive ROS 2 ``CompressedImage`` frames through a native ROS Python helper."""
+class Ros2CameraSource(CameraSource):
+    """Receive ROS 2 ``CompressedImage`` or raw ``Image`` frames through a helper."""
 
     def __init__(self, cfg: CameraConfig):
         self.topic = str(cfg.options.get("topic", "")).strip()
@@ -29,6 +29,9 @@ class Ros2CompressedCameraSource(CameraSource):
         self.qos_reliability = str(cfg.options.get("qos_reliability", "best_effort")).lower()
         if self.qos_reliability not in {"best_effort", "reliable"}:
             raise ValueError("ROS 2 camera qos_reliability must be 'best_effort' or 'reliable'")
+        self.message_type = str(cfg.options.get("message_type", "compressed")).strip().lower()
+        if self.message_type not in {"compressed", "raw"}:
+            raise ValueError("ROS 2 camera message_type must be 'compressed' or 'raw'")
         self.ros_python_executable = str(cfg.options.get("ros_python_executable", "/usr/bin/python3"))
 
         width = cfg.options.get("width")
@@ -53,10 +56,12 @@ class Ros2CompressedCameraSource(CameraSource):
     def connect(self) -> None:
         if self._socket is not None:
             raise RuntimeError("ROS 2 camera is already connected")
-        try:
-            import cv2
-        except ImportError as exc:
-            raise RuntimeError("ROS 2 CompressedImage decoding requires robojudo-recorder[ros2]") from exc
+        cv2 = None
+        if self.message_type == "compressed":
+            try:
+                import cv2
+            except ImportError as exc:
+                raise RuntimeError("ROS 2 CompressedImage decoding requires robojudo-recorder[ros2]") from exc
 
         socket = self._context.socket(zmq.PULL)
         socket.setsockopt(zmq.LINGER, 0)
@@ -71,6 +76,8 @@ class Ros2CompressedCameraSource(CameraSource):
             endpoint,
             "--topic",
             self.topic,
+            "--message-type",
+            self.message_type,
             "--node-name",
             self.node_name,
             "--qos-reliability",
@@ -87,8 +94,7 @@ class Ros2CompressedCameraSource(CameraSource):
         self._socket = socket
         self._process = process
 
-    def _decode_frame(self, header_bytes: bytes, payload: bytes) -> CameraFrame:
-        header = json.loads(header_bytes)
+    def _decode_compressed(self, payload: bytes) -> np.ndarray:
         encoded = np.frombuffer(payload, dtype=np.uint8)
         bgr = self._cv2.imdecode(encoded, self._cv2.IMREAD_UNCHANGED)
         if bgr is None:
@@ -101,6 +107,56 @@ class Ros2CompressedCameraSource(CameraSource):
             image = self._cv2.cvtColor(bgr, self._cv2.COLOR_BGR2RGB)
         else:
             raise ValueError(f"unsupported CompressedImage shape {bgr.shape}")
+        return image
+
+    def _decode_raw(self, header: dict, payload: bytes) -> np.ndarray:
+        encoding = str(header.get("encoding", "")).lower()
+        channels_by_encoding = {
+            "mono8": 1,
+            "rgb8": 3,
+            "bgr8": 3,
+            "rgba8": 4,
+            "bgra8": 4,
+        }
+        channels = channels_by_encoding.get(encoding)
+        if channels is None:
+            supported = ", ".join(channels_by_encoding)
+            raise ValueError(f"unsupported ROS 2 raw Image encoding {encoding!r}; supported: {supported}")
+
+        height = int(header["height"])
+        width = int(header["width"])
+        step = int(header["step"])
+        packed_step = width * channels
+        if height <= 0 or width <= 0:
+            raise ValueError(f"invalid ROS 2 raw Image dimensions {(height, width)}")
+        if step < packed_step:
+            raise ValueError(f"ROS 2 raw Image step {step} is smaller than packed row size {packed_step}")
+        required_size = height * step
+        if len(payload) < required_size:
+            raise ValueError(f"ROS 2 raw Image payload has {len(payload)} bytes, expected at least {required_size}")
+
+        # ROS Image rows may contain padding, so reshape by step before selecting pixels.
+        rows = np.frombuffer(payload, dtype=np.uint8, count=required_size).reshape(height, step)
+        pixels = rows[:, :packed_step].reshape(height, width, channels)
+        if encoding == "mono8":
+            image = np.repeat(pixels, 3, axis=2)
+        elif encoding == "bgr8":
+            image = pixels[:, :, ::-1]
+        elif encoding == "bgra8":
+            image = pixels[:, :, [2, 1, 0]]
+        else:
+            image = pixels[:, :, :3]
+        return np.ascontiguousarray(image)
+
+    def _decode_frame(self, header_bytes: bytes, payload: bytes) -> CameraFrame:
+        header = json.loads(header_bytes)
+        message_type = header.get("message_type", self.message_type)
+        if message_type == "compressed":
+            image = self._decode_compressed(payload)
+        elif message_type == "raw":
+            image = self._decode_raw(header, payload)
+        else:
+            raise ValueError(f"unsupported ROS 2 bridge message type {message_type!r}")
 
         frame_shape = tuple(image.shape)
         if self._shape is None:
@@ -138,3 +194,7 @@ class Ros2CompressedCameraSource(CameraSource):
             self._socket.close(linger=0)
             self._socket = None
         self._cv2 = None
+
+
+# Keep the public name used by existing callers and tests.
+Ros2CompressedCameraSource = Ros2CameraSource
