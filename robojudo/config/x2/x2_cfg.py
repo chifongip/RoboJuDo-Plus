@@ -163,6 +163,8 @@ class x2_locomanipulation(x2):
                 "Start": "[UPPER_BODY_TOGGLE]",
                 "LB+RB+Start": "[RECORD_START_STOP]",
                 "LB+RB+Back": "[RECORD_PAUSE_RESUME]",
+                "LB+RB+X": "[RECORD_CONFIRM_SAVE]",
+                "LB+RB+B": "[RECORD_DISCARD]",
                 "LB+RB+A": "[SHUTDOWN]",
                 "LB+RB+Y": "[SIM_REBORN]",
             }
@@ -204,6 +206,8 @@ class x2_locomanipulation_real(x2_locomanipulation):
                 "Start": "[UPPER_BODY_TOGGLE]",
                 "LB+RB+Start": "[RECORD_START_STOP]",
                 "LB+RB+Back": "[RECORD_PAUSE_RESUME]",
+                "LB+RB+X": "[RECORD_CONFIRM_SAVE]",
+                "LB+RB+B": "[RECORD_DISCARD]",
                 "LB+RB+A": "[SHUTDOWN]",
             },
         ),
