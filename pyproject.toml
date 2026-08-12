@@ -10,7 +10,7 @@ authors = [
     { name = "HansZ8", email = "GDDG80@outlook.com" }
 ]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 
 dynamic = ["dependencies"]
 

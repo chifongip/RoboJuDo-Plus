@@ -69,8 +69,8 @@ pip install -e "packages/robojudo_recorder[realsense,opencv]"
 
 ## 快速开始：ROS 2 相机
 
-ROS 2 Humble 通常使用系统 Python 3.10，而 `robop` 使用 Python 3.11。两者的二进制扩展不兼容，因此
-recorder 不会在 Python 3.11 中直接导入 `rclpy`：
+ROS 2 Humble 通常使用系统 Python 3.10。如果 recorder 使用不同的 Python 解释器，两者的二进制扩展不兼容，
+因此 recorder 不会在非 ROS Python 中直接导入 `rclpy`：
 
 (使用ROS2 camera务必确保本机系统ubuntu22，并且已安装ROS2 Humble)
 
@@ -78,7 +78,7 @@ recorder 不会在 Python 3.11 中直接导入 `rclpy`：
 /usr/bin/python3 (ROS 2 helper)
     └─ subscribe sensor_msgs/msg/CompressedImage
         └─ compressed bytes over loopback ZMQ
-            └─ robop Python 3.11 recorder
+            └─ recorder Python process
 ```
 
 ROS helper 由 recorder 自动启动，不需要手动运行。系统 ROS Python 需要能够导入 `rclpy`、

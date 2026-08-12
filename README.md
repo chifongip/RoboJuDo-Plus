@@ -76,13 +76,13 @@ configuration is never a substitute for validating a policy in simulation first.
 
 ### 1. Create an environment
 
-RoboJuDo-Plus requires Python 3.11 or newer.
+RoboJuDo-Plus requires Python 3.10 or newer.
 
 ```bash
 git clone https://github.com/chifongip/RoboJuDo-Plus.git
 cd RoboJuDo-Plus
 
-conda create -n robojudo-plus python=3.11 -y
+conda create -n robojudo-plus python=3.10 -y
 conda activate robojudo-plus
 
 pip install -e .

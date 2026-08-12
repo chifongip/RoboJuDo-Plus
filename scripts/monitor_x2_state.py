@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from robojudo.config.config_manager import ConfigManager
@@ -94,13 +94,13 @@ def build_controller_config(config_name: str) -> tuple[dict, object]:
 
 
 def write_event(output, event: str, **fields):
-    record = {"timestamp": datetime.now(UTC).isoformat(), "event": event, **fields}
+    record = {"timestamp": datetime.now(timezone.utc).isoformat(), "event": event, **fields}
     output.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
     output.flush()
 
 
 def default_output_path() -> Path:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return Path(f"x2_state_monitor_{timestamp}.jsonl")
 
 

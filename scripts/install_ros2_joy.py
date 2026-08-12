@@ -17,8 +17,6 @@ def run(command: list[str], *, cwd: Path = ROOT_DIR):
 def validate_environment():
     if not os.environ.get("ROS_DISTRO"):
         raise RuntimeError("ROS 2 is not sourced. Run `source /opt/ros/<distro>/setup.bash` first.")
-    if sys.version_info < (3, 11):
-        raise RuntimeError("ros2_joy_cpp must be installed with RoboJuDo's Python 3.11+ interpreter.")
     if not (ROS2_JOY_CPP_DIR / "pyproject.toml").is_file():
         raise RuntimeError(f"ROS 2 Joy C++ package is incomplete: {ROS2_JOY_CPP_DIR}")
 

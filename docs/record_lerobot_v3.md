@@ -82,9 +82,10 @@ camera:
   # height: 480
 ```
 
-The complete example is `packages/robojudo_recorder/recorder.ros2.example.yaml`. The recorder may run under Python
-3.11 while ROS 2 Humble uses Python 3.10: this backend launches `ros_python_executable` as a small subscriber process
-and transfers compressed bytes to the recorder over a loopback ZMQ socket. The ROS Python only needs `rclpy`,
+The complete example is `packages/robojudo_recorder/recorder.ros2.example.yaml`. The recorder may run on a different
+interpreter than ROS 2 Humble (which uses Python 3.10): this backend launches `ros_python_executable` as a small
+subscriber process and transfers compressed bytes to the recorder over a loopback ZMQ socket. The ROS Python only
+needs `rclpy`,
 `sensor_msgs`, and `pyzmq`; OpenCV decoding and dataset writing remain in the recorder process.
 
 `best_effort` with depth 1 matches the usual ROS sensor-data QoS and keeps only the latest frame; set

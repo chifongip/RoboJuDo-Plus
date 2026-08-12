@@ -7,7 +7,7 @@ name = "robojudo-recorder"
 version = "0.1.0"
 description = "Hardware-neutral LeRobot v3 recording service for RoboJuDo"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "av>=15,<16",
     "msgpack>=1.0",
@@ -32,5 +32,5 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py310"
 lint.select = ["E", "F", "I", "B", "UP"]

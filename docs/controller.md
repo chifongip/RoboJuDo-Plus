@@ -64,8 +64,8 @@ when you press the `RB+Down` button, the command will be `["[POLICY_SWITCH],0"]`
 ## [Controller](#controller) > [RosJoystickCtrl](#controller--rosjoystickctrl)
 
 `RosJoystickCtrl` is a drop-in alternative to `JoystickCtrl` that subscribes to the ROS 2 `/joy` topic published by
-the `joy_node` executable from the `joy` package. It uses a small `rclcpp`/pybind11 extension so RoboJuDo can keep
-running on Python 3.11 even when the ROS 2 distribution's Python packages were built for Python 3.10.
+the `joy_node` executable from the `joy` package. It uses a small `rclcpp`/pybind11 extension built for the active
+RoboJuDo interpreter (Python 3.10, matching ROS 2 Humble).
 
 Build the extension for the active RoboJuDo interpreter after sourcing ROS 2:
 

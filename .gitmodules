@@ -28,4 +28,4 @@
 [submodule "packages/ros2_joy_cpp"]
 	path = packages/ros2_joy_cpp
 	url = https://github.com/chifongip/ros2_joy_cpp.git
-	branch = main
+	branch = fix/python-3.10-compatibility

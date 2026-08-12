@@ -18,7 +18,7 @@ Executable entry points are in `scripts/`, for example `scripts/run_pipeline.py`
 
 ## Coding Style & Naming Conventions
 
-Use Python 3.11+ and keep code formatted with Ruff. The configured line length is 120, and lint rules include pycodestyle, Pyflakes, import sorting, bugbear, and pyupgrade. Prefer snake_case for modules, functions, variables, and config names. Class names should use PascalCase. Keep new module names aligned with patterns such as `g1_*_cfg.py`, `*_policy.py`, `*_ctrl.py`, and `*_env.py`.
+Use Python 3.10+ and keep code formatted with Ruff. The configured line length is 120, and lint rules include pycodestyle, Pyflakes, import sorting, bugbear, and pyupgrade. Prefer snake_case for modules, functions, variables, and config names. Class names should use PascalCase. Keep new module names aligned with patterns such as `g1_*_cfg.py`, `*_policy.py`, `*_ctrl.py`, and `*_env.py`.
 
 ## Testing Guidelines
 
