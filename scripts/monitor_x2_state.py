@@ -54,7 +54,54 @@ def report_to_dict(report) -> dict:
             "last_rejection_reason": report.last_odometry_rejection_reason or None,
             "last_rejection_age_sec": report.last_odometry_rejection_age_sec,
         },
+        "stream_telemetry": {
+            stream_name: stream_telemetry_to_dict(telemetry)
+            for stream_name, telemetry in report.stream_telemetry.items()
+        },
     }
+
+
+def timestamp_to_dict(sec, nanosec) -> dict | None:
+    if sec is None or nanosec is None:
+        return None
+    return {"sec": sec, "nanosec": nanosec}
+
+
+def stream_telemetry_to_dict(telemetry) -> dict:
+    return {
+        "topic": telemetry.topic,
+        "received_count": telemetry.received_count,
+        "last_receive_age_sec": telemetry.last_receive_age_sec,
+        "receive_rate_hz": telemetry.receive_rate_hz,
+        "last_inter_arrival_sec": telemetry.last_inter_arrival_sec,
+        "max_inter_arrival_sec": telemetry.max_inter_arrival_sec,
+        "sequence_gap_count": telemetry.sequence_gap_count,
+        "sequence_nonmonotonic_count": telemetry.sequence_nonmonotonic_count,
+        "last_sequence": telemetry.last_sequence,
+        "header_stamp": timestamp_to_dict(
+            telemetry.last_header_stamp_sec, telemetry.last_header_stamp_nanosec
+        ),
+        "measurement_stamp": timestamp_to_dict(
+            telemetry.last_measurement_stamp_sec, telemetry.last_measurement_stamp_nanosec
+        ),
+        "last_joint_names": list(telemetry.last_joint_names),
+    }
+
+
+def format_stream_telemetry(report) -> str:
+    streams = []
+    for stream_name, telemetry in report.stream_telemetry.items():
+        rate = "n/a" if telemetry.receive_rate_hz is None else f"{telemetry.receive_rate_hz:.1f} Hz"
+        age = "never" if telemetry.last_receive_age_sec is None else f"{telemetry.last_receive_age_sec:.3f}s"
+        max_gap = "n/a" if telemetry.max_inter_arrival_sec is None else f"{telemetry.max_inter_arrival_sec:.3f}s"
+        sequence = ""
+        if telemetry.sequence_gap_count or telemetry.sequence_nonmonotonic_count:
+            sequence = (
+                f", sequence gaps={telemetry.sequence_gap_count}"
+                f", nonmonotonic={telemetry.sequence_nonmonotonic_count}"
+            )
+        streams.append(f"{stream_name}: {rate}, age={age}, max_gap={max_gap}{sequence}")
+    return " | ".join(streams)
 
 
 def report_fingerprint(report) -> tuple:
@@ -156,6 +203,7 @@ def main():
                 node_name=controller_cfg["node_name"],
                 state_timeout_sec=state_timeout,
                 odometry_timeout_sec=float(cfg_env.aimdk.odometry_timeout),
+                telemetry_window_sec=float(controller_cfg.get("telemetry_window_sec", 1.0)),
                 topics=topics,
                 expected_joint_names=list(cfg_env.dof.joint_names),
             )
@@ -170,7 +218,14 @@ def main():
                     previous_fingerprint = fingerprint
 
                 if loop_start >= next_summary:
-                    write_event(output, "snapshot", report=report_to_dict(report))
+                    telemetry_summary = format_stream_telemetry(report)
+                    print(f"[{datetime.now().astimezone().isoformat(timespec='milliseconds')}] {telemetry_summary}")
+                    write_event(
+                        output,
+                        "snapshot",
+                        telemetry_summary=telemetry_summary,
+                        report=report_to_dict(report),
+                    )
                     next_summary = loop_start + args.summary_interval
 
                 remaining = poll_period - (time.monotonic() - loop_start)

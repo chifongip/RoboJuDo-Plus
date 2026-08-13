@@ -158,6 +158,7 @@ class AgiBotEnvCfg(RobotEnvCfg):
         shutdown_publish_duration: float = 0.2
         state_timeout: float = 0.1
         odometry_timeout: float = 0.1
+        telemetry_window_sec: float = 1.0
         base_imu_topic: str = "/aima/hal/imu/torso/state"
         odometry_topic: str = "/aima/mc/leg_odometry"
         odometry_parent_frame: str = "leg_odom"

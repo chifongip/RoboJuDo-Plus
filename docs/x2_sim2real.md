@@ -55,10 +55,14 @@ python scripts/monitor_x2_state.py --config x2_real --output /tmp/x2-state.jsonl
 ```
 
 The monitor forces its AimDK controller to `act=False`; it subscribes with the same native callbacks and sensor-data
-QoS but never publishes robot commands. It prints health transitions and writes one JSON object per line containing
-IMU age, missing or stale joint names and ages, and odometry validity, age, and rejection context. Omit `--output` to
-create a UTC-timestamped file in the current directory. Use the actual deployment preset so odometry topics, expected
-frames, joint names, and timeouts match. Reinstall `packages/aimdk_cpp` before using the monitor after pulling this
+QoS but never publishes robot commands. It prints health transitions and a callback summary every second by default, and writes
+one JSON object per line containing IMU age, missing or stale joint names and ages, odometry validity, age, and rejection
+context, plus per-topic callback rate, receive age, maximum inter-arrival gap, and sequence-gap diagnostics. The joint
+topic records also retain their last header and measurement stamps and joint-name list. Those stamps are raw values: do
+not compare them to this computer's time unless the onboard and deployment computers are synchronized. Omit `--output`
+to create a UTC-timestamped file in the current directory. Use the actual deployment preset so odometry topics, expected
+frames, joint names, and timeouts match. Set `aimdk.telemetry_window_sec` to change the one-second callback-rate window.
+Reinstall `packages/aimdk_cpp` before using the monitor after pulling this
 diagnostic API. Existing output files are preserved by default; pass `--append` to add another run or `--overwrite` to
 replace one explicitly.
 
