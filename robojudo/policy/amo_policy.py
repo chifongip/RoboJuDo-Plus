@@ -5,6 +5,7 @@ import torch
 
 from robojudo.policy import Policy, policy_registry
 from robojudo.policy.policy_cfgs import AMOPolicyCfg
+from robojudo.policy.utils.velocity_command import clip_velocity, get_fresh_zmq_velocity
 from robojudo.utils.util_func import command_remap, quatToEuler
 
 
@@ -92,7 +93,18 @@ class AMOPolicy(Policy):
         #     self.arm_action = ref_dof_pos.copy()[-self._n_demo_dof :]
 
         commands = self.cmd.copy()
+        zmq_configured = False
+        selected = False
         for key in ctrl_data.keys():
+            if key == "VelocityZmqCtrl":
+                zmq_configured = True
+                velocity = get_fresh_zmq_velocity(ctrl_data[key])
+                if velocity is None:
+                    continue
+                amo_velocity = np.asarray([velocity[1], velocity[2], velocity[0]], dtype=np.float32)
+                commands[:3] = clip_velocity(amo_velocity, self.commands_map[:3])
+                selected = True
+                break
             if key in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
                 axes = ctrl_data[key]["axes"]
                 lx, ly, rx, _ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]
@@ -101,6 +113,7 @@ class AMOPolicy(Policy):
                 commands[1] = command_remap(rx, self.commands_map[1])
                 commands[2] = command_remap(lx, self.commands_map[2])
                 # commands[3] = command_remap(ry, self.commands_map[3]) # height
+                selected = True
 
                 button_event = ctrl_data[key]["button_event"]
                 for event in button_event:
@@ -108,6 +121,8 @@ class AMOPolicy(Policy):
                         commands[7] = not commands[7]
 
                 break
+        if zmq_configured and not selected:
+            commands[:3] = 0.0
         return commands
 
     def get_observation(self, env_data, ctrl_data):

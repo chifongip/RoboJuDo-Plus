@@ -2,6 +2,7 @@ import numpy as np
 
 from robojudo.policy import Policy, policy_registry
 from robojudo.policy.policy_cfgs import SmoothPolicyCfg
+from robojudo.policy.utils.velocity_command import clip_velocity, get_fresh_zmq_velocity
 from robojudo.utils.util_func import command_remap, quatToEuler
 
 
@@ -36,8 +37,18 @@ class SmoothPolicy(Policy):
 
     def _get_commands(self, ctrl_data):
         commands = np.array(self.commands_map)[:, 1].copy()  # default commands
+        zmq_configured = False
+        selected = False
 
         for key in ctrl_data.keys():
+            if key == "VelocityZmqCtrl":
+                zmq_configured = True
+                velocity = get_fresh_zmq_velocity(ctrl_data[key])
+                if velocity is None:
+                    continue
+                commands = clip_velocity(velocity, self.commands_map[:3])
+                selected = True
+                break
             if key in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
                 axes = ctrl_data[key]["axes"]
                 lx, ly, rx, _ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]
@@ -45,8 +56,11 @@ class SmoothPolicy(Policy):
                 commands[0] = command_remap(ly, self.commands_map[0])
                 commands[1] = command_remap(lx, self.commands_map[1])
                 commands[2] = command_remap(rx, self.commands_map[2])
+                selected = True
                 break
 
+        if zmq_configured and not selected:
+            commands[:3] = 0.0
         return commands
 
     def get_observation(self, env_data, ctrl_data):
