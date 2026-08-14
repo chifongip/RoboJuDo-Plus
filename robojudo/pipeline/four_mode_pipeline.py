@@ -184,6 +184,12 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             if command == "[RECORD_PAUSE_RESUME]":
                 self._toggle_recording_pause()
                 continue
+            if command == "[RECORD_CONFIRM_SAVE]":
+                self._confirm_recording_save()
+                continue
+            if command == "[RECORD_DISCARD]":
+                self._discard_recording()
+                continue
             if command == "[UPPER_BODY_TOGGLE]":
                 self._toggle_upper_body()
                 continue

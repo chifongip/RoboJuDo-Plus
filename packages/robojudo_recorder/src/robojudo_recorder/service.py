@@ -3,19 +3,20 @@ import time
 from collections import deque
 
 import msgpack
+import numpy as np
 import zmq
 
 from .cameras import CameraFrame, CameraSource, create_camera
 from .config import RecorderConfig
 from .dataset import LeRobotV3Writer
-from .protocol import ControlSample
 from .profiles import NamedJointProfile
+from .protocol import ControlSample
 
 logger = logging.getLogger(__name__)
 
 
 class RecorderService:
-    """Pair synchronized camera groups with the latest preceding control sample."""
+    """Pair camera groups with timestamped controls without dropping video frames."""
 
     def __init__(
         self,
@@ -39,16 +40,21 @@ class RecorderService:
         self._socket.connect(cfg.control_endpoint)
         self._samples: deque[ControlSample] = deque(maxlen=512)
         self._active_episode_id: int | None = None
+        self._review_episode_id: int | None = None
         self._active_task: str | None = None
         self._writer: LeRobotV3Writer | None = None
         self._profile: NamedJointProfile | None = None
         self._last_camera_sequences = {camera.name: -1 for camera in cfg.cameras}
-        self._last_written_sample_timestamp = -1
+        self._pending_frames: deque[dict[str, CameraFrame]] = deque()
         self._running = False
         self.dropped_stale_frames = 0
         self._episode_frame_count = 0
         self._episode_stale_frames = 0
         self._episode_unmatched_frames = 0
+        self._episode_interpolated_frames = 0
+        self._episode_hold_last_frames = 0
+        self._episode_over_age_frames = 0
+        self._episode_max_control_age_ms = 0.0
         self._camera_stream_ready = False
         self._camera_missing_since_ns: int | None = None
         self._last_camera_wait_log_ns = 0
@@ -77,6 +83,10 @@ class RecorderService:
                 self._episode_frame_count = 0
                 self._episode_stale_frames = 0
                 self._episode_unmatched_frames = 0
+                self._episode_interpolated_frames = 0
+                self._episode_hold_last_frames = 0
+                self._episode_over_age_frames = 0
+                self._episode_max_control_age_ms = 0.0
                 logger.info("Episode %d started from first control sample: %s", sample.episode_id, sample.task)
             self._samples.append(sample)
         elif kind == "episode_start":
@@ -88,12 +98,26 @@ class RecorderService:
             self._episode_frame_count = 0
             self._episode_stale_frames = 0
             self._episode_unmatched_frames = 0
+            self._episode_interpolated_frames = 0
+            self._episode_hold_last_frames = 0
+            self._episode_over_age_frames = 0
+            self._episode_max_control_age_ms = 0.0
             logger.info("Episode %d armed: %s", episode_id, self._active_task)
         elif kind == "episode_end":
             if int(message["episode_id"]) == self._active_episode_id:
                 self._finish_episode(save=bool(message.get("save", True)))
+        elif kind == "episode_review":
+            if int(message["episode_id"]) == self._active_episode_id:
+                self._finish_episode(save=None)
+                self._review_episode_id = self._active_episode_id
+                logger.warning("Episode %s pending operator review", message["episode_id"])
+        elif kind in {"episode_commit", "episode_discard"}:
+            if int(message["episode_id"]) == self._review_episode_id:
+                self._finish_episode(save=kind == "episode_commit")
+                self._review_episode_id = None
         elif kind == "client_close":
-            self._finish_episode(save=True)
+            self._finish_episode(save=False)
+            self._review_episode_id = None
         else:
             raise ValueError(f"unknown message kind {kind!r}")
 
@@ -110,74 +134,75 @@ class RecorderService:
                 fps=self.cfg.dataset.fps,
                 state_names=self._profile.state_names,
                 action_names=self._profile.action_names,
-                camera_shapes={cfg.name: camera.shape for cfg, camera in zip(self.cfg.cameras, self.cameras)},
+                camera_shapes={
+                    cfg.name: camera.shape for cfg, camera in zip(self.cfg.cameras, self.cameras, strict=True)
+                },
                 codec=self.cfg.dataset.codec,
                 resume=self.cfg.dataset.resume,
             )
             camera_schema = ", ".join(
-                f"{cfg.name}={camera.shape}" for cfg, camera in zip(self.cfg.cameras, self.cameras)
+                f"{cfg.name}={camera.shape}" for cfg, camera in zip(self.cfg.cameras, self.cameras, strict=True)
             )
             logger.info("Dataset initialized at %s with cameras: %s", self.cfg.dataset.root.resolve(), camera_schema)
         if not self._writer.episode_open:
             self._writer.start_episode(self._active_task or sample.task)
 
-    def _matching_sample(self, frame: CameraFrame) -> ControlSample | None:
+    def _matching_sample(self, frame: CameraFrame, *, force: bool = False):
         if self._active_episode_id is None:
             return None
         candidates = [
             sample
             for sample in self._samples
             if sample.episode_id == self._active_episode_id
-            and sample.timestamp_ns(self.cfg.sync.clock) <= frame.timestamp_ns
         ]
-        if not candidates:
+        timestamp = frame.timestamp_ns
+        previous = [sample for sample in candidates if sample.timestamp_ns(self.cfg.sync.clock) <= timestamp]
+        following = [sample for sample in candidates if sample.timestamp_ns(self.cfg.sync.clock) > timestamp]
+        if not previous:
             self._episode_unmatched_frames += 1
-            if self._episode_unmatched_frames == 1 or self._episode_unmatched_frames % 100 == 0:
+            if force and (self._episode_unmatched_frames == 1 or self._episode_unmatched_frames % 100 == 0):
                 logger.warning(
-                    "Episode %s could not match %d camera frames to a preceding control sample; "
-                    "check sync.clock and producer clock domains",
+                    "Episode %s has %d camera frames without a preceding control sample",
                     self._active_episode_id,
                     self._episode_unmatched_frames,
                 )
             return None
-        sample = candidates[-1]
-        age_ns = frame.timestamp_ns - sample.timestamp_ns(self.cfg.sync.clock)
-        if age_ns > self.cfg.sync.max_control_age_ms * 1_000_000:
-            self.dropped_stale_frames += 1
-            self._episode_stale_frames += 1
-            if self._episode_stale_frames == 1 or self._episode_stale_frames % 100 == 0:
+        previous_sample = previous[-1]
+        age_ms = (timestamp - previous_sample.timestamp_ns(self.cfg.sync.clock)) / 1_000_000
+        self._episode_max_control_age_ms = max(self._episode_max_control_age_ms, age_ms)
+        if age_ms > self.cfg.sync.max_control_age_ms:
+            self._episode_over_age_frames += 1
+        if not following:
+            if not force:
+                return None
+            self._episode_hold_last_frames += 1
+            if self._episode_hold_last_frames == 1:
                 logger.warning(
-                    "Episode %s dropped %d stale camera frames (latest age %.1f ms, limit %.1f ms)",
+                    "Episode %s ended before future joint state arrived; holding the last state for pending frames",
                     self._active_episode_id,
-                    self._episode_stale_frames,
-                    age_ns / 1_000_000,
-                    self.cfg.sync.max_control_age_ms,
                 )
-            return None
-        return sample
+            return previous_sample, previous_sample.joint_positions, previous_sample.action
 
-    def _record_frames(self, frames: dict[str, CameraFrame]):
-        if any(frame.sequence == self._last_camera_sequences[name] for name, frame in frames.items()):
-            return
-        for name, frame in frames.items():
-            self._last_camera_sequences[name] = frame.sequence
-        primary_frame = frames[self.cfg.cameras[0].name]
-        sample = self._matching_sample(primary_frame)
-        if sample is None:
-            return
-        sample_timestamp = sample.timestamp_ns(self.cfg.sync.clock)
-        if sample_timestamp == self._last_written_sample_timestamp:
-            return
-        self._ensure_writer(sample)
-        self._writer.add_frame(
-            sample.joint_positions,
-            sample.action,
-            {name: frame.image for name, frame in frames.items()},
+        next_sample = following[0]
+        t0 = previous_sample.timestamp_ns(self.cfg.sync.clock)
+        t1 = next_sample.timestamp_ns(self.cfg.sync.clock)
+        if t1 <= t0:
+            return previous_sample, previous_sample.joint_positions, previous_sample.action
+        alpha = np.float32((timestamp - t0) / (t1 - t0))
+        state = previous_sample.joint_positions + alpha * (
+            next_sample.joint_positions - previous_sample.joint_positions
         )
+        self._episode_interpolated_frames += 1
+        return previous_sample, state.astype(np.float32), previous_sample.action
+
+    def _write_frame(self, frames: dict[str, CameraFrame], match):
+        sample, state, action = match
+        self._ensure_writer(sample)
+        self._writer.add_frame(state, action, {name: frame.image for name, frame in frames.items()})
         self._episode_frame_count += 1
         if self._episode_frame_count == 1:
             logger.info(
-                "Episode %s recording first synchronized frame from cameras: %s",
+                "Episode %s recording first camera frame from cameras: %s",
                 self._active_episode_id,
                 ", ".join(frames),
             )
@@ -189,13 +214,76 @@ class RecorderService:
                 self._episode_frame_count,
                 self._episode_frame_count / self.cfg.dataset.fps,
             )
-        self._last_written_sample_timestamp = sample_timestamp
 
-    def _finish_episode(self, *, save: bool):
+    def _upload_dataset(self, episode_id: int | None):
+        if not self.cfg.dataset.upload_to_hub:
+            return
+        try:
+            from huggingface_hub import HfApi
+
+            api = HfApi()
+            api.create_repo(
+                repo_id=self.cfg.dataset.repo_id,
+                repo_type="dataset",
+                private=self.cfg.dataset.hub_private,
+                exist_ok=True,
+            )
+            api.upload_folder(
+                repo_id=self.cfg.dataset.repo_id,
+                repo_type="dataset",
+                folder_path=str(self.cfg.dataset.root),
+                commit_message=f"{self.cfg.dataset.hub_commit_message} (episode {episode_id})",
+            )
+            logger.info("Episode %s uploaded to Hugging Face dataset %s", episode_id, self.cfg.dataset.repo_id)
+        except ImportError:
+            logger.error(
+                "Hugging Face upload is enabled but huggingface-hub is not installed; "
+                "install robojudo-recorder[hub]"
+            )
+        except Exception:
+            logger.exception(
+                "Failed to upload episode %s to Hugging Face dataset %s",
+                episode_id,
+                self.cfg.dataset.repo_id,
+            )
+
+    def _flush_pending_frames(self, *, force: bool = False):
+        while self._pending_frames:
+            frames = self._pending_frames[0]
+            match = self._matching_sample(frames[self.cfg.cameras[0].name], force=force)
+            if match is None:
+                if force:
+                    self._pending_frames.popleft()
+                    continue
+                break
+            self._pending_frames.popleft()
+            self._write_frame(frames, match)
+
+    def _record_frames(self, frames: dict[str, CameraFrame]):
+        if any(frame.sequence == self._last_camera_sequences[name] for name, frame in frames.items()):
+            return
+        for name, frame in frames.items():
+            self._last_camera_sequences[name] = frame.sequence
+        self._pending_frames.append(frames)
+        self._flush_pending_frames()
+
+    def _finish_episode(self, *, save: bool | None):
+        self._flush_pending_frames(force=True)
         episode_id = self._active_episode_id
         if self._writer is not None and self._writer.episode_open:
-            if save and self._writer.has_pending_frames:
+            if save is None:
+                logger.warning(
+                    "Episode %s review: %d frames, interpolated=%d, hold_last=%d, over_age=%d, unmatched=%d",
+                    episode_id,
+                    self._episode_frame_count,
+                    self._episode_interpolated_frames,
+                    self._episode_hold_last_frames,
+                    self._episode_over_age_frames,
+                    self._episode_unmatched_frames,
+                )
+            elif save and self._writer.has_pending_frames:
                 self._writer.save_episode()
+                self._upload_dataset(episode_id)
                 logger.info(
                     "Episode %s saved: %d frames, %d stale frames dropped, root=%s",
                     episode_id,
@@ -203,7 +291,25 @@ class RecorderService:
                     self._episode_stale_frames,
                     self.cfg.dataset.root.resolve(),
                 )
-            else:
+                if (
+                    self._episode_interpolated_frames
+                    or self._episode_hold_last_frames
+                    or self._episode_over_age_frames
+                    or self._episode_unmatched_frames
+                ):
+                    logger.warning(
+                        "Episode %s sync quality: interpolated=%d, hold_last=%d, over_age=%d, "
+                        "unmatched=%d, max_control_age=%.1f ms (warning threshold %.1f ms); "
+                        "video frames were retained",
+                        episode_id,
+                        self._episode_interpolated_frames,
+                        self._episode_hold_last_frames,
+                        self._episode_over_age_frames,
+                        self._episode_unmatched_frames,
+                        self._episode_max_control_age_ms,
+                        self.cfg.sync.max_control_age_ms,
+                    )
+            elif save is False:
                 self._writer.discard_episode()
                 logger.info("Episode %s discarded after %d frames", episode_id, self._episode_frame_count)
         elif episode_id is not None and save:
@@ -211,12 +317,16 @@ class RecorderService:
                 "Episode %s was not saved because no synchronized camera/control frames were recorded",
                 episode_id,
             )
+        if save is None:
+            return
         self._active_episode_id = None
         self._active_task = None
-        self._last_written_sample_timestamp = -1
+        self._pending_frames.clear()
         self._episode_frame_count = 0
         self._episode_stale_frames = 0
         self._episode_unmatched_frames = 0
+        self._episode_over_age_frames = 0
+        self._episode_max_control_age_ms = 0.0
 
     def _update_camera_status(self, frames: dict[str, CameraFrame | None]):
         missing = [name for name, frame in frames.items() if frame is None]
@@ -225,7 +335,7 @@ class RecorderService:
             self._camera_missing_since_ns = None
             if not self._camera_stream_ready:
                 shapes = ", ".join(
-                    f"{cfg.name}={camera.shape}" for cfg, camera in zip(self.cfg.cameras, self.cameras)
+                    f"{cfg.name}={camera.shape}" for cfg, camera in zip(self.cfg.cameras, self.cameras, strict=True)
                 )
                 logger.info("Camera stream ready: %s", shapes)
                 self._camera_stream_ready = True
@@ -239,10 +349,12 @@ class RecorderService:
             self._last_camera_wait_log_ns = now_ns
 
     def step(self):
+        if self._active_episode_id is None:
+            return
         self._receive_messages()
         frames = {
             cfg.name: camera.read(self.cfg.sync.poll_timeout_ms)
-            for cfg, camera in zip(self.cfg.cameras, self.cameras)
+            for cfg, camera in zip(self.cfg.cameras, self.cameras, strict=True)
         }
         self._update_camera_status(frames)
         if all(frame is not None for frame in frames.values()):

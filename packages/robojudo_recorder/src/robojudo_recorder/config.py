@@ -32,12 +32,19 @@ class DatasetConfig:
     fps: int
     codec: str = "libx264"
     resume: bool = False
+    upload_to_hub: bool = False
+    hub_private: bool = False
+    hub_commit_message: str = "Append recorded episode"
 
     def __post_init__(self):
         if self.fps <= 0:
             raise ValueError("dataset.fps must be positive")
         if not self.repo_id:
             raise ValueError("dataset.repo_id must not be empty")
+        if self.upload_to_hub and self.repo_id.startswith("local/"):
+            raise ValueError("dataset.repo_id must be a Hugging Face dataset id when upload_to_hub is enabled")
+        if not self.hub_commit_message.strip():
+            raise ValueError("dataset.hub_commit_message must not be empty")
 
 
 @dataclass(frozen=True)

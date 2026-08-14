@@ -138,6 +138,44 @@ class TestRecorderService(unittest.TestCase):
             self.assertTrue(root.joinpath("videos/observation.images.wrist_rgb/chunk-000/file-000.mp4").exists())
             self.assertEqual(pq.read_table(root / "data/chunk-000/file-000.parquet").num_rows, 1)
 
+    def test_interpolates_state_at_camera_timestamp_without_dropping_frame(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir) / "dataset"
+            cfg = RecorderConfig(
+                control_endpoint=f"inproc://recorder-{uuid.uuid4()}",
+                dataset=DatasetConfig(root=root, repo_id="local/service", fps=10),
+                camera=CameraConfig(type="fake", name="head_rgb"),
+                sync=SyncConfig(clock="source", max_control_age_ms=1),
+            )
+            camera = FakeCamera()
+            service = RecorderService(cfg, camera=camera)
+            first = self._sample_message() | {
+                "timestamp_ns": 1_000,
+                "joint_positions": [0.0, 0.0],
+                "joint_position_commands": [1.0, 1.0],
+            }
+            second = self._sample_message() | {
+                "timestamp_ns": 3_000,
+                "joint_positions": [2.0, 4.0],
+                "joint_position_commands": [3.0, 3.0],
+            }
+            service._handle_message(first, 1_000)
+            service._handle_message(second, 3_000)
+            service._active_episode_id = 1
+            service._active_task = "test task"
+            frame = CameraFrame(
+                image=np.zeros(camera.shape, dtype=np.uint8),
+                timestamp_ns=2_000,
+                sequence=1,
+            )
+            service._record_frames({"head_rgb": frame})
+            service._finish_episode(save=True)
+            service.close()
+
+            data = pq.read_table(root / "data/chunk-000/file-000.parquet")
+            np.testing.assert_allclose(data["observation.state"].to_pylist()[0], [1.0, 2.0])
+            np.testing.assert_allclose(data["action"].to_pylist()[0], [1.0, 1.0, 0.5, 0.0, 0.1, 0.76])
+
     def test_logs_when_camera_frames_are_missing(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             cfg = RecorderConfig(

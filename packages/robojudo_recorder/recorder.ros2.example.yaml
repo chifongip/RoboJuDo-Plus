@@ -1,11 +1,15 @@
 control_endpoint: tcp://127.0.0.1:8560
 
 dataset:
-  root: record_data/x2_move_box_center
-  repo_id: local/x2_move_box_center
+  root: record_data/x2_move_box_centerd
+  repo_id: Breeze-park/x2_move_box_center
   fps: 30
   codec: libx264
   resume: false
+  upload_to_hub: true
+  # repo_id must be e.g. your-user/x2_move_box_center when enabled.
+  hub_private: false
+  hub_commit_message: "Append recorded episode"
 
 
 cameras:

@@ -25,6 +25,7 @@ class UpperBodyZmqPipelineMixin:
         self._recorder_client = None
         self._recording_active = False
         self._recording_paused = False
+        self._recording_review_pending = False
         super().__init__(cfg=cfg)
         self._configure_upper_body_override()
         if cfg.record.enabled:
@@ -124,6 +125,7 @@ class UpperBodyZmqPipelineMixin:
         target[self._upper_body_indices] = self._upper_body_filtered
         return target
 
+    # Recording methods
     def _record_upper_body_sample(self, env_data, extras, pd_target, *, rl_active: bool):
         recorder_client = getattr(self, "_recorder_client", None)
         if recorder_client is None:
@@ -158,6 +160,9 @@ class UpperBodyZmqPipelineMixin:
         if self._recording_active:
             self._finish_recording_episode()
             return
+        if getattr(self, "_recording_review_pending", False):
+            logger.warning("Recording review is pending; confirm save or discard first")
+            return
         if not self._upper_body_enabled:
             logger.warning("Ignored record start: upper-body control is not enabled")
             return
@@ -177,15 +182,46 @@ class UpperBodyZmqPipelineMixin:
     def _finish_recording_episode(self):
         recorder_client = getattr(self, "_recorder_client", None)
         if recorder_client is not None:
-            recorder_client.finish_episode(save=True)
+            review_episode = getattr(recorder_client, "review_episode", None)
+            if review_episode is not None:
+                review_episode()
+            else:
+                recorder_client.finish_episode(save=True)
+                logger.warning("Recording stopped and episode saved (legacy recorder client)")
+                self._recording_review_pending = False
+                self._recording_active = False
+                self._recording_paused = False
+                return
         self._recording_active = False
         self._recording_paused = False
-        logger.warning("Recording stopped and episode saved")
+        self._recording_review_pending = True
+        logger.warning("Recording stopped; confirm save or discard the pending episode")
+
+    def _confirm_recording_save(self):
+        if not self._recording_review_pending:
+            logger.warning("Ignored recording save: no episode is pending review")
+            return
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is not None:
+            recorder_client.confirm_save()
+        self._recording_review_pending = False
+        logger.warning("Recording episode confirmed and saved")
+
+    def _discard_recording(self):
+        if not self._recording_review_pending:
+            logger.warning("Ignored recording discard: no episode is pending review")
+            return
+        recorder_client = getattr(self, "_recorder_client", None)
+        if recorder_client is not None:
+            recorder_client.discard_review()
+        self._recording_review_pending = False
+        logger.warning("Recording episode discarded")
 
     def close_recording(self):
         recorder_client = getattr(self, "_recorder_client", None)
         if recorder_client is not None:
             self._recording_active = False
             self._recording_paused = False
+            self._recording_review_pending = False
             recorder_client.close()
             self._recorder_client = None
