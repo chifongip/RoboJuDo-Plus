@@ -349,6 +349,8 @@ class RecorderService:
             self._last_camera_wait_log_ns = now_ns
 
     def step(self):
+        if self._active_episode_id is None:
+            return
         self._receive_messages()
         frames = {
             cfg.name: camera.read(self.cfg.sync.poll_timeout_ms)
