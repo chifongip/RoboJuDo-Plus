@@ -2,9 +2,9 @@ import logging
 from collections import deque
 
 import numpy as np
-import onnxruntime as ort
 
 from robojudo.policy import Policy, PolicyCfg
+from robojudo.policy.onnx_runtime import create_onnx_session
 from robojudo.policy.utils.velocity_command import clip_velocity, get_fresh_zmq_velocity
 from robojudo.utils.util_func import command_remap, quat_rotate_inverse_np
 
@@ -16,8 +16,9 @@ class LocomanipulationPolicyBase(Policy):
 
     def __init__(self, cfg_policy: PolicyCfg, device: str):
         super().__init__(cfg_policy=cfg_policy, device=device)
-        self.session = ort.InferenceSession(
+        self.session = create_onnx_session(
             cfg_policy.policy_file,
+            cfg_policy,
             providers=self._providers_for_device(device),
         )
         self.action_scales = np.asarray(cfg_policy.action_scales, dtype=np.float32)

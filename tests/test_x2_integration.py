@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -33,6 +34,25 @@ class FakeAimdkController:
 
 
 class TestX2Integration(unittest.TestCase):
+    def test_aimdk_state_executor_is_configured_for_isolated_latest_sample_callbacks(self):
+        package = Path(__file__).parents[1] / "packages" / "aimdk_cpp" / "src"
+        header = (package / "aimdk_controller.hpp").read_text(encoding="utf-8")
+        source = (package / "aimdk_controller.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("MultiThreadedExecutor", header)
+        self.assertIn("joint_callback_group_", header)
+        self.assertIn("imu_callback_group_", header)
+        self.assertIn("odometry_callback_group_", header)
+        self.assertIn("joint_state_mutex_", header)
+        self.assertIn("imu_state_mutex_", header)
+        self.assertIn("odometry_state_mutex_", header)
+        self.assertNotIn("std::mutex state_mutex_", header)
+        self.assertIn("rclcpp::SensorDataQoS()", source)
+        self.assertIn("state_qos.keep_last(1)", source)
+        self.assertIn("executor_->spin()", source)
+        self.assertIn("executor_->cancel()", source)
+        self.assertNotIn("spin_some()", source)
+
     def test_x2_configs_construct(self):
         from robojudo.config.x2 import x2, x2_real
 
@@ -900,6 +920,9 @@ class TestX2Integration(unittest.TestCase):
             self.assertIn("joints_missing", report.reasons)
             self.assertEqual(report.missing_joint_names, cfg_env.dof.joint_names)
             self.assertIsNone(report.imu_age_sec)
+            self.assertEqual(report.stream_telemetry["leg"].topic, cfg_env.aimdk.leg_state_topic)
+            self.assertEqual(report.stream_telemetry["imu"].received_count, 0)
+            self.assertIsNone(report.stream_telemetry["imu"].receive_rate_hz)
             state = controller.get_robot_state()
             self.assertEqual(len(state.motor_state.q), 31)
             self.assertFalse(state.odometry_state.valid)

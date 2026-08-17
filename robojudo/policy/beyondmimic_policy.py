@@ -1,10 +1,10 @@
 import logging
 
 import numpy as np
-import onnxruntime as ort
 
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 from robojudo.policy import Policy, policy_registry
+from robojudo.policy.onnx_runtime import create_onnx_session
 from robojudo.policy.policy_cfgs import BeyondMimicPolicyCfg
 from robojudo.tools.dof import DoFConfig
 from robojudo.utils.progress import ProgressBar
@@ -46,10 +46,9 @@ class BeyondMimicPolicyBase(Policy):
     )
 
     def __init__(self, cfg_policy: BeyondMimicPolicyCfg, device):
-        sess_options = ort.SessionOptions()
-        self.session = ort.InferenceSession(
+        self.session = create_onnx_session(
             cfg_policy.policy_file,
-            sess_options,
+            cfg_policy,
             providers=self._providers_for_device(device),
         )
 

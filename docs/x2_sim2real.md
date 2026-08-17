@@ -55,12 +55,44 @@ python scripts/monitor_x2_state.py --config x2_real --output /tmp/x2-state.jsonl
 ```
 
 The monitor forces its AimDK controller to `act=False`; it subscribes with the same native callbacks and sensor-data
-QoS but never publishes robot commands. It prints health transitions and writes one JSON object per line containing
-IMU age, missing or stale joint names and ages, and odometry validity, age, and rejection context. Omit `--output` to
-create a UTC-timestamped file in the current directory. Use the actual deployment preset so odometry topics, expected
-frames, joint names, and timeouts match. Reinstall `packages/aimdk_cpp` before using the monitor after pulling this
+QoS but never publishes robot commands. It prints health transitions and a callback summary every second by default, and writes
+one JSON object per line containing IMU age, missing or stale joint names and ages, odometry validity, age, and rejection
+context, plus per-topic callback rate, receive age, maximum inter-arrival gap, and sequence-gap diagnostics. The joint
+topic records also retain their last header and measurement stamps and joint-name list. Those stamps are raw values: do
+not compare them to this computer's time unless the onboard and deployment computers are synchronized. Omit `--output`
+to create a UTC-timestamped file in the current directory. Use the actual deployment preset so odometry topics, expected
+frames, joint names, and timeouts match. Set `aimdk.telemetry_window_sec` to change the one-second callback-rate window.
+Reinstall `packages/aimdk_cpp` before using the monitor after pulling this
 diagnostic API. Existing output files are preserved by default; pass `--append` to add another run or `--overwrite` to
 replace one explicitly.
+
+### Stress state subscriptions without commanding the robot
+
+Use the passive subscriber stress probe to test whether adding independent ROS/DDS consumers reproduces
+state-delivery gaps. Use the system Python because ROS Humble's `rclpy` extension is built for Python 3.10 on the
+robot computer:
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ubuntu/aimdk/install/setup.bash
+/usr/bin/python3 scripts/stress_x2_state_subscribers.py \
+  --processes 4 --duration 120 --output /tmp/x2-subscriber-baseline.jsonl
+```
+
+Each process has its own ROS context/DDS participant and subscribes to the leg, waist, arm, head, and torso-IMU state
+topics. All subscriptions use best-effort, volatile `KEEP_LAST(1)` QoS. The probe creates no publishers.
+
+First run it without the manipulation launch, then repeat while `box_pick_place.launch.py` is running and write to a
+different output file. Increase `--processes` gradually (for example 1, 2, 4, 8) rather than starting with a large
+fan-out. A receive gap at or above 0.1 seconds is printed immediately. Interpret the paired values as follows:
+
+- `receive_gap` large and `header_gap` similarly large: depth-1 delivery skipped to a recent sample, or samples were
+  lost before delivery.
+- `receive_gap` large but `header_gap` about 0.002 seconds: an old sample was delayed before the DDS reader history or
+  was already taken into an executor callback queue. `KEEP_LAST(1)` limits the reader history, not those other queues.
+
+The test isolates the effect of additional state readers. It does not reproduce the high-volume publishers created
+by MoveIt, so a clean subscriber-only run does not rule out DDS transmit congestion from the manipulation stack.
 
 The exception raised by the running deployment now includes the controller's in-process freshness snapshot and is
 authoritative if its result differs from the independently subscribed monitor. A `frame_mismatch` odometry rejection
@@ -203,7 +235,7 @@ manual return remains available through joystick `Back` or keyboard `]`.
 
 With the robot supported, select `JOINT_DEFAULT` and wait for the completion log. Then select `RL_DEFAULT`. ONNX time does not advance in passive, damping, or joint-preparation modes.
 
-The policy runs at 50 Hz. `aimdk_cpp` republishes the active mode at 500 Hz. If position commands stop for 100 ms, the backend latches damping. Position control cannot resume until a new mode transition explicitly re-arms it. Stale joint, IMU, or enabled odometry state, a non-finite target, excessive tilt, and shutdown also force damping.
+The policy runs at 50 Hz. `aimdk_cpp` republishes the active mode at 500 Hz. If position commands stop for 100 ms, the backend latches damping. Position control cannot resume until a new mode transition explicitly re-arms it. Stale joint, IMU, or enabled odometry state, a non-finite target, excessive tilt, and shutdown also force damping. State subscriptions keep only the latest sensor sample and isolate joint, IMU, and odometry callbacks with separate state locks on a blocking multi-threaded executor so high-rate joint traffic cannot starve another safety stream. When running the X2 MoveIt manipulation stack on the same host, retain its headless 100 Hz defaults unless passive state monitoring proves that higher-load settings remain below the 100 ms limit.
 
 ## Preflight Checks
 

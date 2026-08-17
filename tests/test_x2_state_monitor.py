@@ -12,6 +12,22 @@ MONITOR_SPEC.loader.exec_module(monitor)
 
 
 def freshness_report(**overrides):
+    telemetry = SimpleNamespace(
+        topic="/aima/hal/joint/leg/state",
+        received_count=123,
+        last_receive_age_sec=0.015,
+        receive_rate_hz=99.5,
+        last_inter_arrival_sec=0.010,
+        max_inter_arrival_sec=0.040,
+        sequence_gap_count=2,
+        sequence_nonmonotonic_count=1,
+        last_sequence=456,
+        last_header_stamp_sec=100,
+        last_header_stamp_nanosec=200,
+        last_measurement_stamp_sec=99,
+        last_measurement_stamp_nanosec=900,
+        last_joint_names=["left_knee_joint"],
+    )
     values = {
         "required_streams_fresh": False,
         "reasons": ["imu_stale", "joints_missing", "joints_stale", "odometry_missing"],
@@ -27,6 +43,7 @@ def freshness_report(**overrides):
         "odometry_age_sec": None,
         "last_odometry_rejection_reason": "frame_mismatch",
         "last_odometry_rejection_age_sec": 0.02,
+        "stream_telemetry": {"leg": telemetry},
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -52,6 +69,20 @@ class TestX2StateMonitor(unittest.TestCase):
         self.assertEqual(serialized["joints"]["missing"], ["head_yaw_joint"])
         self.assertEqual(serialized["joints"]["age_sec"]["left_knee_joint"], 0.142)
         self.assertEqual(serialized["odometry"]["last_rejection_reason"], "frame_mismatch")
+        self.assertEqual(serialized["stream_telemetry"]["leg"]["receive_rate_hz"], 99.5)
+        self.assertEqual(serialized["stream_telemetry"]["leg"]["sequence_gap_count"], 2)
+        self.assertEqual(
+            serialized["stream_telemetry"]["leg"]["measurement_stamp"], {"sec": 99, "nanosec": 900}
+        )
+
+    def test_telemetry_summary_includes_rate_gap_and_sequence_diagnostics(self):
+        summary = monitor.format_stream_telemetry(freshness_report())
+
+        self.assertIn("leg: 99.5 Hz", summary)
+        self.assertIn("age=0.015s", summary)
+        self.assertIn("max_gap=0.040s", summary)
+        self.assertIn("sequence gaps=2", summary)
+        self.assertIn("nonmonotonic=1", summary)
 
     def test_age_only_changes_do_not_create_state_transitions(self):
         first = freshness_report(imu_age_sec=0.125)

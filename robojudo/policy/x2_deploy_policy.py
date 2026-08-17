@@ -1,9 +1,9 @@
 import logging
 
 import numpy as np
-import onnxruntime as ort
 
 from robojudo.policy import Policy, policy_registry
+from robojudo.policy.onnx_runtime import create_onnx_session
 from robojudo.utils.progress import ProgressBar
 from robojudo.utils.util_func import get_gravity_orientation
 
@@ -15,7 +15,7 @@ class X2DeployPolicy(Policy):
     def __init__(self, cfg_policy, device):
         super().__init__(cfg_policy=cfg_policy, device=device)
         providers = ["CPUExecutionProvider"]
-        self.session = ort.InferenceSession(self.cfg_policy.policy_file, providers=providers)
+        self.session = create_onnx_session(self.cfg_policy.policy_file, self.cfg_policy, providers=providers)
         self.obs_scales = self.cfg_policy.obs_scales
         self.obs_clip = self.cfg_policy.obs_clip
         self.warmup_frames = self.cfg_policy.warmup_frames
