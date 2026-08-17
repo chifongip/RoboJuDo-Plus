@@ -41,6 +41,11 @@ class RecorderService:
         self._samples: deque[ControlSample] = deque(maxlen=512)
         self._active_episode_id: int | None = None
         self._active_episode_started_at_ns: int | None = None
+        self._pending_review_id: int | None = None
+        self._pending_review_stop_at_ns: int | None = None
+        self._pending_review_deadline_ns: int | None = None
+        self._pending_review_decision: bool | None = None
+        self._pending_review_drained_frames = 0
         self._review_episode_id: int | None = None
         self._active_task: str | None = None
         self._writer: LeRobotV3Writer | None = None
@@ -113,15 +118,29 @@ class RecorderService:
                 self._finish_episode(save=bool(message.get("save", True)))
         elif kind == "episode_review":
             if int(message["episode_id"]) == self._active_episode_id:
-                self._finish_episode(save=None)
-                self._review_episode_id = self._active_episode_id
-                logger.warning("Episode %s pending operator review", message["episode_id"])
+                self._pending_review_id = self._active_episode_id
+                self._pending_review_stop_at_ns = (
+                    int(message.get("timestamp_ns", received_at)) if self.cfg.sync.clock == "source" else received_at
+                )
+                self._pending_review_deadline_ns = (
+                    time.monotonic_ns() + self.cfg.sync.episode_end_drain_timeout_ms * 1_000_000
+                )
+                self._pending_review_decision = None
+                self._pending_review_drained_frames = 0
+                logger.info(
+                    "Episode %s stopping; draining camera frames through the review timestamp",
+                    message["episode_id"],
+                )
         elif kind in {"episode_commit", "episode_discard"}:
-            if int(message["episode_id"]) == self._review_episode_id:
+            episode_id = int(message["episode_id"])
+            if episode_id == self._pending_review_id:
+                self._pending_review_decision = kind == "episode_commit"
+            elif episode_id == self._review_episode_id:
                 self._finish_episode(save=kind == "episode_commit")
                 self._review_episode_id = None
         elif kind == "client_close":
             self._finish_episode(save=False)
+            self._clear_pending_review()
             self._review_episode_id = None
         else:
             raise ValueError(f"unknown message kind {kind!r}")
@@ -321,6 +340,27 @@ class RecorderService:
         self._episode_over_age_frames = 0
         self._episode_max_control_age_ms = 0.0
 
+    def _clear_pending_review(self):
+        self._pending_review_id = None
+        self._pending_review_stop_at_ns = None
+        self._pending_review_deadline_ns = None
+        self._pending_review_decision = None
+        self._pending_review_drained_frames = 0
+
+    def _complete_pending_review(self):
+        episode_id = self._pending_review_id
+        if episode_id is None:
+            return
+        decision = self._pending_review_decision
+        drained_frames = self._pending_review_drained_frames
+        self._finish_episode(save=None)
+        self._review_episode_id = episode_id
+        self._clear_pending_review()
+        logger.warning("Episode %s pending operator review after draining %d tail frames", episode_id, drained_frames)
+        if decision is not None:
+            self._finish_episode(save=decision)
+            self._review_episode_id = None
+
     def _update_camera_status(self, frames: dict[str, CameraFrame | None]):
         missing = [name for name, frame in frames.items() if frame is None]
         now_ns = time.monotonic_ns()
@@ -350,8 +390,30 @@ class RecorderService:
             for cfg, camera in zip(self.cfg.cameras, self.cameras, strict=True)
         }
         self._update_camera_status(frames)
+        if self._pending_review_id is None:
+            if all(frame is not None for frame in frames.values()):
+                self._record_frames(frames)
+            return
+
         if all(frame is not None for frame in frames.values()):
-            self._record_frames(frames)
+            primary_frame = frames[self.cfg.cameras[0].name]
+            if primary_frame.timestamp_ns <= self._pending_review_stop_at_ns:
+                is_new = all(
+                    frame.sequence != self._last_camera_sequences[name] for name, frame in frames.items()
+                )
+                self._record_frames(frames)
+                if is_new:
+                    self._pending_review_drained_frames += 1
+            else:
+                self._complete_pending_review()
+                return
+        if time.monotonic_ns() >= self._pending_review_deadline_ns:
+            logger.warning(
+                "Episode %s camera drain timed out after %d ms",
+                self._pending_review_id,
+                self.cfg.sync.episode_end_drain_timeout_ms,
+            )
+            self._complete_pending_review()
 
     def run(self):
         connected = []

@@ -263,6 +263,7 @@ sync:
 | `sync.max_control_age_ms` | 相机帧允许匹配的最大控制样本年龄 |
 | `sync.poll_timeout_ms` | 每次等待相机帧的最长时间 |
 | `sync.pending_frame_capacity` | 首个控制样本或等待匹配期间最多缓存的相机帧数 |
+| `sync.episode_end_drain_timeout_ms` | 停止录制后等待并补收停止时间边界内相机帧的最长时间 |
 
 单相机配置继续使用 `camera:`。同时采集多个相机时改用 `cameras:`：
 

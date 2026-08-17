@@ -53,6 +53,26 @@ class MissingCamera(FakeCamera):
         return None
 
 
+class SequenceCamera(FakeCamera):
+    def __init__(self, timestamps):
+        super().__init__()
+        self.timestamps = iter(timestamps)
+
+    def read(self, timeout_ms):
+        del timeout_ms
+        self.read_count += 1
+        try:
+            timestamp_ns = next(self.timestamps)
+        except StopIteration:
+            return None
+        self.sequence += 1
+        return CameraFrame(
+            image=np.full(self.shape, self.sequence, dtype=np.uint8),
+            timestamp_ns=timestamp_ns,
+            sequence=self.sequence,
+        )
+
+
 class TestRecorderService(unittest.TestCase):
     @staticmethod
     def _sample_message():
@@ -126,12 +146,49 @@ class TestRecorderService(unittest.TestCase):
             service = RecorderService(cfg, camera=camera)
             service._handle_message(self._sample_message(), time.monotonic_ns())
             service.step()
-            service._handle_message({"kind": "episode_review", "episode_id": 1}, time.monotonic_ns())
-            reads_at_review = camera.read_count
+            review_at = time.monotonic_ns()
+            service._handle_message(
+                {"kind": "episode_review", "episode_id": 1, "timestamp_ns": review_at},
+                review_at,
+            )
 
             service.step()
+            reads_after_drain = camera.read_count
+            service.step()
 
-            self.assertEqual(camera.read_count, reads_at_review)
+            self.assertEqual(camera.read_count, reads_after_drain)
+            service._handle_message({"kind": "episode_discard", "episode_id": 1}, time.monotonic_ns())
+            service.close()
+
+    def test_review_drains_camera_frames_through_stop_timestamp(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            cfg = RecorderConfig(
+                control_endpoint=f"inproc://recorder-{uuid.uuid4()}",
+                dataset=DatasetConfig(root=Path(temporary_dir) / "dataset", repo_id="local/service", fps=10),
+                camera=CameraConfig(type="fake", name="head_rgb"),
+                sync=SyncConfig(clock="source", max_control_age_ms=100),
+            )
+            camera = SequenceCamera([1_500, 2_500, 2_600])
+            service = RecorderService(cfg, camera=camera)
+            service._handle_message(
+                {"kind": "episode_start", "episode_id": 1, "task": "test task", "timestamp_ns": 1_000},
+                1_000,
+            )
+            for timestamp_ns in (1_000, 2_000, 3_000):
+                service._handle_message(self._sample_message() | {"timestamp_ns": timestamp_ns}, timestamp_ns)
+            service._handle_message(
+                {"kind": "episode_review", "episode_id": 1, "timestamp_ns": 2_500},
+                2_500,
+            )
+
+            service.step()
+            service.step()
+            service.step()
+
+            self.assertEqual(service._episode_frame_count, 2)
+            self.assertEqual(service._review_episode_id, 1)
+            self.assertIsNone(service._pending_review_id)
+            self.assertEqual(camera.read_count, 3)
             service._handle_message({"kind": "episode_discard", "episode_id": 1}, time.monotonic_ns())
             service.close()
 
