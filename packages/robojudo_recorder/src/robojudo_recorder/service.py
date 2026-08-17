@@ -59,6 +59,11 @@ class RecorderService:
         self._camera_stream_ready = False
         self._camera_missing_since_ns: int | None = None
         self._last_camera_wait_log_ns = 0
+        self._throughput_window_started_ns: int | None = None
+        self._throughput_input_frames = {camera.name: 0 for camera in cfg.cameras}
+        self._throughput_sequence_gaps = {camera.name: 0 for camera in cfg.cameras}
+        self._throughput_last_sequences: dict[str, int | None] = {camera.name: None for camera in cfg.cameras}
+        self._throughput_written_frames = 0
 
     def _receive_messages(self):
         while True:
@@ -89,6 +94,7 @@ class RecorderService:
                 self._episode_hold_last_frames = 0
                 self._episode_over_age_frames = 0
                 self._episode_max_control_age_ms = 0.0
+                self._reset_throughput_metrics()
                 logger.info("Episode %d started from first control sample: %s", sample.episode_id, sample.task)
             self._samples.append(sample)
         elif kind == "episode_start":
@@ -107,6 +113,7 @@ class RecorderService:
             self._episode_hold_last_frames = 0
             self._episode_over_age_frames = 0
             self._episode_max_control_age_ms = 0.0
+            self._reset_throughput_metrics()
             logger.info("Episode %d armed: %s", episode_id, self._active_task)
         elif kind == "episode_end":
             if int(message["episode_id"]) == self._active_episode_id:
@@ -198,6 +205,7 @@ class RecorderService:
         self._ensure_writer(sample)
         self._writer.add_frame(state, action, {name: frame.image for name, frame in frames.items()})
         self._episode_frame_count += 1
+        self._throughput_written_frames += 1
         if self._episode_frame_count == 1:
             logger.info(
                 "Episode %s recording first camera frame from cameras: %s",
@@ -262,6 +270,7 @@ class RecorderService:
 
     def _finish_episode(self, *, save: bool | None):
         self._flush_pending_frames(force=True)
+        self._log_throughput(force=True)
         episode_id = self._active_episode_id
         if self._writer is not None and self._writer.episode_open:
             if save is None:
@@ -320,6 +329,65 @@ class RecorderService:
         self._episode_unmatched_frames = 0
         self._episode_over_age_frames = 0
         self._episode_max_control_age_ms = 0.0
+        self._reset_throughput_metrics()
+
+    def _reset_throughput_metrics(self):
+        self._throughput_window_started_ns = None
+        self._throughput_input_frames = {camera.name: 0 for camera in self.cfg.cameras}
+        self._throughput_sequence_gaps = {camera.name: 0 for camera in self.cfg.cameras}
+        self._throughput_last_sequences = {camera.name: None for camera in self.cfg.cameras}
+        self._throughput_written_frames = 0
+
+    def _observe_camera_throughput(self, frames: dict[str, CameraFrame | None]):
+        observed_new_frame = False
+        for name, frame in frames.items():
+            if frame is None:
+                continue
+            previous_sequence = self._throughput_last_sequences[name]
+            if frame.sequence == previous_sequence:
+                continue
+            if previous_sequence is not None and frame.sequence > previous_sequence + 1:
+                self._throughput_sequence_gaps[name] += frame.sequence - previous_sequence - 1
+            self._throughput_last_sequences[name] = frame.sequence
+            self._throughput_input_frames[name] += 1
+            observed_new_frame = True
+        if observed_new_frame and self._throughput_window_started_ns is None:
+            self._throughput_window_started_ns = time.monotonic_ns()
+
+    def _log_throughput(self, *, force: bool = False):
+        if self._throughput_window_started_ns is None:
+            return
+        now_ns = time.monotonic_ns()
+        elapsed_s = (now_ns - self._throughput_window_started_ns) / 1_000_000_000
+        if not force and elapsed_s < self.cfg.sync.throughput_log_interval_s:
+            return
+        if elapsed_s <= 0:
+            return
+        if force and not any(self._throughput_input_frames.values()) and self._throughput_written_frames == 0:
+            return
+
+        input_fps = {name: count / elapsed_s for name, count in self._throughput_input_frames.items()}
+        write_fps = self._throughput_written_frames / elapsed_s
+        target_fps = float(self.cfg.dataset.fps)
+        input_summary = ", ".join(f"{name}={fps:.1f}" for name, fps in input_fps.items())
+        gap_summary = ", ".join(f"{name}={count}" for name, count in self._throughput_sequence_gaps.items())
+        below_target = any(fps < target_fps * 0.9 for fps in input_fps.values()) or write_fps < target_fps * 0.9
+        has_sequence_gaps = any(self._throughput_sequence_gaps.values())
+        log = logger.warning if below_target or has_sequence_gaps else logger.info
+        log(
+            "Episode %s throughput (%.1f s): input_fps=[%s], write_fps=%.1f, target_fps=%.1f, "
+            "sequence_gaps=[%s]",
+            self._active_episode_id,
+            elapsed_s,
+            input_summary,
+            write_fps,
+            target_fps,
+            gap_summary,
+        )
+        self._throughput_window_started_ns = now_ns
+        self._throughput_input_frames = {camera.name: 0 for camera in self.cfg.cameras}
+        self._throughput_sequence_gaps = {camera.name: 0 for camera in self.cfg.cameras}
+        self._throughput_written_frames = 0
 
     def _update_camera_status(self, frames: dict[str, CameraFrame | None]):
         missing = [name for name, frame in frames.items() if frame is None]
@@ -350,8 +418,10 @@ class RecorderService:
             for cfg, camera in zip(self.cfg.cameras, self.cameras, strict=True)
         }
         self._update_camera_status(frames)
+        self._observe_camera_throughput(frames)
         if all(frame is not None for frame in frames.values()):
             self._record_frames(frames)
+        self._log_throughput()
 
     def run(self):
         connected = []

@@ -263,6 +263,7 @@ sync:
 | `sync.max_control_age_ms` | 相机帧允许匹配的最大控制样本年龄 |
 | `sync.poll_timeout_ms` | 每次等待相机帧的最长时间 |
 | `sync.pending_frame_capacity` | 首个控制样本或等待匹配期间最多缓存的相机帧数 |
+| `sync.throughput_log_interval_s` | 输出相机输入 FPS、dataset 写入 FPS 和 sequence gap 的时间窗口 |
 
 单相机配置继续使用 `camera:`。同时采集多个相机时改用 `cameras:`：
 
@@ -416,6 +417,17 @@ Episode 1 saved: 300 frames, 0 stale frames dropped, root=record_data/example
 `Camera backend connected` 只说明 backend/helper 已启动；必须出现 `Camera stream ready` 才表示已收到图像。
 如果持续没有图像，会每 5 秒输出 `Waiting for camera frames: ...`。episode 结束时没有任何可配对帧，则明确输出
 `was not saved because no synchronized camera/control frames were recorded`。
+
+录制期间还会按 `sync.throughput_log_interval_s` 输出吞吐统计：
+
+```text
+Episode 1 throughput (5.0 s): input_fps=[head_rgb=19.8], write_fps=19.6, target_fps=30.0, sequence_gaps=[head_rgb=51]
+```
+
+`input_fps` 是 recorder 实际取得的新相机帧率，`write_fps` 是写入 LeRobot dataset 的帧率，
+`sequence_gaps` 是相机 sequence 中跳过的帧数。`input_fps` 偏低并伴随 sequence gap，通常表示图像传输、解码或
+编码处理不及；input 正常但 write 偏低，则重点检查 control 配对和 pending queue。任一 FPS 低于目标的 90%，
+或 sequence gap 非零时，该行使用 WARNING 级别。
 
 ### `Recorder unavailable or saturated; dropped ... samples`
 

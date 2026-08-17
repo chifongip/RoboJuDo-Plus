@@ -278,6 +278,31 @@ class TestRecorderService(unittest.TestCase):
             self.assertTrue(any("Waiting for camera frames: head_rgb" in message for message in logs.output))
             self.assertTrue(any("no synchronized camera/control frames" in message for message in logs.output))
 
+    def test_logs_input_and_write_fps_with_sequence_gaps(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            cfg = RecorderConfig(
+                control_endpoint=f"inproc://recorder-{uuid.uuid4()}",
+                dataset=DatasetConfig(root=Path(temporary_dir) / "dataset", repo_id="local/service", fps=30),
+                camera=CameraConfig(type="fake", name="head_rgb"),
+                sync=SyncConfig(clock="receive", max_control_age_ms=100),
+            )
+            service = RecorderService(cfg, camera=FakeCamera())
+            service._active_episode_id = 1
+            service._throughput_window_started_ns = time.monotonic_ns() - 1_000_000_000
+            service._throughput_input_frames["head_rgb"] = 20
+            service._throughput_written_frames = 19
+            service._throughput_sequence_gaps["head_rgb"] = 10
+
+            with self.assertLogs("robojudo_recorder.service", level="WARNING") as logs:
+                service._log_throughput(force=True)
+
+            message = logs.output[-1]
+            self.assertIn("input_fps=[head_rgb=20.0]", message)
+            self.assertIn("write_fps=19.0", message)
+            self.assertIn("target_fps=30.0", message)
+            self.assertIn("sequence_gaps=[head_rgb=10]", message)
+            service.close()
+
 
 if __name__ == "__main__":
     unittest.main()

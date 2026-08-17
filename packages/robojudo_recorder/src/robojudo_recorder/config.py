@@ -18,6 +18,7 @@ class SyncConfig:
     max_control_age_ms: float = 50.0
     poll_timeout_ms: int = 10
     pending_frame_capacity: int = 32
+    throughput_log_interval_s: float = 5.0
 
     def __post_init__(self):
         if self.clock not in {"source", "receive"}:
@@ -26,6 +27,8 @@ class SyncConfig:
             raise ValueError("sync.max_control_age_ms must be positive")
         if self.pending_frame_capacity <= 0:
             raise ValueError("sync.pending_frame_capacity must be positive")
+        if self.throughput_log_interval_s <= 0:
+            raise ValueError("sync.throughput_log_interval_s must be positive")
 
 
 @dataclass(frozen=True)
