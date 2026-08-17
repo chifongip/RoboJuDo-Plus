@@ -319,6 +319,12 @@ Configurations that enable `AIMDK` odometry require
 
 For the complete topic, frame, timeout, and preflight description, see [`docs/x2_sim2real.md`](docs/x2_sim2real.md).
 
+### ROS 2 DDS latency workaround
+
+The X2 robot's ROS 2 DDS configuration can cause data latency. When deploying on X2, refer to
+[ros2-domain-bridge](https://github.com/chifongip/ros2-domain-bridge.git) for a temporary workaround that relays the
+affected data and mitigates the latency issue.
+
 ### Run an X2 policy
 
 Run the real configuration only with the robot supported and an operator holding the emergency stop:
