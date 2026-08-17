@@ -23,6 +23,7 @@ class FakeCamera(CameraSource):
         self._shape = shape
         self.offset = offset
         self.sequence = 0
+        self.read_count = 0
         self.connected = False
 
     @property
@@ -34,6 +35,7 @@ class FakeCamera(CameraSource):
 
     def read(self, timeout_ms):
         del timeout_ms
+        self.read_count += 1
         self.sequence += 1
         return CameraFrame(
             image=np.full(self.shape, self.sequence + self.offset, dtype=np.uint8),
@@ -112,6 +114,27 @@ class TestRecorderService(unittest.TestCase):
                 [0.3, 0.4, 0.5, 0.0, 0.1, 0.76],
             )
 
+    def test_stops_consuming_camera_while_episode_is_pending_review(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            camera = FakeCamera()
+            cfg = RecorderConfig(
+                control_endpoint=f"inproc://recorder-{uuid.uuid4()}",
+                dataset=DatasetConfig(root=Path(temporary_dir) / "dataset", repo_id="local/service", fps=10),
+                camera=CameraConfig(type="fake", name="head_rgb"),
+                sync=SyncConfig(clock="receive", max_control_age_ms=100),
+            )
+            service = RecorderService(cfg, camera=camera)
+            service._handle_message(self._sample_message(), time.monotonic_ns())
+            service.step()
+            service._handle_message({"kind": "episode_review", "episode_id": 1}, time.monotonic_ns())
+            reads_at_review = camera.read_count
+
+            service.step()
+
+            self.assertEqual(camera.read_count, reads_at_review)
+            service._handle_message({"kind": "episode_discard", "episode_id": 1}, time.monotonic_ns())
+            service.close()
+
     def test_records_all_configured_cameras_in_each_row(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir) / "dataset"
@@ -175,6 +198,65 @@ class TestRecorderService(unittest.TestCase):
             data = pq.read_table(root / "data/chunk-000/file-000.parquet")
             np.testing.assert_allclose(data["observation.state"].to_pylist()[0], [1.0, 2.0])
             np.testing.assert_allclose(data["action"].to_pylist()[0], [1.0, 1.0, 0.5, 0.0, 0.1, 0.76])
+
+    def test_counts_each_unmatched_video_frame_once(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            cfg = RecorderConfig(
+                control_endpoint=f"inproc://recorder-{uuid.uuid4()}",
+                dataset=DatasetConfig(root=Path(temporary_dir) / "dataset", repo_id="local/service", fps=10),
+                camera=CameraConfig(type="fake", name="head_rgb"),
+                sync=SyncConfig(clock="source", max_control_age_ms=100),
+            )
+            camera = FakeCamera()
+            service = RecorderService(cfg, camera=camera)
+            service._handle_message(
+                {"kind": "episode_start", "episode_id": 1, "task": "test task", "timestamp_ns": 1_000},
+                1_000,
+            )
+            sample = self._sample_message() | {"timestamp_ns": 3_000}
+            service._handle_message(sample, 3_000)
+            frame = CameraFrame(
+                image=np.zeros(camera.shape, dtype=np.uint8),
+                timestamp_ns=2_000,
+                sequence=1,
+            )
+
+            service._record_frames({"head_rgb": frame})
+            service._flush_pending_frames()
+            service._flush_pending_frames()
+
+            self.assertEqual(service._episode_unmatched_frames, 0)
+            service._flush_pending_frames(force=True)
+            self.assertEqual(service._episode_unmatched_frames, 1)
+            service.close()
+
+    def test_does_not_count_video_frames_from_before_episode_start_as_unmatched(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            cfg = RecorderConfig(
+                control_endpoint=f"inproc://recorder-{uuid.uuid4()}",
+                dataset=DatasetConfig(root=Path(temporary_dir) / "dataset", repo_id="local/service", fps=10),
+                camera=CameraConfig(type="fake", name="head_rgb"),
+                sync=SyncConfig(clock="source", max_control_age_ms=100),
+            )
+            camera = FakeCamera()
+            service = RecorderService(cfg, camera=camera)
+            service._handle_message(
+                {"kind": "episode_start", "episode_id": 1, "task": "test task", "timestamp_ns": 2_000},
+                2_000,
+            )
+            service._handle_message(self._sample_message() | {"timestamp_ns": 3_000}, 3_000)
+            old_frame = CameraFrame(
+                image=np.zeros(camera.shape, dtype=np.uint8),
+                timestamp_ns=1_000,
+                sequence=1,
+            )
+
+            service._record_frames({"head_rgb": old_frame})
+            service._flush_pending_frames(force=True)
+
+            self.assertEqual(service._episode_unmatched_frames, 0)
+            self.assertEqual(len(service._pending_frames), 0)
+            service.close()
 
     def test_logs_when_camera_frames_are_missing(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

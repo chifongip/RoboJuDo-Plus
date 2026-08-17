@@ -73,20 +73,5 @@ cameras:
 """
             )
 
-    def test_hub_upload_requires_remote_repo_id(self):
-        with self.assertRaisesRegex(ValueError, "Hugging Face dataset id"):
-            self._load(
-                """
-dataset:
-  root: ~/record_data/test
-  repo_id: local/test
-  fps: 30
-  upload_to_hub: true
-camera:
-  type: opencv
-"""
-            )
-
-
 if __name__ == "__main__":
     unittest.main()

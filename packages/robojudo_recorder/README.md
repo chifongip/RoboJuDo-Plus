@@ -63,6 +63,9 @@ pip install -e "packages/robojudo_recorder[ros2]"
 # 测试和 lint
 pip install -e "packages/robojudo_recorder[dev]"
 
+# 仅在采集完成后需要手动上传时安装
+pip install -e "packages/robojudo_recorder[hub]"
+
 # GR00T + G1 RealSense observation publisher（相机采集和 JPEG 编码）
 pip install -e "packages/robojudo_recorder[realsense,opencv]"
 ```
@@ -200,6 +203,22 @@ sample，并按 timestamp 与 RGB 配对。没有 `--record` 和有效录制 epi
 仅仅启动 recorder 不会创建数据。第一次收到有效录制样本时才会初始化 dataset writer；结束一个包含有效
 帧的 episode 后，Parquet、视频和 episode metadata 才会完整写入。
 
+## 手动上传 Hugging Face
+
+recorder 运行期间不会连接 Hugging Face，也不会因为结束 episode 而上传数据。采集完成并检查本地
+`dataset.root` 后，再显式执行上传命令：
+
+```bash
+conda activate robop
+pip install -e "packages/robojudo_recorder[hub]"
+robojudo-upload-dataset record_data/x2_move_box_center \\
+  --repo-id Breeze-park/x2_move_box_center
+```
+
+该命令会创建（或复用）dataset repository，并上传整个本地 dataset 目录。私有仓库可增加
+`--private`；访问凭据由 `huggingface-cli login` 或 `HF_TOKEN` 提供。上传失败不会影响已经保存的本地
+数据，也不会阻塞录制控制循环。
+
 ## 配置说明
 
 完整配置结构：
@@ -243,6 +262,7 @@ sync:
 | `sync.clock` | control sample 使用 `source` 或 `receive` timestamp |
 | `sync.max_control_age_ms` | 相机帧允许匹配的最大控制样本年龄 |
 | `sync.poll_timeout_ms` | 每次等待相机帧的最长时间 |
+| `sync.pending_frame_capacity` | 首个控制样本或等待匹配期间最多缓存的相机帧数 |
 
 单相机配置继续使用 `camera:`。同时采集多个相机时改用 `cameras:`：
 

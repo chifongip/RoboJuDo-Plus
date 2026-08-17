@@ -246,6 +246,9 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
                 raise ValueError("GR00T observation profile must not be empty")
             if not self.observation_task.strip():
                 raise ValueError("GR00T observation task must not be empty")
+        return self
+
+
 class VelocityZmqCtrlCfg(CtrlCfg):
     """ROS Twist-shaped velocity commands received from a ZMQ publisher."""
 

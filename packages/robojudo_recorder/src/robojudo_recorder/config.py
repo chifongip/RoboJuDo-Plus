@@ -17,12 +17,15 @@ class SyncConfig:
     clock: str = "receive"
     max_control_age_ms: float = 50.0
     poll_timeout_ms: int = 10
+    pending_frame_capacity: int = 32
 
     def __post_init__(self):
         if self.clock not in {"source", "receive"}:
             raise ValueError("sync.clock must be 'source' or 'receive'")
         if self.max_control_age_ms <= 0:
             raise ValueError("sync.max_control_age_ms must be positive")
+        if self.pending_frame_capacity <= 0:
+            raise ValueError("sync.pending_frame_capacity must be positive")
 
 
 @dataclass(frozen=True)
@@ -32,19 +35,12 @@ class DatasetConfig:
     fps: int
     codec: str = "libx264"
     resume: bool = False
-    upload_to_hub: bool = False
-    hub_private: bool = False
-    hub_commit_message: str = "Append recorded episode"
 
     def __post_init__(self):
         if self.fps <= 0:
             raise ValueError("dataset.fps must be positive")
         if not self.repo_id:
             raise ValueError("dataset.repo_id must not be empty")
-        if self.upload_to_hub and self.repo_id.startswith("local/"):
-            raise ValueError("dataset.repo_id must be a Hugging Face dataset id when upload_to_hub is enabled")
-        if not self.hub_commit_message.strip():
-            raise ValueError("dataset.hub_commit_message must not be empty")
 
 
 @dataclass(frozen=True)

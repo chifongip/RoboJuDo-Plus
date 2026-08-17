@@ -27,6 +27,7 @@ dev = ["pytest>=8", "ruff>=0.12"]
 
 [project.scripts]
 robojudo-recorder = "robojudo_recorder.cli:main"
+robojudo-upload-dataset = "robojudo_recorder.upload:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
