@@ -18,6 +18,12 @@ class PolicyCfg(Config):
 
     freq: int = 50  # control frequency (Hz)
 
+    # ONNX Runtime CPU execution settings. A value of one uses only the calling
+    # thread, avoiding per-session worker pools in real-time control loops.
+    onnx_intra_op_num_threads: int = 1
+    onnx_inter_op_num_threads: int = 1
+    onnx_allow_spinning: bool = False
+
     obs_dof: DoFConfig
     action_dof: DoFConfig
     pad_missing_dofs: bool = False
@@ -49,6 +55,12 @@ class PolicyCfg(Config):
     def check_action_scale(cls, v):
         if v is not None and v <= 0:
             raise ValueError("action_scale must be positive")
+        return v
+
+    @field_validator("onnx_intra_op_num_threads", "onnx_inter_op_num_threads")
+    def check_onnx_thread_count(cls, v):
+        if v < 1:
+            raise ValueError("ONNX Runtime thread counts must be at least one")
         return v
 
     @model_validator(mode="after")

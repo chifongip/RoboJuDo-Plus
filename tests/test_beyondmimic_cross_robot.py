@@ -139,7 +139,7 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
 
         cfg = G1_23BeyondMimicPolicyCfg()
         session = _FakeTrackingSession(cfg.obs_dof.joint_names, self.no_state_observations)
-        with patch("robojudo.policy.beyondmimic_policy.ort.InferenceSession", return_value=session):
+        with patch("robojudo.policy.onnx_runtime.ort.InferenceSession", return_value=session):
             policy = G1BeyondMimicPolicy(cfg, "cpu")
 
         env_data = Box(
@@ -166,7 +166,7 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
 
         cfg = X2BeyondMimicPolicyCfg()
         session = _FakeTrackingSession(cfg.obs_dof.joint_names, self.no_state_observations)
-        with patch("robojudo.policy.beyondmimic_policy.ort.InferenceSession", return_value=session):
+        with patch("robojudo.policy.onnx_runtime.ort.InferenceSession", return_value=session):
             policy = X2BeyondMimicPolicy(cfg, "cpu")
 
         env_data = Box(
@@ -200,7 +200,7 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
                 *self.no_state_observations[3:],
             ],
         )
-        with patch("robojudo.policy.beyondmimic_policy.ort.InferenceSession", return_value=session):
+        with patch("robojudo.policy.onnx_runtime.ort.InferenceSession", return_value=session):
             with self.assertRaisesRegex(ValueError, "declares observation_names"):
                 X2BeyondMimicPolicy(cfg, "cpu")
 
@@ -213,7 +213,7 @@ class TestBeyondMimicCrossRobot(unittest.TestCase):
         env_dof = X2_31DoF()
         env_dof.default_pos[-2:] = [0.12, -0.08]
         session = _FakeTrackingSession(cfg.obs_dof.joint_names, self.no_state_observations)
-        with patch("robojudo.policy.beyondmimic_policy.ort.InferenceSession", return_value=session):
+        with patch("robojudo.policy.onnx_runtime.ort.InferenceSession", return_value=session):
             wrapper = PolicyWrapper(cfg, env_dof, "cpu")
 
         env_data = Box(

@@ -2,11 +2,11 @@ import logging
 import os
 
 import numpy as np
-import onnxruntime as ort
 
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 from robojudo.policy import Policy, policy_registry
 from robojudo.policy.asap_policy import AsapPolicy
+from robojudo.policy.onnx_runtime import create_onnx_session
 from robojudo.policy.policy_cfgs import KungfuBotGeneralPolicyCfg
 from robojudo.utils.util_func import (
     matrix_from_quat,
@@ -30,7 +30,7 @@ class KungfuBotGeneralPolicy(Policy):
             raise FileNotFoundError(f"Model file not found at {cfg_policy.policy_file}")
 
         logger.debug(f"Loading policy '{cfg_policy.policy_name}' from {cfg_policy.policy_file}")
-        self.session = ort.InferenceSession(cfg_policy.policy_file)
+        self.session = create_onnx_session(cfg_policy.policy_file, cfg_policy)
 
         self.input_names = [i.name for i in self.session.get_inputs()]
         self.output_names = [o.name for o in self.session.get_outputs()]
