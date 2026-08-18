@@ -64,29 +64,34 @@ class ZmqCameraSource(CameraSource):
                 raise ValueError("raw_rgb ZMQ camera requires a shape (config width/height or header.shape)")
             image = np.frombuffer(payload, dtype=np.uint8).reshape(self._shape).copy()
         elif encoding == "jpeg":
-            try:
-                import cv2
-            except ImportError as exc:
-                raise RuntimeError("JPEG ZMQ camera requires robojudo-recorder[opencv]") from exc
-            bgr = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if bgr is None:
-                raise ValueError("failed to decode JPEG ZMQ camera frame")
-            image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            image = None
+            if self._shape is None:
+                try:
+                    import cv2
+                except ImportError as exc:
+                    raise RuntimeError("JPEG ZMQ camera requires shape metadata or robojudo-recorder[opencv]") from exc
+                bgr = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if bgr is None:
+                    raise ValueError("failed to decode JPEG ZMQ camera frame")
+                image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         else:
             raise ValueError(f"unsupported ZMQ camera encoding {encoding!r}")
-        if self._shape is None:
+        if self._shape is None and image is not None:
             self._shape = tuple(image.shape)
-        elif image.shape != self.shape:
+        elif image is not None and image.shape != self.shape:
             raise ValueError(f"ZMQ camera returned shape {image.shape}, expected {self.shape}")
-        timestamp_ns = (
-            int(header["timestamp_ns"])
-            if self.timestamp_mode == "source"
-            else time.monotonic_ns()
-        )
+        receive_timestamp_ns = time.monotonic_ns()
+        source_timestamp_ns = int(header.get("source_timestamp_ns", header.get("timestamp_ns", receive_timestamp_ns)))
+        timestamp_ns = source_timestamp_ns if self.timestamp_mode == "source" else receive_timestamp_ns
         return CameraFrame(
             image=image,
             timestamp_ns=timestamp_ns,
             sequence=int(header["sequence"]),
+            encoded_image=payload if encoding == "jpeg" else None,
+            encoding=encoding,
+            source_timestamp_ns=source_timestamp_ns,
+            receive_timestamp_ns=receive_timestamp_ns,
+            image_shape=self._shape,
         )
 
     @staticmethod

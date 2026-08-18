@@ -7,7 +7,9 @@ from .service import RecorderService
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Record RoboJuDo control and camera data in LeRobot v3 format")
+    parser = argparse.ArgumentParser(
+        description="Capture timestamped RoboJuDo control and camera data into raw episodes"
+    )
     parser.add_argument("--config", required=True, help="Recorder YAML configuration")
     return parser.parse_args()
 

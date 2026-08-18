@@ -1,7 +1,8 @@
 # RoboJuDo Recorder
 
-`robojudo-recorder` 是一个独立于机器人控制循环的 LeRobot v3 数据录制服务。它接收 RoboJuDo pipeline
-发布的上半身状态和控制命令，将控制样本与相机帧配对，并按 episode 写入 Parquet 和 H.264 视频。
+`robojudo-recorder` 是一个独立于机器人控制循环的两阶段数据录制服务。实时阶段只保存相机原始压缩帧以及
+带 source/receive timestamp 的 control、state 和 action；`robojudo-finalize` 在采集结束后离线完成重采样、
+同步和 LeRobot v3 的 Parquet/H.264 编码。
 
 本模块不在运行时依赖 `third_party/lerobot`。LeRobot v3 的目录、字段和元数据由本模块独立实现，方便在
 X2、Unitree G1 29-DoF、G1 23-DoF 以及后续灵巧手配置之间复用。
@@ -31,9 +32,9 @@ Gr00tZmqCtrl observation stream ── RGB ────────────�
 RoboJuDo pipeline ── measured state/action samples ─┴─> recorder service ─> LeRobot v3 dataset
 ```
 
-普通 teleop 录制时，相机读取、图像解码、视频编码和 Parquet 写盘都在 recorder 进程中完成。GR00T
-模式下，相机采集和 observation 编码由 controller 的后台线程完成，recorder 仍负责视频编码和数据写盘；
-两种模式都不会在机器人控制线程执行阻塞式相机 I/O。
+普通 teleop 录制时，recorder 将 JPEG/PNG payload 原样落盘；raw RGB backend 才会在采集阶段逐帧压缩为
+JPEG。实时路径不会编码 H.264，也不会写 Parquet。GR00T 模式下可直接保存 observation stream 已有的 JPEG。
+离线 finalize 才执行解码、时间对齐、H.264 编码和 Parquet 写盘。
 
 GR00T 配置下，相机由 `Gr00tZmqCtrl` 的后台线程读取，并发布包含 RGB、实测关节位置和 task 的 deployment
 observation stream。这个 stream 属于 GR00T 推理闭环，不依赖 recorder，也不需要 `--record`。只有在额外
@@ -101,6 +102,13 @@ robojudo-recorder \
   --config packages/robojudo_recorder/recorder.ros2.example.yaml
 ```
 
+录完所需 episode 并退出 recorder 后，执行离线转换：
+
+```bash
+robojudo-finalize \
+  --config packages/robojudo_recorder/recorder.ros2.example.yaml
+```
+
 Use `ros2 topic info -v /aima/hal/sensor/stereo_head_front_right/rgb_image/compressed` to check the Reliability of your camera stream is RELIABLE or BEST-EFFORT
 
 关键相机配置如下：
@@ -109,8 +117,8 @@ Use `ros2 topic info -v /aima/hal/sensor/stereo_head_front_right/rgb_image/compr
 camera:
   type: ros2
   name: head_rgb
-  topic: /aima/hal/sensor/rgbd_head_front/rgb_image
-  message_type: raw
+  topic: /aima/hal/sensor/rgbd_head_front/rgb_image/compressed
+  message_type: compressed
   qos_reliability: reliable
   qos_depth: 1
   ros_python_executable: /usr/bin/python3
@@ -122,8 +130,9 @@ camera:
 `message_type` 可设为 `raw`（`sensor_msgs/msg/Image`）或 `compressed`
 （`sensor_msgs/msg/CompressedImage`），省略时默认 `compressed`，兼容已有配置。raw 模式支持
 `rgb8`、`bgr8`、`rgba8`、`bgra8` 和 `mono8`，输出统一转换为 RGB。`width` 和 `height` 可以省略，
-recorder 会从第一帧推断；指定后，每帧都会进行尺寸校验。ROS 图像使用
-本机 monotonic 接收时间，因此 `sync.clock` 应设置为 `receive`。
+recorder 会从第一帧推断；指定后，每帧都会进行尺寸校验。720p/30 FPS 等高吞吐场景应优先订阅
+`CompressedImage`，这样 JPEG 数据可以直接写入 raw spool，避免实时 RGB 解码和重新压缩。跨进程/机器部署
+通常使用 `sync.clock: receive`；只有 control 和 camera source timestamp 明确处于同一时钟域时才选 `source`。
 
 如果 ROS publisher 使用非默认 domain，启动前设置：
 
@@ -200,8 +209,9 @@ sample，并按 timestamp 与 RGB 配对。没有 `--record` 和有效录制 epi
 暂停期间不会写入控制样本或相机帧，但恢复后仍属于同一个 episode。关闭上半身 takeover、离开
 `RL_DEFAULT`、切换离开 locomotion policy 或退出 pipeline，会自动结束并保存当前 episode。
 
-仅仅启动 recorder 不会创建数据。第一次收到有效录制样本时才会初始化 dataset writer；结束一个包含有效
-帧的 episode 后，Parquet、视频和 episode metadata 才会完整写入。
+仅仅启动 recorder 不会创建 episode。第一次收到有效录制样本后才建立 raw episode；确认保存时目录从
+`dataset.raw_root/.pending` 原子移动到 `dataset.raw_root/episodes`。此时尚未生成 MP4/Parquet，必须运行
+`robojudo-finalize` 才会写入 `dataset.root`。
 
 ## 手动上传 Hugging Face
 
@@ -228,10 +238,12 @@ control_endpoint: tcp://127.0.0.1:8560
 
 dataset:
   root: record_data/g1_23_upper_body
+  raw_root: record_data/g1_23_upper_body_raw
   repo_id: local/g1_23_upper_body
   fps: 30
   codec: libx264
-  resume: false
+  jpeg_quality: 90
+  resume: true
 
 camera:
   type: ros2
@@ -246,6 +258,7 @@ camera:
 sync:
   clock: receive
   max_control_age_ms: 50
+  max_camera_delta_ms: 50
   poll_timeout_ms: 10
 ```
 
@@ -253,17 +266,19 @@ sync:
 | --- | --- |
 | `control_endpoint` | recorder 连接的 RoboJuDo control sample endpoint |
 | `dataset.root` | 本地 dataset 输出目录 |
+| `dataset.raw_root` | 实时采集 raw episode 目录；默认是 `dataset.root` 加 `_raw` 后缀 |
 | `dataset.repo_id` | 写入 LeRobot metadata 的 dataset 标识 |
-| `dataset.fps` | dataset 和视频 FPS |
-| `dataset.codec` | PyAV/FFmpeg encoder，例如 `libx264` |
+| `dataset.fps` | 离线重采样后的 dataset 和视频 FPS |
+| `dataset.codec` | finalize 使用的 PyAV/FFmpeg encoder，例如 `libx264` |
+| `dataset.jpeg_quality` | raw RGB backend 在实时阶段压缩 JPEG 的质量；已压缩输入不会重复编码 |
 | `dataset.resume` | 是否在已有兼容 dataset 后追加 episode |
 | `camera.type` / `cameras[].type` | `opencv`、`realsense`、`ros2` 或 `zmq` |
 | `camera.name` / `cameras[].name` | LeRobot image feature 名称的一部分，同一配置内必须唯一 |
 | `sync.clock` | control sample 使用 `source` 或 `receive` timestamp |
-| `sync.max_control_age_ms` | 相机帧允许匹配的最大控制样本年龄 |
+| `sync.max_control_age_ms` | 离线质量报告中 control age 的告警阈值 |
+| `sync.max_camera_delta_ms` | target timestamp 到最近相机帧允许的最大距离，超出则丢弃该 target slot |
 | `sync.poll_timeout_ms` | 每次等待相机帧的最长时间 |
-| `sync.pending_frame_capacity` | 首个控制样本或等待匹配期间最多缓存的相机帧数 |
-| `sync.throughput_log_interval_s` | 输出相机输入 FPS、dataset 写入 FPS 和 sequence gap 的时间窗口 |
+| `sync.throughput_log_interval_s` | 输出相机输入 FPS、raw 写入 FPS 和 sequence gap 的时间窗口 |
 
 单相机配置继续使用 `camera:`。同时采集多个相机时改用 `cameras:`：
 
@@ -287,9 +302,9 @@ cameras:
     fps: 30
 ```
 
-第一项是主相机，其 timestamp 用于匹配 control sample。每轮只有在所有相机都返回新 sequence 时才写入一条
-dataset frame，因此所有视频的帧数与 Parquet 行数保持一致；某台相机缺帧时整组跳过。不能同时配置
-`camera:` 和 `cameras:`。如果相机配置中存在 `fps`，它必须等于 `dataset.fps`。
+实时阶段每个相机独立落盘，不会因为慢相机阻塞其他相机，也不要求 `camera.fps` 等于 `dataset.fps`。finalize
+以第一项为主相机确定网格起点，在每个均匀 target timestamp 上为所有相机选择最近帧；任一相机超过
+`max_camera_delta_ms` 时丢弃该 target slot。不能同时配置 `camera:` 和 `cameras:`。
 
 ## 相机 backend
 
@@ -308,7 +323,7 @@ qos_depth: 1
 ros2 topic info -v /aima/hal/sensor/stereo_head_front_right/rgb_image/compressed
 ```
 
-当前 ROS backend 不订阅原始 `sensor_msgs/msg/Image`。
+ROS backend 同时支持 `CompressedImage` 和 raw `Image`。高分辨率采集推荐前者，因为可避免实时阶段的重复编码。
 
 ### OpenCV
 
@@ -362,8 +377,15 @@ header 支持 JSON 或 msgpack，至少包含 `sequence` 和 `timestamp_ns`。`e
 
 ## 同步策略
 
-每个相机帧会匹配同一 episode 中时间不晚于该帧的最新控制样本。如果样本年龄超过
-`sync.max_control_age_ms`，该图像帧会被丢弃。相同控制样本不会重复写入多张图像。
+实时采集不做同步：相机帧与 control sample 各自携带 source/receive timestamp 独立落盘。finalize 根据
+`sync.clock` 选择一个时钟域，并以 `dataset.fps` 生成均匀时间网格：
+
+- 每个相机选择离 target timestamp 最近的帧，距离超过 `max_camera_delta_ms` 时丢弃该 slot。
+- `observation.state` 在 target 前后的 control sample 之间线性插值。
+- `action` 使用 target 之前最近的 control sample（zero-order hold），避免引用未来命令。
+- 缺少前后 control 边界时不外推；对应 slot 会被丢弃。
+
+`max_control_age_ms` 是质量告警阈值，不会删除视频帧；报告会给出 over-age 数量以及 mean/p95/max age。
 
 一般建议：
 
@@ -373,7 +395,21 @@ header 支持 JSON 或 msgpack，至少包含 `sequence` 和 `timestamp_ns`。`e
 
 ## 输出目录
 
-输出符合 LeRobot v3 的主要结构：
+实时 raw spool 与最终 LeRobot dataset 分开保存：
+
+```text
+<dataset.raw_root>/
+├── .pending/                         # 尚未确认的 episode
+└── episodes/capture_..._episode_1/
+    ├── manifest.json
+    ├── controls.jsonl
+    ├── finalize_report.json          # finalize 后生成
+    └── cameras/head_rgb/
+        ├── frames.jsonl
+        └── 00000000.jpg
+```
+
+finalize 输出符合 LeRobot v3 的主要结构：
 
 ```text
 <dataset.root>/
@@ -388,6 +424,8 @@ header 支持 JSON 或 msgpack，至少包含 `sequence` 和 `timestamp_ns`。`e
 ```
 
 每个 episode 使用独立的 data Parquet 和视频文件。超过 1000 个 episode 后会自动进入下一个 chunk。
+`finalize_report.json` 记录 raw FPS、source sequence gaps、target slots、camera/control drop、重复/未使用图像帧、
+相机时间差和 control age。已经成功 finalize 且输出 parquet 仍存在的 episode 会被幂等跳过。
 
 ### 继续已有 dataset
 
@@ -409,25 +447,24 @@ Recorder 终端会按生命周期输出以下日志：
 Camera backend connected: name=head_rgb type=ros2
 Camera stream ready: head_rgb=(1552, 2064, 3)
 Episode 1 armed: pick up the box
-Episode 1 recording first synchronized frame from cameras: head_rgb
-Episode 1 recording progress: 150 frames (5.0 s dataset time)
-Episode 1 saved: 300 frames, 0 stale frames dropped, root=record_data/example
+Episode 1 recording first raw camera frame: head_rgb
+Episode 1 raw throughput (5.0 s): input_fps=[head_rgb=30.0], write_fps=[head_rgb=30.0], expected_fps=[head_rgb=30.0], output_fps=30.0, sequence_gaps=[head_rgb=0]
+Episode 1 raw capture committed: controls=500, cameras=[head_rgb=300], root=record_data/example_raw/episodes/...
 ```
 
 `Camera backend connected` 只说明 backend/helper 已启动；必须出现 `Camera stream ready` 才表示已收到图像。
-如果持续没有图像，会每 5 秒输出 `Waiting for camera frames: ...`。episode 结束时没有任何可配对帧，则明确输出
-`was not saved because no synchronized camera/control frames were recorded`。
+如果持续没有图像，会每 5 秒输出 `Waiting for camera frames: ...`。raw episode 可以先保存，finalize 会在缺少
+相机/control overlap 时明确失败，不会生成不完整的 LeRobot episode。
 
 录制期间还会按 `sync.throughput_log_interval_s` 输出吞吐统计：
 
 ```text
-Episode 1 throughput (5.0 s): input_fps=[head_rgb=19.8], write_fps=19.6, target_fps=30.0, sequence_gaps=[head_rgb=51]
+Episode 1 raw throughput (5.0 s): input_fps=[head_rgb=19.8], write_fps=[head_rgb=19.8], expected_fps=[head_rgb=30.0], output_fps=30.0, sequence_gaps=[head_rgb=51]
 ```
 
-`input_fps` 是 recorder 实际取得的新相机帧率，`write_fps` 是写入 LeRobot dataset 的帧率，
-`sequence_gaps` 是相机 sequence 中跳过的帧数。`input_fps` 偏低并伴随 sequence gap，通常表示图像传输、解码或
-编码处理不及；input 正常但 write 偏低，则重点检查 control 配对和 pending queue。任一 FPS 低于目标的 90%，
-或 sequence gap 非零时，该行使用 WARNING 级别。
+`input_fps` 是 recorder 取得的新相机帧率，`write_fps` 是写入 raw spool 的帧率，`sequence_gaps` 是相机
+sequence 中缺失的帧数。compressed 输入的 input 正常但 write 偏低时，应检查磁盘吞吐；raw RGB 输入偏低时还要
+检查实时 JPEG 压缩开销。最终同步质量以 `finalize_report.json` 为准。
 
 ### `Recorder unavailable or saturated; dropped ... samples`
 
@@ -446,8 +483,8 @@ ROS Python helper 启动失败。先验证系统 Python：
 
 ### recorder 已连接但没有输出文件
 
-确认已经进入 `RL_DEFAULT`、启用上半身 takeover，并用 joystick 开始录制。没有 fresh teleop/control sample
-时，相机帧不会单独写入 dataset。
+确认已经进入 `RL_DEFAULT`、启用上半身 takeover，并用 joystick 开始录制。确认保存后先检查
+`dataset.raw_root/episodes`；`dataset.root` 只有运行 `robojudo-finalize` 后才会出现完整 MP4/Parquet。
 
 ### ROS topic 存在但没有图像
 

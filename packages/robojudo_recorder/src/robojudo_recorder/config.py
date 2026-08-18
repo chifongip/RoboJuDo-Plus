@@ -19,6 +19,7 @@ class SyncConfig:
     poll_timeout_ms: int = 10
     pending_frame_capacity: int = 32
     throughput_log_interval_s: float = 5.0
+    max_camera_delta_ms: float = 50.0
 
     def __post_init__(self):
         if self.clock not in {"source", "receive"}:
@@ -29,6 +30,8 @@ class SyncConfig:
             raise ValueError("sync.pending_frame_capacity must be positive")
         if self.throughput_log_interval_s <= 0:
             raise ValueError("sync.throughput_log_interval_s must be positive")
+        if self.max_camera_delta_ms <= 0:
+            raise ValueError("sync.max_camera_delta_ms must be positive")
 
 
 @dataclass(frozen=True)
@@ -38,12 +41,20 @@ class DatasetConfig:
     fps: int
     codec: str = "libx264"
     resume: bool = False
+    raw_root: Path | None = None
+    jpeg_quality: int = 90
 
     def __post_init__(self):
         if self.fps <= 0:
             raise ValueError("dataset.fps must be positive")
         if not self.repo_id:
             raise ValueError("dataset.repo_id must not be empty")
+        if not 1 <= self.jpeg_quality <= 100:
+            raise ValueError("dataset.jpeg_quality must be between 1 and 100")
+        if self.raw_root is None:
+            object.__setattr__(self, "raw_root", self.root.with_name(f"{self.root.name}_raw"))
+        if self.raw_root == self.root:
+            raise ValueError("dataset.raw_root must differ from dataset.root")
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,8 @@ def load_config(path: str | Path) -> RecorderConfig:
     raw = yaml.safe_load(config_path.read_text())
     dataset_raw = dict(raw["dataset"])
     dataset_raw["root"] = Path(dataset_raw["root"]).expanduser()
+    if dataset_raw.get("raw_root") is not None:
+        dataset_raw["raw_root"] = Path(dataset_raw["raw_root"]).expanduser()
     has_camera = "camera" in raw
     has_cameras = "cameras" in raw
     if has_camera == has_cameras:
@@ -94,10 +107,6 @@ def load_config(path: str | Path) -> RecorderConfig:
         else tuple(_load_camera(camera_raw) for camera_raw in raw["cameras"])
     )
     dataset = DatasetConfig(**dataset_raw)
-    for camera in cameras:
-        camera_fps = camera.options.get("fps")
-        if camera_fps is not None and int(camera_fps) != dataset.fps:
-            raise ValueError(f"camera {camera.name!r} fps ({camera_fps}) must equal dataset fps ({dataset.fps})")
     return RecorderConfig(
         control_endpoint=raw.get("control_endpoint", "tcp://127.0.0.1:8560"),
         dataset=dataset,

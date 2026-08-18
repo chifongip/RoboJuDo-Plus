@@ -73,5 +73,24 @@ cameras:
 """
             )
 
+    def test_allows_camera_and_output_fps_to_differ_for_offline_resampling(self):
+        cfg = self._load(
+            """
+dataset:
+  root: ~/record_data/test
+  repo_id: local/test
+  fps: 30
+cameras:
+  - type: ros2
+    name: head_rgb
+    topic: /head/image/compressed
+    fps: 10
+"""
+        )
+
+        self.assertEqual(cfg.dataset.fps, 30)
+        self.assertEqual(cfg.cameras[0].options["fps"], 10)
+
+
 if __name__ == "__main__":
     unittest.main()

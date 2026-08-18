@@ -46,6 +46,7 @@ class Ros2CameraSource(CameraSource):
         self._socket = None
         self._process: subprocess.Popen | None = None
         self._cv2 = None
+        self._validated_compressed_shape = False
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -152,21 +153,41 @@ class Ros2CameraSource(CameraSource):
         header = json.loads(header_bytes)
         message_type = header.get("message_type", self.message_type)
         if message_type == "compressed":
-            image = self._decode_compressed(payload)
+            # Decode only while discovering/validating the shape. The recording hot path preserves
+            # the original JPEG bytes and does not decode then re-encode every frame.
+            image = self._decode_compressed(payload) if not self._validated_compressed_shape else None
+            frame_shape = tuple(image.shape) if image is not None else self._shape
+            compressed_format = str(header.get("format", "jpeg")).lower()
+            if "jpeg" in compressed_format or "jpg" in compressed_format:
+                encoding = "jpeg"
+            elif "png" in compressed_format:
+                encoding = "png"
+            else:
+                encoding = "unknown"
         elif message_type == "raw":
             image = self._decode_raw(header, payload)
+            frame_shape = tuple(image.shape)
+            encoding = None
         else:
             raise ValueError(f"unsupported ROS 2 bridge message type {message_type!r}")
 
-        frame_shape = tuple(image.shape)
         if self._shape is None:
             self._shape = frame_shape
         elif frame_shape != self._shape:
             raise ValueError(f"ROS 2 camera returned shape {frame_shape}, expected {self._shape}")
+        if message_type == "compressed":
+            self._validated_compressed_shape = True
+        receive_timestamp_ns = int(header.get("receive_timestamp_ns", header["timestamp_ns"]))
+        source_timestamp_ns = int(header.get("source_timestamp_ns", receive_timestamp_ns))
         return CameraFrame(
-            image=np.asarray(image, dtype=np.uint8),
-            timestamp_ns=int(header["timestamp_ns"]),
+            image=None if image is None else np.asarray(image, dtype=np.uint8),
+            timestamp_ns=receive_timestamp_ns,
             sequence=int(header["sequence"]),
+            encoded_image=payload if message_type == "compressed" else None,
+            encoding=encoding,
+            source_timestamp_ns=source_timestamp_ns,
+            receive_timestamp_ns=receive_timestamp_ns,
+            image_shape=self._shape,
         )
 
     def read(self, timeout_ms: int) -> CameraFrame | None:

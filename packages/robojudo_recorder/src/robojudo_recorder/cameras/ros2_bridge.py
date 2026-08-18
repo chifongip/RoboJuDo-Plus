@@ -47,11 +47,19 @@ class ImageBridge(Node):
 
     def _on_image(self, message):
         self._sequence += 1
+        received_timestamp_ns = time.monotonic_ns()
+        source_timestamp_ns = int(message.header.stamp.sec) * 1_000_000_000 + int(message.header.stamp.nanosec)
         metadata = {
             "message_type": self._message_type,
             "sequence": self._sequence,
-            "timestamp_ns": time.monotonic_ns(),
+            # Preserve both domains. ``receive`` is comparable to RoboJuDo's monotonic control clock;
+            # ROS source time is retained for diagnostics and deployments with a shared source clock.
+            "timestamp_ns": received_timestamp_ns,
+            "source_timestamp_ns": source_timestamp_ns,
+            "receive_timestamp_ns": received_timestamp_ns,
         }
+        if self._message_type == "compressed":
+            metadata["format"] = message.format
         if self._message_type == "raw":
             metadata.update(
                 height=message.height,

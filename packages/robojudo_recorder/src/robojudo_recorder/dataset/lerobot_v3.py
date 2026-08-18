@@ -180,6 +180,11 @@ class LeRobotV3Writer:
     def episode_open(self) -> bool:
         return bool(self._videos)
 
+    @property
+    def next_episode_index(self) -> int:
+        """Index that will be assigned to the next saved episode."""
+        return self._episode_index
+
     def _features(self) -> dict:
         camera_features = {}
         for name, shape in self.camera_shapes.items():

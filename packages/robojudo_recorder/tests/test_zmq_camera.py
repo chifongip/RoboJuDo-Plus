@@ -53,7 +53,9 @@ class TestZmqCameraSource(unittest.TestCase):
         self.assertEqual(camera.shape, (8, 12, 3))
         self.assertEqual(frame.sequence, 7)
         self.assertEqual(frame.timestamp_ns, 123456)
-        np.testing.assert_allclose(frame.image, image, atol=3)
+        self.assertIsNone(frame.image)
+        self.assertEqual(frame.encoded_image, encoded.tobytes())
+        self.assertEqual(frame.shape, image.shape)
 
 
 if __name__ == "__main__":
