@@ -106,6 +106,52 @@ class Gr00tZmqCtrl(ControllerHook):
         if self._observation_error is not None:
             raise RuntimeError("failed to start GR00T observation publisher") from self._observation_error
 
+    @staticmethod
+    def _prepare_observation_jpeg(frame, cv2, jpeg_quality: int) -> tuple[tuple[int, int, int], bytes]:
+        """Return an RGB shape and JPEG payload for either CameraFrame representation.
+
+        Camera backends may expose decoded RGB pixels in ``image`` or preserve an
+        already-compressed payload in ``encoded_image``. JPEG input is forwarded
+        byte-for-byte; other compressed formats are decoded and converted to JPEG.
+        """
+        encoded_image = getattr(frame, "encoded_image", None)
+        encoding = str(getattr(frame, "encoding", "") or "").lower()
+        if encoded_image is not None and encoding in {"jpeg", "jpg"}:
+            shape = tuple(frame.shape)
+            if len(shape) != 3 or shape[2] != 3:
+                raise ValueError(f"GR00T camera returned invalid RGB shape {shape}")
+            return shape, bytes(encoded_image)
+
+        image = getattr(frame, "image", None)
+        if image is None and encoded_image is not None:
+            compressed = np.frombuffer(encoded_image, dtype=np.uint8)
+            decoded = cv2.imdecode(compressed, cv2.IMREAD_UNCHANGED)
+            if decoded is None:
+                raise ValueError(f"GR00T camera could not decode {encoding or 'compressed'} image")
+            if decoded.ndim == 2:
+                image = cv2.cvtColor(decoded, cv2.COLOR_GRAY2RGB)
+            elif decoded.ndim == 3 and decoded.shape[2] == 4:
+                image = cv2.cvtColor(decoded, cv2.COLOR_BGRA2RGB)
+            elif decoded.ndim == 3 and decoded.shape[2] == 3:
+                image = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+            else:
+                raise ValueError(f"GR00T camera returned invalid decoded shape {decoded.shape}")
+        if image is None:
+            raise ValueError("GR00T camera frame contains neither decoded pixels nor compressed bytes")
+
+        image = np.asarray(image, dtype=np.uint8)
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(f"GR00T camera returned invalid RGB shape {image.shape}")
+        bgr = np.ascontiguousarray(image[:, :, ::-1])
+        ok, encoded = cv2.imencode(
+            ".jpg",
+            bgr,
+            [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality],
+        )
+        if not ok:
+            raise RuntimeError("failed to encode GR00T camera frame as JPEG")
+        return tuple(image.shape), encoded.tobytes()
+
     def _observation_loop(self):
         # Worker flow: camera -> latest joint snapshot + task -> observation PUB.
         camera = None
@@ -161,17 +207,11 @@ class Gr00tZmqCtrl(ControllerHook):
                 joint_timeout_ns = int(self.cfg_ctrl.observation_joint_timeout_s * 1_000_000_000)
                 if now_ns - joint_timestamp_ns > joint_timeout_ns:
                     continue
-                image = np.asarray(frame.image, dtype=np.uint8)
-                if image.ndim != 3 or image.shape[2] != 3:
-                    raise ValueError(f"GR00T camera returned invalid RGB shape {image.shape}")
-                bgr = np.ascontiguousarray(image[:, :, ::-1])
-                ok, encoded = cv2.imencode(
-                    ".jpg",
-                    bgr,
-                    [cv2.IMWRITE_JPEG_QUALITY, self.cfg_ctrl.observation_jpeg_quality],
+                image_shape, jpeg_payload = self._prepare_observation_jpeg(
+                    frame,
+                    cv2,
+                    self.cfg_ctrl.observation_jpeg_quality,
                 )
-                if not ok:
-                    raise RuntimeError("failed to encode GR00T camera frame as JPEG")
 
                 observation_sequence += 1
                 header = {
@@ -185,13 +225,13 @@ class Gr00tZmqCtrl(ControllerHook):
                     "task": self.cfg_ctrl.observation_task,
                     "camera_name": self.cfg_ctrl.camera.name,
                     "encoding": "jpeg",
-                    "shape": list(image.shape),
+                    "shape": list(image_shape),
                     "joint_names": list(self._joint_names),
                     "joint_positions": joint_positions.tolist(),
                 }
                 try:
                     publisher.send_multipart(
-                        [msgpack.packb(header, use_bin_type=True), encoded.tobytes()],
+                        [msgpack.packb(header, use_bin_type=True), jpeg_payload],
                         flags=zmq.NOBLOCK,
                     )
                     self._published_observations += 1

@@ -8,6 +8,7 @@ import cv2
 import msgpack
 import numpy as np
 import zmq
+from robojudo_recorder.cameras.base import CameraFrame
 
 from robojudo.controller.ctrl_cfgs import Gr00tCameraCfg, Gr00tZmqCtrlCfg
 from robojudo.controller.gr00t_zmq_ctrl import Gr00tZmqCtrl
@@ -35,6 +36,45 @@ class FakeCamera:
 
 
 class TestGr00tObservationStream(unittest.TestCase):
+    def test_reuses_an_existing_jpeg_without_reencoding(self):
+        image = np.full((8, 12, 3), [20, 80, 140], dtype=np.uint8)
+        ok, encoded = cv2.imencode(".jpg", np.ascontiguousarray(image[:, :, ::-1]))
+        self.assertTrue(ok)
+        payload = encoded.tobytes()
+        frame = CameraFrame(
+            image=None,
+            encoded_image=payload,
+            encoding="jpeg",
+            image_shape=image.shape,
+            timestamp_ns=1,
+            sequence=1,
+        )
+
+        with patch.object(cv2, "imencode", side_effect=AssertionError("JPEG must not be re-encoded")):
+            shape, prepared = Gr00tZmqCtrl._prepare_observation_jpeg(frame, cv2, jpeg_quality=20)
+
+        self.assertEqual(shape, image.shape)
+        self.assertEqual(prepared, payload)
+
+    def test_converts_non_jpeg_compressed_frames_to_jpeg(self):
+        image = np.full((8, 12, 3), [20, 80, 140], dtype=np.uint8)
+        ok, encoded = cv2.imencode(".png", np.ascontiguousarray(image[:, :, ::-1]))
+        self.assertTrue(ok)
+        frame = CameraFrame(
+            image=None,
+            encoded_image=encoded.tobytes(),
+            encoding="png",
+            image_shape=image.shape,
+            timestamp_ns=1,
+            sequence=1,
+        )
+
+        shape, prepared = Gr00tZmqCtrl._prepare_observation_jpeg(frame, cv2, jpeg_quality=90)
+        decoded = cv2.imdecode(np.frombuffer(prepared, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+        self.assertEqual(shape, image.shape)
+        self.assertEqual(decoded.shape, image.shape)
+
     def test_publishes_camera_and_current_named_joint_positions(self):
         context = zmq.Context.instance()
         observation_endpoint = f"inproc://gr00t-observation-{uuid.uuid4()}"

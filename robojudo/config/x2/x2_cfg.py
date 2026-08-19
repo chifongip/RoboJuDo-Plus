@@ -256,7 +256,7 @@ class x2_gr00t_locomanipulation(x2_locomanipulation):
             camera=Gr00tCameraCfg(
                 type="ros2",
                 options={
-                    "topic": "/aima/hal/sensor/rgbd_head_front/rgb_image/compressed",  # Use compressed image in Sim2Sim
+                    "topic": "/camera/color/image_raw/compressed",  # Use compressed image in Sim2Sim
                     "qos_reliability": "best_effort",
                     "qos_depth": 1,
                     "ros_python_executable": "/usr/bin/python3",
