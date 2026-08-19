@@ -1,22 +1,20 @@
 control_endpoint: tcp://127.0.0.1:8560
 
 dataset:
-  root: record_data/x2_move_box_centerd
-  repo_id: Breeze-park/x2_move_box_center
+  root: record_data/x2_move_box_center_test
+  raw_root: record_data/x2_move_box_center_test_raw
+  repo_id: Breeze-park/x2_move_box_center_test
   fps: 30
   codec: libx264
-  resume: false
-  upload_to_hub: true
-  # repo_id must be e.g. your-user/x2_move_box_center when enabled.
-  hub_private: false
-  hub_commit_message: "Append recorded episode"
+  jpeg_quality: 90
+  resume: true
 
 
 cameras:
   - type: ros2
     name: head_rgb
-    topic: /aima/hal/sensor/rgbd_head_front/rgb_image
-    message_type: raw
+    topic: /camera/color/image_raw/compressed
+    message_type: compressed
     node_name: robojudo_recorder_head_rgb
     qos_reliability: reliable
     qos_depth: 1
@@ -28,4 +26,6 @@ cameras:
 sync:
   clock: receive
   max_control_age_ms: 50
+  max_camera_delta_ms: 50
   poll_timeout_ms: 10
+  throughput_log_interval_s: 5

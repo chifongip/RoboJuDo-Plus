@@ -270,17 +270,27 @@ class x2_gr00t_locomanipulation(x2_locomanipulation):
 class x2_gr00t_locomanipulation_real(x2_gr00t_locomanipulation):
     """X2 GR00T Locomanipulation, Sim2Real through AimDK."""
 
-    env: X2RealEnvCfg = X2RealEnvCfg(dof=X2LocomanipulationEnvDoF())
-    ctrl: list[JoystickCtrlCfg | Gr00tZmqCtrlCfg] = [
-        JoystickCtrlCfg(
+    env: X2RealEnvCfg = X2RealEnvCfg(
+        dof=X2LocomanipulationEnvDoF(),
+        odometry_type="NONE",
+    )
+    ctrl: list[RosJoystickCtrlCfg | Gr00tZmqCtrlCfg] = [
+        RosJoystickCtrlCfg(
+            profile="xbox",
+            topic="/joy",
+            timeout_s=0.5,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
                 "Y": "[JOINT_DEFAULT]",
                 "X": "[RL_DEFAULT]",
                 "Start": "[UPPER_BODY_TOGGLE]",
+                "LB+RB+Start": "[RECORD_START_STOP]",
+                "LB+RB+Back": "[RECORD_PAUSE_RESUME]",
+                "LB+RB+X": "[RECORD_CONFIRM_SAVE]",
+                "LB+RB+B": "[RECORD_DISCARD]",
                 "LB+RB+A": "[SHUTDOWN]",
-            }
+            },
         ),
         Gr00tZmqCtrlCfg(
             joint_names=X2_ARM_JOINT_NAMES,
@@ -291,7 +301,7 @@ class x2_gr00t_locomanipulation_real(x2_gr00t_locomanipulation):
             camera=Gr00tCameraCfg(
                 type="ros2",
                 options={
-                    "topic": "/aima/hal/sensor/rgbd_head_front/rgb_image/",
+                    "topic": "/camera/color/image_raw/compressed",
                     "qos_reliability": "best_effort",
                     "qos_depth": 1,
                     "ros_python_executable": "/usr/bin/python3",
