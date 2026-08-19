@@ -105,10 +105,15 @@ def main():
                 if not cfg.env.is_sim:
                     logger.error(f"Warning: frame drop -> {time_diff}")
                     if time_diff < -0.2:
-                        logger.critical("Exiting due to excessive frame drop")
-                        pipeline.env.shutdown()
-                        time.sleep(10)
-                        break
+                        if cfg.env.env_type == "AgiBotCppEnv":
+                            logger.critical(
+                                "Excessive X2 frame drop; allowing the AimDK hard watchdog to resolve the fault"
+                            )
+                        else:
+                            logger.critical("Exiting due to excessive frame drop")
+                            pipeline.env.shutdown()
+                            time.sleep(10)
+                            break
 
 
 if __name__ == "__main__":
