@@ -53,8 +53,29 @@ class TestX2Integration(unittest.TestCase):
         self.assertIn("executor_->cancel()", source)
         self.assertNotIn("spin_some()", source)
 
+    def test_aimdk_safety_state_machine_uses_hold_before_latched_damping(self):
+        package = Path(__file__).parents[1] / "packages" / "aimdk_cpp" / "src"
+        header = (package / "aimdk_controller.hpp").read_text(encoding="utf-8")
+        source = (package / "aimdk_controller.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("enum class AimdkSafetyState { ACTIVE, HOLD, DAMPING }", header)
+        self.assertIn("command_damping_timeout", header)
+        self.assertIn("state_damping_timeout", header)
+        self.assertIn("odometry_damping_timeout", header)
+        self.assertIn("enter_hold_locked", source)
+        self.assertIn("enter_damping_locked", source)
+        self.assertIn("publish_hold_commands", source)
+        self.assertIn("state_recovery_confirmed_", source)
+        self.assertIn("command_generation_ <= recovery_command_generation_", source)
+        self.assertIn("command_mode_ != AimdkCommandMode::POSITION", source)
+        self.assertIn("Check the previous command's age", source)
+        self.assertIn("Ignoring invalid AimDK joint sample", source)
+        self.assertIn("Ignoring invalid AimDK IMU sample", source)
+        self.assertIn("command_joint_names_ = std::move(validated_joint_names)", source)
+
     def test_x2_configs_construct(self):
         from robojudo.config.x2 import x2, x2_real
+        from robojudo.config.x2.env.x2_real_env_cfg import X2AimdkCfg
 
         sim_cfg = x2()
         real_cfg = x2_real()
@@ -71,7 +92,10 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(real_cfg.env.aimdk.control_dt, 0.02)
         self.assertEqual(real_cfg.env.aimdk.publish_dt, 0.002)
         self.assertEqual(real_cfg.env.aimdk.command_timeout, 0.1)
+        self.assertEqual(real_cfg.env.aimdk.command_damping_timeout, 0.5)
         self.assertEqual(real_cfg.env.aimdk.state_timeout, 0.1)
+        self.assertEqual(real_cfg.env.aimdk.state_damping_timeout, 0.5)
+        self.assertEqual(real_cfg.env.aimdk.odometry_damping_timeout, 0.5)
         self.assertEqual(real_cfg.env.odometry_type, "NONE")
         self.assertEqual(real_cfg.env.aimdk.odometry_topic, "/aima/mc/leg_odometry")
         self.assertTrue(real_cfg.env.update_with_fk)
@@ -93,6 +117,19 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(len(real_cfg.ctrl), 1)
         self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")
         self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
+        with self.assertRaisesRegex(ValueError, "damping timeout must not be shorter"):
+            X2AimdkCfg(command_timeout=0.2, command_damping_timeout=0.1)
+        timeout_fields = (
+            "command_timeout",
+            "command_damping_timeout",
+            "state_timeout",
+            "state_damping_timeout",
+            "odometry_timeout",
+            "odometry_damping_timeout",
+        )
+        for field in timeout_fields:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                X2AimdkCfg(**{field: float("nan")})
         self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
 
     def test_x2_real_odometry_configuration_rejects_an_empty_aimdk_topic(self):
@@ -910,10 +947,18 @@ class TestX2Integration(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "odometry_topic must not be empty"):
             AimdkController(invalid_odometry_cfg)
 
+        invalid_timeout_cfg = dict(cfg, command_damping_timeout=cfg["command_timeout"] / 2)
+        with self.assertRaisesRegex(ValueError, "damping timeouts"):
+            AimdkController(invalid_timeout_cfg)
+
         controller = AimdkController(cfg)
         try:
             self.assertTrue(controller.self_check(0.0))
             self.assertTrue(controller.state_is_fresh(cfg_env.aimdk.state_timeout))
+            safety_status = controller.get_safety_status()
+            self.assertEqual(safety_status.state, "ACTIVE")
+            self.assertEqual(safety_status.fault, "NONE")
+            self.assertFalse(safety_status.latched)
             report = controller.get_state_freshness_report(cfg_env.aimdk.state_timeout)
             self.assertFalse(report.required_streams_fresh)
             self.assertIn("imu_missing", report.reasons)

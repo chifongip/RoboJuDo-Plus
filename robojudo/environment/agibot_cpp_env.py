@@ -49,6 +49,7 @@ class AgiBotCppEnv(Environment):
         self.aimdk = None
         self._control_joint_names: set[str] = set()
         self._last_clamp_log_time = 0.0
+        self._last_safety_state: str | None = None
         super().__init__(cfg_env=cfg_env, device=device)
         self._validate_gains(self.stiffness, self.damping)
         self._last_odometry_sequence: int | None = None
@@ -83,6 +84,14 @@ class AgiBotCppEnv(Environment):
             }
         )
         self.aimdk = AimdkController(cfg)
+        required_safety_methods = ("get_state_freshness_report", "get_safety_status", "arm_position_control")
+        missing_safety_methods = [name for name in required_safety_methods if not hasattr(self.aimdk, name)]
+        if missing_safety_methods:
+            self.aimdk.shutdown()
+            raise RuntimeError(
+                "The installed aimdk_cpp binding is missing X2 safety state-machine APIs "
+                f"{missing_safety_methods}; rebuild it with `python submodule_install.py aimdk`"
+            )
         self._odometry_type = cfg_env.odometry_type
         self.self_check()
 
@@ -121,11 +130,34 @@ class AgiBotCppEnv(Environment):
             return
 
         if self.enabled:
-            report = self.aimdk.get_state_freshness_report(self.cfg_env.aimdk.state_timeout)
+            state_damping_timeout = getattr(
+                self.cfg_env.aimdk, "state_damping_timeout", self.cfg_env.aimdk.state_timeout
+            )
+            odometry_damping_timeout = getattr(
+                self.cfg_env.aimdk,
+                "odometry_damping_timeout",
+                getattr(self.cfg_env.aimdk, "odometry_timeout", state_damping_timeout),
+            )
+            report = self.aimdk.get_state_freshness_report(state_damping_timeout, odometry_damping_timeout)
             if not report.required_streams_fresh:
-                self.command_damping(self.cfg_env.aimdk.shutdown_damping)
                 detail = format_state_freshness_report(report)
-                raise RuntimeError(f"AgiBotCppEnv state became stale ({detail}); damping commands were sent.")
+                raise RuntimeError(f"AgiBotCppEnv state exceeded its hard timeout ({detail}); damping is latched.")
+
+            get_safety_status = getattr(self.aimdk, "get_safety_status", None)
+            if get_safety_status is not None:
+                safety_status = get_safety_status()
+                safety_state = safety_status.state
+                if safety_state != getattr(self, "_last_safety_state", None):
+                    if safety_state == "HOLD":
+                        logger.warning("AimDK safety hold entered: %s", safety_status.fault)
+                    elif safety_state == "ACTIVE" and getattr(self, "_last_safety_state", None) == "HOLD":
+                        logger.info("AimDK safety hold recovered")
+                    self._last_safety_state = safety_state
+                if safety_status.latched:
+                    raise RuntimeError(
+                        "AgiBotCppEnv safety damping is latched "
+                        f"({safety_status.fault}); re-arm position control before sending targets."
+                    )
 
         state = self.aimdk.get_robot_state()
         self._dof_pos = np.asarray(state.motor_state.q, dtype=np.float32)

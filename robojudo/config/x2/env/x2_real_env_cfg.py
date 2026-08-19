@@ -1,5 +1,7 @@
 from typing import Literal
 
+from pydantic import Field
+
 from robojudo.environment.env_cfgs import AgiBotEnvCfg
 
 from .x2_env_cfg import (
@@ -12,20 +14,23 @@ from .x2_env_cfg import (
 
 
 class X2AimdkCfg(AgiBotEnvCfg.AimdkCfg):
-    control_dt: float = 0.02
-    publish_dt: float = 0.002
-    command_timeout: float = 0.1
-    shutdown_damping: float = 5.0
-    shutdown_publish_duration: float = 0.2
-    state_timeout: float = 0.1
-    odometry_timeout: float = 0.1
+    control_dt: float = Field(default=0.02, gt=0.0, allow_inf_nan=False)
+    publish_dt: float = Field(default=0.002, gt=0.0, allow_inf_nan=False)
+    command_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+    command_damping_timeout: float = Field(default=0.5, gt=0.0, allow_inf_nan=False)
+    shutdown_damping: float = Field(default=5.0, ge=0.0, allow_inf_nan=False)
+    shutdown_publish_duration: float = Field(default=0.2, ge=0.0, allow_inf_nan=False)
+    state_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+    state_damping_timeout: float = Field(default=0.5, gt=0.0, allow_inf_nan=False)
+    odometry_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+    odometry_damping_timeout: float = Field(default=0.5, gt=0.0, allow_inf_nan=False)
     # AimDK calls this the "torso" IMU, but its deployment documentation
     # identifies it as the hip/pelvis IMU used for RL base observations.
     base_imu_topic: str = "/aima/hal/imu/torso/state"
 
 
 class X2SuperOdomCfg(X2AimdkCfg):
-    odometry_timeout: float = 0.3
+    odometry_timeout: float = Field(default=0.3, gt=0.0, allow_inf_nan=False)
     odometry_topic: str = "/laser_odometry"
     odometry_parent_frame: str = "map"
     odometry_child_frame: str = "lidar_chest_front"
