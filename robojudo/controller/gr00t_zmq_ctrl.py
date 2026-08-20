@@ -2,6 +2,7 @@ import logging
 import math
 import threading
 import time
+import uuid
 from numbers import Integral, Real
 
 import msgpack
@@ -53,10 +54,15 @@ class Gr00tZmqCtrl(ControllerHook):
         self._latest_positions: dict[str, float] = {}
         self._latest_locomotion_command: np.ndarray | None = None
         self._latest_sequence: int | None = None
+        self._latest_command_stream_id: str | None = None
+        self._latest_command_session: int | None = None
         self._last_received_at: float | None = None
         self._last_invalid_log_at = float("-inf")
         self._observation_snapshot_lock = threading.Lock()
         self._observation_snapshot: tuple[int, np.ndarray] | None = None
+        self._observation_stream_id = uuid.uuid4().hex
+        self._takeover_enabled = False
+        self._control_session = 0
         self._observation_stop = threading.Event()
         self._observation_ready = threading.Event()
         self._observation_thread: threading.Thread | None = None
@@ -75,7 +81,11 @@ class Gr00tZmqCtrl(ControllerHook):
         self._latest_positions.clear()
         self._latest_locomotion_command = None
         self._latest_sequence = None
+        self._latest_command_stream_id = None
+        self._latest_command_session = None
         self._last_received_at = None
+        with self._observation_snapshot_lock:
+            self._takeover_enabled = False
         for _ in range(100):
             try:
                 self._socket.recv(flags=zmq.NOBLOCK)
@@ -105,6 +115,22 @@ class Gr00tZmqCtrl(ControllerHook):
             )
         if self._observation_error is not None:
             raise RuntimeError("failed to start GR00T observation publisher") from self._observation_error
+
+    def set_takeover_enabled(self, enabled: bool) -> bool:
+        """Publish takeover state and advance the session on each enable edge."""
+        enabled = bool(enabled)
+        with self._observation_snapshot_lock:
+            changed = enabled != self._takeover_enabled
+            if enabled and not self._takeover_enabled:
+                self._control_session += 1
+            self._takeover_enabled = enabled
+        if changed:
+            self._latest_positions.clear()
+            self._latest_locomotion_command = None
+            self._latest_command_stream_id = None
+            self._latest_command_session = None
+            self._last_received_at = None
+        return changed
 
     @staticmethod
     def _prepare_observation_jpeg(frame, cv2, jpeg_quality: int) -> tuple[tuple[int, int, int], bytes]:
@@ -200,6 +226,8 @@ class Gr00tZmqCtrl(ControllerHook):
                     continue
                 with self._observation_snapshot_lock:
                     snapshot = self._observation_snapshot
+                    takeover_enabled = self._takeover_enabled
+                    control_session = self._control_session
                 if snapshot is None:
                     continue
 
@@ -216,6 +244,9 @@ class Gr00tZmqCtrl(ControllerHook):
                 observation_sequence += 1
                 header = {
                     "protocol_version": 1,
+                    "stream_id": self._observation_stream_id,
+                    "control_session": control_session,
+                    "takeover_enabled": takeover_enabled,
                     "sequence": observation_sequence,
                     "camera_sequence": int(frame.sequence),
                     "timestamp_ns": int(frame.timestamp_ns),
@@ -280,7 +311,9 @@ class Gr00tZmqCtrl(ControllerHook):
             raise ValueError("locomotion_command values must be finite")
         return command
 
-    def _decode_message(self, message) -> tuple[dict[str, float], np.ndarray, int | None]:
+    def _decode_message(
+        self, message
+    ) -> tuple[dict[str, float], np.ndarray, int | None, str, int]:
         if not isinstance(message, dict):
             raise ValueError("GR00T message must be an object")
         if "positions" not in message or "locomotion_command" not in message:
@@ -293,7 +326,17 @@ class Gr00tZmqCtrl(ControllerHook):
             if isinstance(sequence, bool) or not isinstance(sequence, Integral) or sequence < 0:
                 raise ValueError("sequence must be a non-negative integer")
             sequence = int(sequence)
-        return positions, locomotion_command, sequence
+        stream_id = message.get("stream_id")
+        if not isinstance(stream_id, str) or not stream_id.strip():
+            raise ValueError("stream_id must be a non-empty string")
+        control_session = message.get("control_session")
+        if (
+            isinstance(control_session, bool)
+            or not isinstance(control_session, Integral)
+            or control_session < 0
+        ):
+            raise ValueError("control_session must be a non-negative integer")
+        return positions, locomotion_command, sequence, stream_id, int(control_session)
 
     def _log_invalid_message(self, exc: Exception, now: float):
         if now - self._last_invalid_log_at >= 1.0:
@@ -311,9 +354,27 @@ class Gr00tZmqCtrl(ControllerHook):
                 continue
 
             try:
-                positions, locomotion_command, sequence = self._decode_message(message)
+                positions, locomotion_command, sequence, stream_id, control_session = (
+                    self._decode_message(message)
+                )
             except ValueError as exc:
                 self._log_invalid_message(exc, now)
+                continue
+            with self._observation_snapshot_lock:
+                takeover_enabled = self._takeover_enabled
+                expected_session = self._control_session
+            if (
+                not takeover_enabled
+                or stream_id != self._observation_stream_id
+                or control_session != expected_session
+            ):
+                self._log_invalid_message(
+                    ValueError(
+                        f"command session {stream_id}:{control_session} does not match "
+                        f"active session {self._observation_stream_id}:{expected_session}"
+                    ),
+                    now,
+                )
                 continue
             stream_is_fresh = (
                 self._last_received_at is not None and now - self._last_received_at <= self.cfg_ctrl.timeout_s
@@ -333,6 +394,8 @@ class Gr00tZmqCtrl(ControllerHook):
             self._latest_positions = positions
             self._latest_locomotion_command = locomotion_command
             self._latest_sequence = sequence
+            self._latest_command_stream_id = stream_id
+            self._latest_command_session = control_session
             self._last_received_at = now
 
     def get_data(self):
@@ -340,7 +403,16 @@ class Gr00tZmqCtrl(ControllerHook):
         self._receive_available(now)
         has_received = self._last_received_at is not None
         age_s = None if self._last_received_at is None else now - self._last_received_at
-        fresh = age_s is not None and age_s <= self.cfg_ctrl.timeout_s
+        with self._observation_snapshot_lock:
+            takeover_enabled = self._takeover_enabled
+            control_session = self._control_session
+        fresh = bool(
+            takeover_enabled
+            and age_s is not None
+            and age_s <= self.cfg_ctrl.timeout_s
+            and self._latest_command_stream_id == self._observation_stream_id
+            and self._latest_command_session == control_session
+        )
         observation_error = getattr(self, "_observation_error", None)
         observation_ready = getattr(self, "_observation_ready", None)
         return {
@@ -349,6 +421,8 @@ class Gr00tZmqCtrl(ControllerHook):
                 None if self._latest_locomotion_command is None else self._latest_locomotion_command.copy()
             ),
             "sequence": self._latest_sequence,
+            "stream_id": self._observation_stream_id,
+            "control_session": control_session,
             "has_received": has_received,
             "fresh": fresh,
             "age_s": age_s,

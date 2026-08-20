@@ -1,6 +1,7 @@
+import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import zmq
@@ -36,13 +37,21 @@ class TestGr00tZmqCtrl(unittest.TestCase):
         controller._latest_positions = {}
         controller._latest_locomotion_command = None
         controller._latest_sequence = None
+        controller._latest_command_stream_id = None
+        controller._latest_command_session = None
         controller._last_received_at = None
         controller._last_invalid_log_at = float("-inf")
+        controller._observation_snapshot_lock = threading.Lock()
+        controller._observation_stream_id = "test-stream"
+        controller._takeover_enabled = True
+        controller._control_session = 1
         return controller
 
     def message(self, *, sequence=1, command=None):
         return {
             "sequence": sequence,
+            "stream_id": "test-stream",
+            "control_session": 1,
             "positions": {"left_arm": 0.2, "right_arm": -0.3},
             "locomotion_command": command or [0.5, -0.1, 0.2, 0.64],
         }
@@ -85,6 +94,26 @@ class TestGr00tZmqCtrl(unittest.TestCase):
             data = controller.get_data()
         self.assertTrue(data["fresh"])
         self.assertEqual(data["sequence"], 0)
+
+    def test_rejects_commands_from_an_old_control_session(self):
+        controller = self.make_controller([self.message(sequence=1)])
+        with patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=10.0):
+            self.assertTrue(controller.get_data()["fresh"])
+
+        controller.set_takeover_enabled(False)
+        controller.set_takeover_enabled(True)
+        old_session_message = self.message(sequence=2)
+        controller._socket = FakeZmqSocket([old_session_message])
+        with patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=10.1):
+            self.assertFalse(controller.get_data()["fresh"])
+
+        new_session_message = self.message(sequence=3)
+        new_session_message["control_session"] = 2
+        controller._socket = FakeZmqSocket([new_session_message])
+        with patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=10.2):
+            data = controller.get_data()
+        self.assertTrue(data["fresh"])
+        self.assertEqual(data["control_session"], 2)
 
     def test_requires_complete_positions(self):
         controller = self.make_controller()
@@ -222,16 +251,27 @@ class TestX2Gr00tLocomanipulationPipeline(unittest.TestCase):
         pipeline.mode = ControlMode.RL_DEFAULT
         pipeline._upper_body_enabled = True
         pipeline._upper_body_control_available = lambda: True
+        set_takeover_enabled = Mock()
+        set_takeover_enabled.return_value = False
+        pipeline.ctrl_manager = SimpleNamespace(
+            controllers={
+                "Gr00tZmqCtrl": SimpleNamespace(
+                    inst=SimpleNamespace(set_takeover_enabled=set_takeover_enabled)
+                )
+            }
+        )
         stream = {"fresh": True, "joint_positions": {"left_arm": 0.2}}
         ctrl_data = {"Gr00tZmqCtrl": stream}
 
         prepared = pipeline._prepare_gr00t_stream(ctrl_data)
         self.assertTrue(prepared["takeover_enabled"])
         self.assertIs(ctrl_data["UpperBodyZmqCtrl"], stream)
+        set_takeover_enabled.assert_called_once_with(True)
 
         pipeline.mode = ControlMode.JOINT_DEFAULT
         pipeline._prepare_gr00t_stream(ctrl_data)
         self.assertFalse(stream["takeover_enabled"])
+        set_takeover_enabled.assert_called_with(False)
 
     def test_arm_target_is_rate_limited(self):
         pipeline = X2Gr00tLocomanipulationPipeline.__new__(X2Gr00tLocomanipulationPipeline)

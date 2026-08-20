@@ -1,3 +1,4 @@
+import threading
 import time
 import unittest
 import uuid
@@ -117,6 +118,10 @@ class TestGr00tObservationStream(unittest.TestCase):
             )
 
             self.assertEqual(header["protocol_version"], 1)
+            self.assertIsInstance(header["stream_id"], str)
+            self.assertTrue(header["stream_id"])
+            self.assertEqual(header["control_session"], 0)
+            self.assertFalse(header["takeover_enabled"])
             self.assertEqual(header["profile"], "test_robot")
             self.assertEqual(header["task"], "test task")
             self.assertEqual(header["camera_name"], "ego_view")
@@ -130,6 +135,27 @@ class TestGr00tObservationStream(unittest.TestCase):
             subscriber.close(linger=0)
 
         self.assertTrue(camera.closed)
+
+    def test_takeover_enable_edges_advance_control_session(self):
+        controller = Gr00tZmqCtrl.__new__(Gr00tZmqCtrl)
+        controller._observation_snapshot_lock = threading.Lock()
+        controller._takeover_enabled = False
+        controller._control_session = 0
+        controller._latest_positions = {}
+        controller._latest_locomotion_command = None
+        controller._latest_command_stream_id = None
+        controller._latest_command_session = None
+        controller._last_received_at = None
+
+        controller.set_takeover_enabled(False)
+        self.assertTrue(controller.set_takeover_enabled(True))
+        self.assertFalse(controller.set_takeover_enabled(True))
+        self.assertTrue(controller._takeover_enabled)
+        self.assertEqual(controller._control_session, 1)
+
+        self.assertTrue(controller.set_takeover_enabled(False))
+        controller.set_takeover_enabled(True)
+        self.assertEqual(controller._control_session, 2)
 
 
 if __name__ == "__main__":
