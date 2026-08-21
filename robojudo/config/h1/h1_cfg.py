@@ -30,8 +30,8 @@ class h1(RlPipelineCfg):
     env: H1MujocoEnvCfg = H1MujocoEnvCfg()
 
     ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [
-        JoystickCtrlCfg(),
-        KeyboardCtrlCfg(),
+        JoystickCtrlCfg(velocity_priority=300),
+        KeyboardCtrlCfg(velocity_priority=200),
     ]
 
     policy: H1UnitreePolicyCfg = H1UnitreePolicyCfg()
@@ -72,11 +72,13 @@ class h1_switch(RlMultiPolicyPipelineCfg):
 
     ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers_extra={
                 "Key.tab": "[POLICY_TOGGLE]",
             }
         ),
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers_extra={
                 "L1+Y": "[POLICY_TOGGLE]",
             }

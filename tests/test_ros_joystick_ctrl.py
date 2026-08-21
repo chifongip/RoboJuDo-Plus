@@ -194,11 +194,13 @@ class TestRosJoystickCtrl(unittest.TestCase):
                 fresh = controller.get_data()
         self.assertEqual(fresh["button_event"][0]["name"], "A")
         self.assertTrue(fresh["button_event"][0]["pressed"])
+        self.assertTrue(fresh["fresh"])
 
         with patch("robojudo.controller.ros_joystick_ctrl.time.monotonic", return_value=2.0):
             with patch("robojudo.controller.ros_joystick_ctrl.time.time", return_value=201.0):
                 stale = controller.get_data()
         self.assertEqual(stale["axes"], neutral_axes())
+        self.assertFalse(stale["fresh"])
         self.assertEqual([(event["name"], event["pressed"]) for event in stale["button_event"]], [("A", False)])
 
         with patch("robojudo.controller.ros_joystick_ctrl.time.monotonic", return_value=3.0):

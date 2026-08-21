@@ -29,8 +29,8 @@ class h1_dev(RlPipelineCfg):
     env: H1MujocoEnvCfg = H1MujocoEnvCfg()
 
     ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [
-        JoystickCtrlCfg(),
-        KeyboardCtrlCfg(),
+        JoystickCtrlCfg(velocity_priority=300),
+        KeyboardCtrlCfg(velocity_priority=200),
     ]
 
     policy: H1SmoothPolicyCfg = H1SmoothPolicyCfg()

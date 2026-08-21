@@ -1,7 +1,7 @@
 from robojudo.utils.module_registry import Registry
 
 from .base_ctrl import Controller, ControllerHook
-from .ctrl_cfgs import CtrlCfg
+from .ctrl_cfgs import CtrlCfg, VelocitySourceCfg
 from .ctrl_manager import CtrlManager
 
 ctrl_registry = Registry(package="robojudo.controller", base_class=Controller)
@@ -11,6 +11,7 @@ __all__ = [
     "ControllerHook",
     "CtrlCfg",
     "CtrlManager",
+    "VelocitySourceCfg",
     "ctrl_registry",
 ]
 

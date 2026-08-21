@@ -26,6 +26,7 @@ class JoystickCtrl(Controller):
         self._install_recording_triggers()
         self.onhold_buttons = set()
         self.used_combination_buttons = set()
+        self._last_received_at: float | None = None
         while not self.state_queue.empty():
             try:
                 self.state_queue.get_nowait()
@@ -54,6 +55,7 @@ class JoystickCtrl(Controller):
         try:
             state = self.state_queue.get_nowait()
             self.last_state = state.copy()
+            self._last_received_at = time.monotonic()
         except Empty:
             state = self.last_state
 
@@ -72,10 +74,15 @@ class JoystickCtrl(Controller):
     def get_data(self):
         state = self.get_state()
         events = self.get_events()
+        now = time.monotonic()
+        age_s = None if self._last_received_at is None else now - self._last_received_at
+        fresh = age_s is not None and age_s <= self.cfg_ctrl.timeout_s
 
         return {
-            "axes": state["axes"],
+            "axes": state["axes"] if fresh else {name: 0.0 for name in self.axes_names},
             "button_event": events,
+            "fresh": fresh,
+            "age_s": age_s,
         }
 
     def process_triggers(self, ctrl_data):
