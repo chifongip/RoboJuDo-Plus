@@ -134,3 +134,4 @@ benchmark_results/
 captures/
 MUJOCO_LOG.TXT
 assets/resources
+record_data/
