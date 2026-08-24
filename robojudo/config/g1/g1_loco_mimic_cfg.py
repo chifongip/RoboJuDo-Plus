@@ -91,6 +91,7 @@ def _g1_locomanipulation_mimic_policies(pad_missing_dofs: bool):
 def _g1_locomanipulation_locomimic_sim_ctrl(joint_names: list[str]):
     return [
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -107,6 +108,7 @@ def _g1_locomanipulation_locomimic_sim_ctrl(joint_names: list[str]):
             }
         ),
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers_extra={
                 "k": "[PASSIVE_DEFAULT]",
                 "l": "[DAMPING_DEFAULT]",
@@ -315,8 +317,9 @@ class g1_locomimic_asap(G1RlLocoMimicPipelineCfg):
     robot: str = "g1"
     env: G1MujocoEnvCfg = G1MujocoEnvCfg(forward_kinematic=None, update_with_fk=False, born_place_align=True)
 
-    ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [  # note: the ranking of controllers matters
+    ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers={
                 "i": "[SIM_REBORN]",
                 "o": "[SHUTDOWN]",
@@ -327,6 +330,7 @@ class g1_locomimic_asap(G1RlLocoMimicPipelineCfg):
             }
         ),
         # JoystickCtrlCfg(
+        #     velocity_priority=300,
         #     combination_init_buttons=[],
         #     triggers={
         #         "A": "[SHUTDOWN]",
@@ -430,8 +434,9 @@ class g1_locomimic_asap_full(G1RlLocoMimicPipelineCfg):
     robot: str = "g1"
     env: G1MujocoEnvCfg = G1MujocoEnvCfg(forward_kinematic=None, update_with_fk=False, born_place_align=True)
 
-    ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [  # note: the ranking of controllers matters
+    ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers={
                 "i": "[SIM_REBORN]",
                 "o": "[SHUTDOWN]",

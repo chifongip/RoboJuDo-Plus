@@ -62,9 +62,9 @@ class g1(RlPipelineCfg):
     # env: G1_23MujocoEnvCfg = G1_23MujocoEnvCfg()
     # env: G1_12MujocoEnvCfg = G1_12MujocoEnvCfg()
 
-    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [  # note: the ranking of controllers matters
-        JoystickCtrlCfg(),
-        # KeyboardCtrlCfg(),
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [
+        JoystickCtrlCfg(velocity_priority=300),
+        # KeyboardCtrlCfg(velocity_priority=200),
     ]
 
     policy: G1UnitreePolicyCfg = G1UnitreePolicyCfg()
@@ -102,8 +102,8 @@ class g1_zmq(g1):
     """Unitree G1 policy with opt-in ZMQ velocity control, Sim2Sim."""
 
     ctrl: list[VelocityZmqCtrlCfg | JoystickCtrlCfg] = [
-        VelocityZmqCtrlCfg(),
-        JoystickCtrlCfg(),
+        VelocityZmqCtrlCfg(velocity_priority=100),
+        JoystickCtrlCfg(velocity_priority=300),
     ]
 
 
@@ -112,8 +112,8 @@ class g1_real_zmq(g1_real):
     """Unitree G1 policy with ZMQ velocity control and remote fallback, Sim2Real."""
 
     ctrl: list[VelocityZmqCtrlCfg | UnitreeCtrlCfg] = [
-        VelocityZmqCtrlCfg(),
-        UnitreeCtrlCfg(),
+        VelocityZmqCtrlCfg(velocity_priority=100),
+        UnitreeCtrlCfg(velocity_priority=300),
     ]
 
 
@@ -128,8 +128,8 @@ class g1_amp_recovery(RlPipelineCfg):
         sim_decimation=4,
     )
     ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
-        KeyboardCtrlCfg(),
-        JoystickCtrlCfg(),
+        KeyboardCtrlCfg(velocity_priority=200),
+        JoystickCtrlCfg(velocity_priority=300),
     ]
     policy: G1AmpRecoveryPolicyCfg = G1AmpRecoveryPolicyCfg()
 
@@ -145,8 +145,8 @@ class g1_23_amp_recovery(RlPipelineCfg):
         sim_decimation=4,
     )
     ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
-        KeyboardCtrlCfg(),
-        JoystickCtrlCfg(),
+        KeyboardCtrlCfg(velocity_priority=200),
+        JoystickCtrlCfg(velocity_priority=300),
     ]
     policy: G1_23AmpRecoveryPolicyCfg = G1_23AmpRecoveryPolicyCfg()
 
@@ -193,12 +193,14 @@ class g1_locomimic(RlLocoMimicPipelineCfg):
 
     ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers_extra={
                 "]": "[POLICY_LOCO]",
                 "[": "[POLICY_MIMIC]",
             }
         ),
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers_extra={
                 "RB+Down": "[POLICY_LOCO]",
                 "RB+Up": "[POLICY_MIMIC]",
@@ -220,6 +222,7 @@ def _g1_locomanipulation_sim_ctrl(
 ) -> list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg]:
     return [
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -231,6 +234,7 @@ def _g1_locomanipulation_sim_ctrl(
             }
         ),
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers={
                 "k": "[PASSIVE_DEFAULT]",
                 "l": "[DAMPING_DEFAULT]",
@@ -475,9 +479,12 @@ class g1_asap(RlPipelineCfg):
     robot: str = "g1"
     env: G1MujocoEnvCfg = G1MujocoEnvCfg(forward_kinematic=None, update_with_fk=False, born_place_align=True)
 
-    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [  # note: the ranking of controllers matters
-        # JoystickCtrlCfg(),
-        KeyboardCtrlCfg(triggers={"i": "[SIM_REBORN]", "o": "[SHUTDOWN]", "r": "[MOTION_RESET]"}),
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [
+        # JoystickCtrlCfg(velocity_priority=300),
+        KeyboardCtrlCfg(
+            velocity_priority=200,
+            triggers={"i": "[SIM_REBORN]", "o": "[SHUTDOWN]", "r": "[MOTION_RESET]"},
+        ),
     ]
 
     policy: G1AsapPolicyCfg = G1AsapPolicyCfg()
@@ -507,9 +514,10 @@ class g1_asap_loco(RlPipelineCfg):
     robot: str = "g1"
     env: G1MujocoEnvCfg = G1MujocoEnvCfg(forward_kinematic=None, update_with_fk=False, born_place_align=False)
 
-    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [  # note: the ranking of controllers matters
-        # JoystickCtrlCfg(),
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [
+        # JoystickCtrlCfg(velocity_priority=300),
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers={
                 "i": "[SIM_REBORN]",
                 "o": "[SHUTDOWN]",
@@ -573,6 +581,7 @@ class g1_switch_beyondmimic(RlMultiPolicyPipelineCfg):
     env: G1MujocoEnvCfg = G1MujocoEnvCfg()
     ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers_extra={
                 "Key.tab": "[POLICY_TOGGLE]",
                 "!": "[POLICY_SWITCH],0",  # note: with shift
@@ -582,6 +591,7 @@ class g1_switch_beyondmimic(RlMultiPolicyPipelineCfg):
             }
         ),
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers_extra={
                 "RB+Down": "[POLICY_SWITCH],0",
                 "RB+Left": "[POLICY_SWITCH],1",

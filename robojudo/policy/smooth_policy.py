@@ -1,5 +1,6 @@
 import numpy as np
 
+from robojudo.controller.velocity_source import get_pressed_velocity_keys, get_selected_velocity_source
 from robojudo.policy import Policy, policy_registry
 from robojudo.policy.policy_cfgs import SmoothPolicyCfg
 from robojudo.policy.utils.velocity_command import clip_velocity, get_fresh_zmq_velocity
@@ -37,29 +38,26 @@ class SmoothPolicy(Policy):
 
     def _get_commands(self, ctrl_data):
         commands = np.array(self.commands_map)[:, 1].copy()  # default commands
-        zmq_configured = False
-        selected = False
-
-        for key in ctrl_data.keys():
-            if key == "VelocityZmqCtrl":
-                zmq_configured = True
-                velocity = get_fresh_zmq_velocity(ctrl_data[key])
-                if velocity is None:
-                    continue
-                commands = clip_velocity(velocity, self.commands_map[:3])
-                selected = True
-                break
-            if key in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
-                axes = ctrl_data[key]["axes"]
-                lx, ly, rx, _ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]
-
-                commands[0] = command_remap(ly, self.commands_map[0])
-                commands[1] = command_remap(lx, self.commands_map[1])
-                commands[2] = command_remap(rx, self.commands_map[2])
-                selected = True
-                break
-
-        if zmq_configured and not selected:
+        selected = get_selected_velocity_source(ctrl_data)
+        if selected == "VelocityZmqCtrl":
+            velocity = get_fresh_zmq_velocity(ctrl_data[selected])
+            commands[:3] = 0.0 if velocity is None else clip_velocity(velocity, self.commands_map[:3])
+        elif selected in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
+            axes = ctrl_data[selected]["axes"]
+            lx, ly, rx = axes["LeftX"], axes["LeftY"], axes["RightX"]
+            commands[0] = command_remap(ly, self.commands_map[0])
+            commands[1] = command_remap(lx, self.commands_map[1])
+            commands[2] = command_remap(rx, self.commands_map[2])
+        elif selected == "KeyboardCtrl":
+            pressed = get_pressed_velocity_keys(ctrl_data[selected])
+            values = [
+                1.5 * (("w" in pressed) - ("s" in pressed)),
+                1.5 * (("d" in pressed) - ("a" in pressed)),
+                1.5 * (("e" in pressed) - ("q" in pressed)),
+            ]
+            for index, value in enumerate(values):
+                commands[index] = command_remap(value, self.commands_map[index])
+        elif selected is None:
             commands[:3] = 0.0
         return commands
 

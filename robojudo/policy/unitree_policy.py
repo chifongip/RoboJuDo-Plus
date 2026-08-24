@@ -1,5 +1,6 @@
 import numpy as np
 
+from robojudo.controller.velocity_source import get_pressed_velocity_keys, get_selected_velocity_source
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 from robojudo.policy import Policy, policy_registry
 from robojudo.policy.policy_cfgs import UnitreePolicyCfg, UnitreeWoGaitPolicyCfg
@@ -35,41 +36,28 @@ class UnitreePolicy(Policy):
 
     def _get_commands(self, ctrl_data):
         commands = np.zeros(3)
-        for key in ctrl_data.keys():
-            if key == "VelocityZmqCtrl":
-                velocity = get_fresh_zmq_velocity(ctrl_data[key])
-                if velocity is None:
-                    continue
+        selected = get_selected_velocity_source(ctrl_data)
+        if selected == "VelocityZmqCtrl":
+            velocity = get_fresh_zmq_velocity(ctrl_data[selected])
+            if velocity is not None:
                 max_cmd = np.asarray(self.max_cmd, dtype=np.float32)
                 commands = clip_velocity(velocity / max_cmd, self.commands_map[:3])
-                break
-            if key in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
-                axes = ctrl_data[key]["axes"]
-                lx, ly, rx, _ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]
-
-                commands[0] = command_remap(ly, self.commands_map[0])
-                commands[1] = command_remap(lx, self.commands_map[1])
-                commands[2] = command_remap(rx, self.commands_map[2])
-                break
-            if key in ["KeyboardCtrl"]:
-                keys = ctrl_data[key]["keyboard_event"]
-                for event in keys:
-                    if event["type"] == "keyboard":
-                        value = event["pressed"] * 1.5
-                        match event["name"]:
-                            case "w":
-                                commands[0] = command_remap(value, self.commands_map[0])
-                            case "s":
-                                commands[0] = command_remap(-value, self.commands_map[0])
-                            case "a":
-                                commands[1] = command_remap(-value, self.commands_map[1])
-                            case "d":
-                                commands[1] = command_remap(value, self.commands_map[1])
-                            case "e":
-                                commands[2] = command_remap(value, self.commands_map[2])
-                            case "q":
-                                commands[2] = command_remap(-value, self.commands_map[2])
-                break
+        elif selected in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
+            axes = ctrl_data[selected]["axes"]
+            lx, ly, rx = axes["LeftX"], axes["LeftY"], axes["RightX"]
+            commands[0] = command_remap(ly, self.commands_map[0])
+            commands[1] = command_remap(lx, self.commands_map[1])
+            commands[2] = command_remap(rx, self.commands_map[2])
+        elif selected == "KeyboardCtrl":
+            entry = ctrl_data[selected]
+            pressed = get_pressed_velocity_keys(entry)
+            values = [
+                1.5 * (("w" in pressed) - ("s" in pressed)),
+                1.5 * (("d" in pressed) - ("a" in pressed)),
+                1.5 * (("e" in pressed) - ("q" in pressed)),
+            ]
+            for index, value in enumerate(values):
+                commands[index] = command_remap(value, self.commands_map[index])
         return commands
 
     def get_observation(self, env_data, ctrl_data):
