@@ -211,6 +211,8 @@ class Gr00tZmqCtrl(ControllerHook):
             )
 
             minimum_period_ns = int(1_000_000_000 / self.cfg_ctrl.observation_fps)
+            # Accept normal camera/scheduler jitter at the configured rate.
+            minimum_interval_ns = minimum_period_ns * 9 // 10
             last_published_at = 0
             last_camera_sequence = -1
             observation_sequence = 0
@@ -222,7 +224,7 @@ class Gr00tZmqCtrl(ControllerHook):
                     continue
                 last_camera_sequence = frame.sequence
                 now_ns = time.monotonic_ns()
-                if now_ns - last_published_at < minimum_period_ns:
+                if now_ns - last_published_at < minimum_interval_ns:
                     continue
                 with self._observation_snapshot_lock:
                     snapshot = self._observation_snapshot
