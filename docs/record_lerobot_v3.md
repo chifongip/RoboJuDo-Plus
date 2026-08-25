@@ -1,108 +1,130 @@
 # Upper-body LeRobot v3 recording
 
-RoboJuDo-Plus publishes the state and final commands used by its control loop to a separate recorder service. The service
-owns the camera and writes a LeRobot v3 dataset, so video encoding and dataset dependencies cannot block robot control.
+RoboJuDo-Plus records data in two stages so camera decoding and H.264 encoding cannot reduce real-time capture throughput.
+
+```text
+RoboJuDo controls ─┐
+                   ├─> robojudo-recorder ─> timestamped raw episode
+camera payloads ───┘
+
+timestamped raw episode ─> robojudo-finalize ─> synchronized LeRobot v3 dataset
+```
 
 ## Dataset features
 
-Each robot negotiates a named-joint schema when the first sample arrives. Agibot X2, Unitree G1 29-DoF, and G1 23-DoF therefore use
-the same recorder implementation but produce separate, fixed-schema datasets.
+The first control sample establishes a named-joint schema. X2, G1 29-DoF, and G1 23-DoF therefore share the recorder
+implementation while producing separate fixed-schema datasets.
 
-- `observation.state`: actual positions of all joints controlled by upper-body teleoperation.
-- `observation.images.<camera name>`: RGB frames from the configured camera.
-- `action`: final upper-body position targets followed by **`vx`, `vy`, yaw rate, and height commands**.
+- `observation.state`: measured positions of the joints controlled by upper-body teleoperation.
+- `observation.images.<camera name>`: synchronized RGB video.
+- `action`: final joint position targets followed by `vx`, `vy`, yaw rate, and height command.
 
-Adding hand joints to `UpperBodyZmqCtrlCfg.joint_names` automatically adds their positions and final targets to the
-negotiated schema. Do not change the joint list while appending episodes to one dataset.
+Adding hand joints to `UpperBodyZmqCtrlCfg.joint_names` automatically extends state and action. 
 
-## Install
+## Stage 1: real-time capture
 
-Install the recorder in its own environment:
-
-```bash
-pip install -e "packages/robojudo_recorder[realsense]"
-```
-
-Use `[opencv]` instead of `[realsense]` for a V4L2/OpenCV camera. A ZMQ RGB camera only needs the base package; JPEG
-frames additionally require `[opencv]`. The ROS 2 backend uses `[ros2]` for compressed-image decoding; `rclpy` and
-`sensor_msgs` must come from the sourced ROS 2 environment.
-
-## Run
-
-Create a recorder configuration from `packages/robojudo_recorder/recorder.example.yaml`, then start the service:
+Install and start the standalone service:
 
 ```bash
-robojudo-recorder --config packages/robojudo_recorder/recorder.example.yaml
+pip install -e "packages/robojudo_recorder[ros2]"
+robojudo-recorder --config packages/robojudo_recorder/recorder.ros2.example.yaml
 ```
 
-Start a supported locomanipulation pipeline with recording enabled:
+Then start a supported pipeline:
 
 ```bash
-python scripts/run_pipeline.py -c x2_locomanipulation_real --record --record-task "pick up the red cup"
+python scripts/run_pipeline.py \
+  -c x2_locomanipulation_real \
+  --record \
+  --record-task "pick up the red cup"
 ```
 
-The pipeline binds `tcp://*:8560` by default and the recorder connects to `tcp://127.0.0.1:8560`. Use
-`--record-endpoint` or the pipeline `record.endpoint` config to change the publisher endpoint.
+The pipeline binds `tcp://*:8560` by default and the recorder connects to `tcp://127.0.0.1:8560`. Recording controls
+are documented in [the recorder README](../packages/robojudo_recorder/README.md).
 
-Recording is controlled from the joystick after entering `RL_DEFAULT` and enabling upper-body takeover:
+The real-time stage writes each control sample immediately to `controls.jsonl`, including source and receive timestamps,
+measured state, final action, and locomotion command. Camera frames are written independently per camera with both
+timestamps, sequence number, encoding, and shape. JPEG/PNG payloads are preserved byte-for-byte; raw RGB sources are
+JPEG-compressed but never H.264-encoded. No Parquet or MP4 is produced during capture.
 
-- Xbox/standard joystick: hold `LB+RB`, then press `Start` to start/end and `Back` to pause/resume.
-- Unitree remote: hold `L1+R1`, then press `Start` to start/end and `Select` to pause/resume.
+Confirmed episodes are atomically moved from `dataset.raw_root/.pending` to `dataset.raw_root/episodes`. Discarded
+episodes are deleted. A crash leaves the current directory under `.pending` for inspection instead of exposing it as a
+complete episode.
 
-Start waits for the first fresh upper-body command. End saves the episode; pause/resume keeps one logical episode and
-does not write frames during the pause. Disabling takeover, leaving `RL_DEFAULT`, switching away from the locomotion
-policy, or exiting the pipeline automatically stops and saves an active episode. Stale teleop frames are skipped.
-
-Recorder messages use a bounded, non-blocking ZMQ queue. If the recorder is absent or cannot keep up, RoboJuDo drops
-recording samples and logs a counter instead of delaying the control loop.
-
-Set `dataset.resume: true` to append episodes after restarting the recorder. Resume validates FPS, robot type, joint
-names, action names, and camera shape before opening a new episode; it will not silently mix incompatible schemas.
-
-## Camera backends
-
-Camera creation is registry based. Built-in types are `realsense`, `opencv`, `ros2`, and `zmq`. A new backend implements
-`CameraSource` and registers itself with `register_camera("name")`; dataset and pipeline code do not need changes.
-For direct cameras, configured camera FPS must equal dataset FPS.
-
-### ROS 2 CompressedImage
-
-Use `type: ros2` to subscribe directly to a `sensor_msgs/msg/CompressedImage` topic:
+For ROS 2, prefer `sensor_msgs/msg/CompressedImage` at high resolution:
 
 ```yaml
 camera:
   type: ros2
   name: head_rgb
-  topic: /aima/hal/sensor/stereo_head_front_right/rgb_image/compressed
-  qos_reliability: best_effort
+  topic: /camera/color/image_raw/compressed
+  message_type: compressed
+  qos_reliability: reliable
   qos_depth: 1
   ros_python_executable: /usr/bin/python3
   fps: 30
-  # width: 640
-  # height: 480
 ```
 
-The complete example is `packages/robojudo_recorder/recorder.ros2.example.yaml`. The recorder may run under Python
-3.11 while ROS 2 Humble uses Python 3.10: this backend launches `ros_python_executable` as a small subscriber process
-and transfers compressed bytes to the recorder over a loopback ZMQ socket. The ROS Python only needs `rclpy`,
-`sensor_msgs`, and `pyzmq`; OpenCV decoding and dataset writing remain in the recorder process.
+The helper process forwards the original compressed payload over loopback ZMQ. Raw `sensor_msgs/msg/Image` is also
+supported, but requires RGB conversion and JPEG compression in the live path. Camera FPS may differ from dataset FPS.
 
-`best_effort` with depth 1 matches the usual ROS sensor-data QoS and keeps only the latest frame; set
-`qos_reliability: reliable` when the publisher uses reliable delivery. Width and height are optional and inferred from
-the first frame; when configured, every decoded frame is validated against them. Set camera FPS to the topic
-publication rate; it must equal `dataset.fps`. Frames are timestamped with local monotonic receive time, so use
-`sync.clock: receive`. Set `ROS_DOMAIN_ID` before starting the recorder when the publisher is in a non-default domain.
+## Stage 2: offline finalize
 
-The ZMQ backend expects multipart messages containing a JSON header and image payload:
+After collection, convert every committed raw episode:
+
+```bash
+robojudo-finalize --config packages/robojudo_recorder/recorder.ros2.example.yaml
+```
+
+To process selected raw directories, repeat `--episode`:
+
+```bash
+robojudo-finalize --config recorder.yaml \
+  --episode capture_1787018367000000000_episode_3
+```
+
+Finalization uses `sync.clock` (`receive` by default) and creates a uniform `dataset.fps` time grid. It chooses the
+nearest frame from every camera within `sync.max_camera_delta_ms`, linearly interpolates measured state between adjacent
+control samples, and zero-order-holds the preceding action. It does not extrapolate outside control boundaries. Only
+then does it decode images, encode H.264, and write LeRobot v3 Parquet and metadata.
+
+Each raw episode receives `finalize_report.json` with:
+
+- raw control and per-camera frame counts/FPS;
+- source sequence gaps;
+- requested, written, camera-dropped, and control-dropped target slots;
+- unique, duplicated, and unused camera-frame counts;
+- camera delta and control age mean/p95/max;
+- control samples over `sync.max_control_age_ms`.
+
+Finalization is idempotent: a successful raw episode is skipped when its report and output Parquet still exist. Set
+`dataset.resume: true` when appending multiple runs to one output dataset; the writer validates the existing schema.
+
+## Clock selection
+
+Use `sync.clock: receive` when components run on different machines or source clocks are not guaranteed to share an
+epoch. Use `source` only when camera and control publishers are in the same synchronized PTP/chrony clock domain. Both
+timestamps are retained in the raw files, so a raw capture can be re-finalized with a corrected clock policy.
+
+## Output layout
 
 ```text
-[ {"sequence": 42, "timestamp_ns": 123456789}, image bytes ]
+<dataset.raw_root>/episodes/capture_.../
+├── manifest.json
+├── controls.jsonl
+├── finalize_report.json
+└── cameras/<name>/
+    ├── frames.jsonl
+    └── 00000000.jpg
+
+<dataset.root>/
+├── data/chunk-000/file-000.parquet
+├── videos/observation.images.<name>/chunk-000/file-000.mp4
+└── meta/
 ```
 
-Set `encoding: raw_rgb` for contiguous `uint8[H,W,3]` bytes or `encoding: jpeg` for JPEG payloads.
-The ZMQ backend uses local receive time by default. Set `timestamp_mode: source` only when the camera publisher and
-recorder clocks are synchronized.
+Run tests with:
 
-For a ZMQ camera on the same machine, `sync.clock: source` can preserve source timestamps. Across machines, use
-`sync.clock: receive` unless the hosts share a PTP/chrony-synchronized clock. Frames without a sufficiently recent
-control sample are dropped.
+```bash
+python -m unittest discover -s packages/robojudo_recorder/tests -v
+```

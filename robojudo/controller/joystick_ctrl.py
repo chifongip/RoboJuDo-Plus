@@ -23,7 +23,6 @@ class JoystickCtrl(Controller):
 
     def reset(self):
         self.combination_init_buttons = self.cfg_ctrl.combination_init_buttons
-        self._install_recording_triggers()
         self.onhold_buttons = set()
         self.used_combination_buttons = set()
         self._last_received_at: float | None = None
@@ -44,12 +43,6 @@ class JoystickCtrl(Controller):
             "axes": {name: 0.0 for name in self.axes_names},
             "timestamp": time.time(),
         }
-
-    def _install_recording_triggers(self):
-        prefix = "+".join(sorted(self.combination_init_buttons))
-        pause_button = "Select" if self.cfg_ctrl.ctrl_type == "UnitreeCtrl" else "Back"
-        self.triggers.setdefault(f"{prefix}+Start", "[RECORD_START_STOP]")
-        self.triggers.setdefault(f"{prefix}+{pause_button}", "[RECORD_PAUSE_RESUME]")
 
     def get_state(self):
         try:

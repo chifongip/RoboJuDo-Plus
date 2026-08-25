@@ -28,11 +28,13 @@ pipeline_registry.add("RlPipeline", ".rl_pipeline")
 pipeline_registry.add("RlMultiPolicyPipeline", ".rl_multi_policy_pipeline")
 pipeline_registry.add("RlLocoMimicPipeline", ".rl_loco_mimic_pipeline")
 pipeline_registry.add("X2LocomanipulationPipeline", ".x2_locomanipulation_pipeline")
+pipeline_registry.add("X2Gr00tLocomanipulationPipeline", ".x2_gr00t_locomanipulation_pipeline")
 pipeline_registry.add(
     "X2LocomanipulationLocoMimicPipeline",
     ".x2_locomanipulation_loco_mimic_pipeline",
 )
 pipeline_registry.add("G1LocomanipulationPipeline", ".g1_locomanipulation_pipeline")
+pipeline_registry.add("G1Gr00tLocomanipulationPipeline", ".g1_gr00t_locomanipulation_pipeline")
 pipeline_registry.add(
     "G1LocomanipulationLocoMimicPipeline",
     ".g1_locomanipulation_loco_mimic_pipeline",

@@ -43,6 +43,18 @@ def parse_args():
         default=None,
         help="Task text stored with recorded episodes",
     )
+    parser.add_argument(
+        "--gr00t-task",
+        type=str,
+        default=None,
+        help="Override the language instruction published to GR00T",
+    )
+    parser.add_argument(
+        "--gr00t-command-endpoint",
+        type=str,
+        default=None,
+        help="Override the GR00T command SUB endpoint",
+    )
     args = parser.parse_args()
     return args
 
@@ -62,6 +74,15 @@ def main():
                 **({"task": args.record_task} if args.record_task is not None else {}),
             },
         )
+    gr00t_task = args.gr00t_task or args.record_task
+    if gr00t_task is not None:
+        for ctrl_cfg in cfg.ctrl:
+            if ctrl_cfg.ctrl_type == "Gr00tZmqCtrl":
+                ctrl_cfg.observation_task = gr00t_task
+    if args.gr00t_command_endpoint is not None:
+        for ctrl_cfg in cfg.ctrl:
+            if ctrl_cfg.ctrl_type == "Gr00tZmqCtrl":
+                ctrl_cfg.endpoint = args.gr00t_command_endpoint
 
     pipeline_type = cfg.pipeline_type
 
@@ -104,6 +125,9 @@ def main():
         close_recording = getattr(pipeline, "close_recording", None)
         if close_recording is not None:
             close_recording()
+        ctrl_manager = getattr(pipeline, "ctrl_manager", None)
+        if ctrl_manager is not None:
+            ctrl_manager.close()
 
 
 if __name__ == "__main__":

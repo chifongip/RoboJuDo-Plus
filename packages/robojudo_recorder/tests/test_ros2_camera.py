@@ -120,6 +120,7 @@ class TestRos2CompressedCameraSource(unittest.TestCase):
         self.assertEqual(command[0], "/usr/bin/python3")
         self.assertIn("ros2_bridge.py", command[1])
         self.assertEqual(command[command.index("--topic") + 1], "/camera/rgb/compressed")
+        self.assertEqual(command[command.index("--message-type") + 1], "compressed")
         self.assertEqual(command[command.index("--qos-reliability") + 1], "reliable")
         self.assertEqual(command[command.index("--qos-depth") + 1], "3")
 
@@ -158,6 +159,102 @@ class TestRos2CompressedCameraSource(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected"):
             camera._decode_frame(header, b"compressed image")
 
+    def test_decodes_raw_bgr8_with_row_padding(self):
+        camera = Ros2CompressedCameraSource(
+            CameraConfig(
+                type="ros2",
+                options={"topic": "/camera/rgb", "message_type": "raw"},
+            )
+        )
+        header = json.dumps(
+            {
+                "message_type": "raw",
+                "sequence": 9,
+                "timestamp_ns": 456,
+                "height": 2,
+                "width": 2,
+                "encoding": "bgr8",
+                "is_bigendian": 0,
+                "step": 8,
+            }
+        ).encode()
+        payload = bytes(
+            [
+                10,
+                20,
+                30,
+                40,
+                50,
+                60,
+                99,
+                99,
+                70,
+                80,
+                90,
+                100,
+                110,
+                120,
+                99,
+                99,
+            ]
+        )
+
+        frame = camera._decode_frame(header, payload)
+
+        np.testing.assert_array_equal(
+            frame.image,
+            np.asarray(
+                [
+                    [[30, 20, 10], [60, 50, 40]],
+                    [[90, 80, 70], [120, 110, 100]],
+                ],
+                dtype=np.uint8,
+            ),
+        )
+        self.assertEqual(camera.shape, (2, 2, 3))
+        self.assertEqual(frame.timestamp_ns, 456)
+        self.assertEqual(frame.sequence, 9)
+
+    def test_decodes_raw_mono8_as_rgb(self):
+        camera = Ros2CompressedCameraSource(
+            CameraConfig(type="ros2", options={"topic": "/camera/mono", "message_type": "raw"})
+        )
+        header = json.dumps(
+            {
+                "message_type": "raw",
+                "sequence": 1,
+                "timestamp_ns": 123,
+                "height": 1,
+                "width": 2,
+                "encoding": "mono8",
+                "is_bigendian": 0,
+                "step": 2,
+            }
+        ).encode()
+
+        frame = camera._decode_frame(header, bytes([12, 34]))
+
+        np.testing.assert_array_equal(frame.image, [[[12, 12, 12], [34, 34, 34]]])
+
+    def test_rejects_unsupported_raw_encoding(self):
+        camera = Ros2CompressedCameraSource(
+            CameraConfig(type="ros2", options={"topic": "/camera/depth", "message_type": "raw"})
+        )
+        header = json.dumps(
+            {
+                "message_type": "raw",
+                "sequence": 1,
+                "timestamp_ns": 123,
+                "height": 1,
+                "width": 1,
+                "encoding": "16UC1",
+                "is_bigendian": 0,
+                "step": 2,
+            }
+        ).encode()
+        with self.assertRaisesRegex(ValueError, "unsupported.*encoding"):
+            camera._decode_frame(header, bytes([0, 1]))
+
     def test_validates_configuration(self):
         with self.assertRaisesRegex(ValueError, "topic"):
             Ros2CompressedCameraSource(CameraConfig(type="ros2"))
@@ -168,6 +265,10 @@ class TestRos2CompressedCameraSource(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "qos_reliability"):
             Ros2CompressedCameraSource(
                 CameraConfig(type="ros2", options={"topic": "/camera", "qos_reliability": "unknown"})
+            )
+        with self.assertRaisesRegex(ValueError, "message_type"):
+            Ros2CompressedCameraSource(
+                CameraConfig(type="ros2", options={"topic": "/camera", "message_type": "unknown"})
             )
 
 

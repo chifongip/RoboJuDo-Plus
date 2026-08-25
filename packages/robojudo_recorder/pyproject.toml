@@ -22,10 +22,13 @@ dependencies = [
 opencv = ["opencv-python>=4.8"]
 realsense = ["pyrealsense2>=2.55,<2.57; platform_system != 'Darwin'"]
 ros2 = ["opencv-python>=4.8"]
+hub = ["huggingface-hub>=0.25"]
 dev = ["pytest>=8", "ruff>=0.12"]
 
 [project.scripts]
 robojudo-recorder = "robojudo_recorder.cli:main"
+robojudo-finalize = "robojudo_recorder.finalize:main"
+robojudo-upload-dataset = "robojudo_recorder.upload:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

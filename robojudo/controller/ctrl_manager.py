@@ -50,6 +50,13 @@ class CtrlManager:
             controller.inst.reset()
         self.velocity_source_arbiter.reset()
 
+    def close(self):
+        """Close controller-owned sockets, threads, and hardware resources."""
+        for controller in self.controllers.values():
+            close = getattr(controller.inst, "close", None)
+            if close is not None:
+                close()
+
     def post_step_callback(self, ctrl_data: Box):
         """
         Call post step callback for all controllers.

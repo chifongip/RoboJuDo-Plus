@@ -24,12 +24,17 @@ class RecorderClient:
         self._socket.bind(cfg.endpoint)
         self._episode_id = 0
         self._active_episode_id: int | None = None
+        self._review_episode_id: int | None = None
         self.dropped_samples = 0
         logger.info("Recorder client publishing to %s", cfg.endpoint)
 
     @property
     def active(self) -> bool:
         return self._active_episode_id is not None
+
+    @property
+    def review_pending(self) -> bool:
+        return self._review_episode_id is not None
 
     def _send(self, payload: dict, *, lifecycle: bool = False) -> bool:
         flags = 0 if lifecycle and self.cfg.lifecycle_timeout_ms else zmq.NOBLOCK
@@ -89,6 +94,7 @@ class RecorderClient:
         return sent
 
     def finish_episode(self, *, save: bool = True):
+        """Finalize immediately; retained for shutdown and non-interactive callers."""
         if self._active_episode_id is None:
             return
         episode_id = self._active_episode_id
@@ -105,7 +111,43 @@ class RecorderClient:
         if not sent:
             logger.warning("Recorder did not acknowledge delivery of episode end %d", episode_id)
 
+    def review_episode(self):
+        if self._active_episode_id is None:
+            return
+        episode_id = self._active_episode_id
+        self._active_episode_id = None
+        self._review_episode_id = episode_id
+        sent = self._send(
+            {"kind": "episode_review", "episode_id": episode_id, "timestamp_ns": time.monotonic_ns()},
+            lifecycle=True,
+        )
+        if not sent:
+            logger.warning("Recorder did not acknowledge review request for episode %d", episode_id)
+
+    def confirm_save(self):
+        self._finish_review(save=True)
+
+    def discard_review(self):
+        self._finish_review(save=False)
+
+    def _finish_review(self, *, save: bool):
+        if self._review_episode_id is None:
+            return
+        episode_id = self._review_episode_id
+        self._review_episode_id = None
+        sent = self._send(
+            {
+                "kind": "episode_commit" if save else "episode_discard",
+                "episode_id": episode_id,
+                "timestamp_ns": time.monotonic_ns(),
+            },
+            lifecycle=True,
+        )
+        if not sent:
+            logger.warning("Recorder did not acknowledge episode review decision %d", episode_id)
+
     def close(self):
-        self.finish_episode(save=True)
+        self.finish_episode(save=False)
+        self.discard_review()
         self._send({"kind": "client_close", "timestamp_ns": time.monotonic_ns()}, lifecycle=True)
         self._socket.close(linger=0)

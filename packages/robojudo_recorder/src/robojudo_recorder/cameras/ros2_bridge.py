@@ -6,20 +6,21 @@ import rclpy
 import zmq
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Image
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Forward a ROS 2 CompressedImage topic to RoboJuDo recorder")
+    parser = argparse.ArgumentParser(description="Forward a ROS 2 image topic to RoboJuDo recorder")
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--topic", required=True)
+    parser.add_argument("--message-type", choices=("compressed", "raw"), default="compressed")
     parser.add_argument("--node-name", required=True)
     parser.add_argument("--qos-reliability", choices=("best_effort", "reliable"), required=True)
     parser.add_argument("--qos-depth", type=int, required=True)
     return parser.parse_args()
 
 
-class CompressedImageBridge(Node):
+class ImageBridge(Node):
     def __init__(self, args):
         super().__init__(args.node_name)
         self._sequence = 0
@@ -39,15 +40,35 @@ class CompressedImageBridge(Node):
             reliability=reliability,
             durability=DurabilityPolicy.VOLATILE,
         )
-        self._subscription = self.create_subscription(CompressedImage, args.topic, self._on_image, qos)
-        self.get_logger().info(f"Forwarding CompressedImage topic {args.topic} to {args.endpoint}")
+        ros_message_type = CompressedImage if args.message_type == "compressed" else Image
+        self._message_type = args.message_type
+        self._subscription = self.create_subscription(ros_message_type, args.topic, self._on_image, qos)
+        self.get_logger().info(f"Forwarding {ros_message_type.__name__} topic {args.topic} to {args.endpoint}")
 
     def _on_image(self, message):
         self._sequence += 1
-        header = json.dumps(
-            {"sequence": self._sequence, "timestamp_ns": time.monotonic_ns()},
-            separators=(",", ":"),
-        ).encode()
+        received_timestamp_ns = time.monotonic_ns()
+        source_timestamp_ns = int(message.header.stamp.sec) * 1_000_000_000 + int(message.header.stamp.nanosec)
+        metadata = {
+            "message_type": self._message_type,
+            "sequence": self._sequence,
+            # Preserve both domains. ``receive`` is comparable to RoboJuDo's monotonic control clock;
+            # ROS source time is retained for diagnostics and deployments with a shared source clock.
+            "timestamp_ns": received_timestamp_ns,
+            "source_timestamp_ns": source_timestamp_ns,
+            "receive_timestamp_ns": received_timestamp_ns,
+        }
+        if self._message_type == "compressed":
+            metadata["format"] = message.format
+        if self._message_type == "raw":
+            metadata.update(
+                height=message.height,
+                width=message.width,
+                encoding=message.encoding,
+                is_bigendian=message.is_bigendian,
+                step=message.step,
+            )
+        header = json.dumps(metadata, separators=(",", ":")).encode()
         try:
             self._socket.send_multipart([header, bytes(message.data)], flags=zmq.NOBLOCK)
         except zmq.Again:
@@ -61,7 +82,7 @@ class CompressedImageBridge(Node):
 def main():
     args = parse_args()
     rclpy.init(args=[])
-    node = CompressedImageBridge(args)
+    node = ImageBridge(args)
     try:
         rclpy.spin(node)
     finally:
