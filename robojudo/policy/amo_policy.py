@@ -3,6 +3,11 @@ from collections import deque
 import numpy as np
 import torch
 
+from robojudo.controller.velocity_source import (
+    JOYSTICK_SOURCE_TYPES,
+    get_pressed_velocity_keys,
+    get_selected_velocity_source,
+)
 from robojudo.policy import Policy, policy_registry
 from robojudo.policy.policy_cfgs import AMOPolicyCfg
 from robojudo.policy.utils.velocity_command import clip_velocity, get_fresh_zmq_velocity
@@ -93,36 +98,36 @@ class AMOPolicy(Policy):
         #     self.arm_action = ref_dof_pos.copy()[-self._n_demo_dof :]
 
         commands = self.cmd.copy()
-        zmq_configured = False
-        selected = False
-        for key in ctrl_data.keys():
-            if key == "VelocityZmqCtrl":
-                zmq_configured = True
-                velocity = get_fresh_zmq_velocity(ctrl_data[key])
-                if velocity is None:
-                    continue
+        selected = get_selected_velocity_source(ctrl_data)
+        if selected == "VelocityZmqCtrl":
+            velocity = get_fresh_zmq_velocity(ctrl_data[selected])
+            if velocity is None:
+                commands[:3] = 0.0
+            else:
                 amo_velocity = np.asarray([velocity[1], velocity[2], velocity[0]], dtype=np.float32)
                 commands[:3] = clip_velocity(amo_velocity, self.commands_map[:3])
-                selected = True
-                break
-            if key in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
-                axes = ctrl_data[key]["axes"]
-                lx, ly, rx, _ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]
-
-                commands[0] = command_remap(ly, self.commands_map[0])
-                commands[1] = command_remap(rx, self.commands_map[1])
-                commands[2] = command_remap(lx, self.commands_map[2])
-                # commands[3] = command_remap(ry, self.commands_map[3]) # height
-                selected = True
-
-                button_event = ctrl_data[key]["button_event"]
-                for event in button_event:
-                    if event["type"] == "button" and event["name"] == "Y" and event["pressed"]:
-                        commands[7] = not commands[7]
-
-                break
-        if zmq_configured and not selected:
+        elif selected in JOYSTICK_SOURCE_TYPES:
+            axes = ctrl_data[selected]["axes"]
+            lx, ly, rx = axes["LeftX"], axes["LeftY"], axes["RightX"]
+            commands[0] = command_remap(ly, self.commands_map[0])
+            commands[1] = command_remap(rx, self.commands_map[1])
+            commands[2] = command_remap(lx, self.commands_map[2])
+        elif selected == "KeyboardCtrl":
+            pressed = get_pressed_velocity_keys(ctrl_data[selected])
+            values = [
+                1.5 * (("w" in pressed) - ("s" in pressed)),
+                1.5 * (("e" in pressed) - ("q" in pressed)),
+                1.5 * (("d" in pressed) - ("a" in pressed)),
+            ]
+            for index, value in enumerate(values):
+                commands[index] = command_remap(value, self.commands_map[index])
+        elif selected is None:
             commands[:3] = 0.0
+
+        for key in JOYSTICK_SOURCE_TYPES.intersection(ctrl_data.keys()):
+            for event in ctrl_data[key]["button_event"]:
+                if event["type"] == "button" and event["name"] == "Y" and event["pressed"]:
+                    commands[7] = not commands[7]
         return commands
 
     def get_observation(self, env_data, ctrl_data):

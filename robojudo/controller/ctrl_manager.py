@@ -4,6 +4,7 @@ from box import Box
 
 import robojudo.controller
 from robojudo.controller import Controller, ControllerHook, CtrlCfg
+from robojudo.controller.velocity_source import VELOCITY_SOURCE_KEY, VelocitySourceArbiter
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class CtrlManager:
         self.cfg_ctrls = cfg_ctrls
         self.env = env
         self.device = device
+        self.velocity_source_arbiter = VelocitySourceArbiter(self.cfg_ctrls or [])
 
         controllers = {}
         for cfg_ctrl in self.cfg_ctrls or []:
@@ -46,6 +48,7 @@ class CtrlManager:
         """
         for controller in self.controllers.values():
             controller.inst.reset()
+        self.velocity_source_arbiter.reset()
 
     def close(self):
         """Close controller-owned sockets, threads, and hardware resources."""
@@ -77,6 +80,7 @@ class CtrlManager:
             ctrl_commands_all.update(ctrl_commands)
 
         ctrl_data_all["COMMANDS"] = list(ctrl_commands_all)
+        ctrl_data_all[VELOCITY_SOURCE_KEY] = self.velocity_source_arbiter.update(ctrl_data_all)
         return Box(ctrl_data_all)
 
 

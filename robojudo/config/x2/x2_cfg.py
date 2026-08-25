@@ -6,6 +6,7 @@ from robojudo.controller.ctrl_cfgs import (
     KeyboardCtrlCfg,
     RosJoystickCtrlCfg,
     UpperBodyZmqCtrlCfg,
+    VelocityZmqCtrlCfg,
 )
 from robojudo.environment.env_cfgs import ElasticBandCfg
 from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
@@ -36,6 +37,7 @@ class x2(RlPipelineCfg):
     env: X2MujocoEnvCfg = X2MujocoEnvCfg()
     ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg] = [
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -46,6 +48,7 @@ class x2(RlPipelineCfg):
             }
         ),
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers={
                 "k": "[PASSIVE_DEFAULT]",
                 "l": "[DAMPING_DEFAULT]",
@@ -105,8 +108,8 @@ class x2_amp_recovery(RlPipelineCfg):
         ),
     )
     ctrl: list[KeyboardCtrlCfg | JoystickCtrlCfg] = [
-        KeyboardCtrlCfg(),
-        JoystickCtrlCfg(),
+        KeyboardCtrlCfg(velocity_priority=200),
+        JoystickCtrlCfg(velocity_priority=300),
     ]
     policy: X2AmpRecoveryPolicyCfg = X2AmpRecoveryPolicyCfg()
 
@@ -155,6 +158,7 @@ class x2_locomanipulation(x2):
     joint_default_dof: X2LocomanipulationEnvDoF = X2LocomanipulationEnvDoF()
     ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg] = [
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -170,6 +174,7 @@ class x2_locomanipulation(x2):
             }
         ),
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers={
                 "k": "[PASSIVE_DEFAULT]",
                 "l": "[DAMPING_DEFAULT]",
@@ -321,8 +326,9 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
         sim_dt=0.005,
         sim_decimation=4,
     )
-    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg] = [
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg | VelocityZmqCtrlCfg] = [
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -339,6 +345,7 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
             }
         ),
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers_extra={
                 "k": "[PASSIVE_DEFAULT]",
                 "l": "[DAMPING_DEFAULT]",
@@ -355,6 +362,7 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
                 "9": "[ELASTIC_BAND_TOGGLE]",
             }
         ),
+        VelocityZmqCtrlCfg(velocity_priority=100),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
     loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg()
@@ -373,8 +381,9 @@ class x2_locomimic_real(x2_locomimic):
         dof=X2LocomanipulationEnvDoF(),
         odometry_type="NONE",
     )
-    ctrl: list[RosJoystickCtrlCfg | UpperBodyZmqCtrlCfg] = [
+    ctrl: list[RosJoystickCtrlCfg | UpperBodyZmqCtrlCfg | VelocityZmqCtrlCfg] = [
         RosJoystickCtrlCfg(
+            velocity_priority=300,
             profile="xbox_bluetooth",
             topic="/joy",
             timeout_s=0.5,
@@ -392,6 +401,7 @@ class x2_locomimic_real(x2_locomimic):
                 "LB+RB+A": "[SHUTDOWN]",
             },
         ),
+        VelocityZmqCtrlCfg(velocity_priority=100),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
     do_safety_check: bool = True
@@ -408,6 +418,7 @@ class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
     )
     ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg] = [
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -424,6 +435,7 @@ class x2_locomimic_beyondmimic(X2LocomanipulationLocoMimicPipelineCfg):
             }
         ),
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers_extra={
                 "k": "[PASSIVE_DEFAULT]",
                 "l": "[DAMPING_DEFAULT]",

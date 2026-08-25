@@ -12,8 +12,15 @@ class CtrlCfg(Config):
     triggers_extra: dict[str, str] = {}  # extra trigger conditions
 
 
-class KeyboardCtrlCfg(CtrlCfg):
+class VelocitySourceCfg(CtrlCfg):
+    """Configuration shared by controllers that can provide locomotion velocity."""
+
+    velocity_priority: int | None = Field(default=None, ge=0)
+
+
+class KeyboardCtrlCfg(VelocitySourceCfg):
     ctrl_type: str = "KeyboardCtrl"
+    velocity_lease_timeout_s: float = Field(default=0.5, gt=0.0)
 
     combination_init_buttons: list[str] = ["Key.ctrl_l"]
     """first button in combination, need to be held down to trigger other commands;"""
@@ -30,8 +37,11 @@ class KeyboardCtrlCfg(CtrlCfg):
     }
 
 
-class JoystickCtrlCfg(CtrlCfg):
+class JoystickCtrlCfg(VelocitySourceCfg):
     ctrl_type: str = "JoystickCtrl"
+    timeout_s: float = Field(default=0.5, gt=0.0)
+    velocity_lease_timeout_s: float = Field(default=0.5, gt=0.0)
+    velocity_activity_deadzone: float = Field(default=0.1, ge=0.0, lt=1.0)
 
     combination_init_buttons: list[str] = ["LB", "RB"]
     """first button in combination, need to be held down to trigger other commands;"""
@@ -54,7 +64,6 @@ class RosJoystickCtrlCfg(JoystickCtrlCfg):
     ctrl_type: str = "RosJoystickCtrl"
     topic: str = "/joy"
     profile: Literal["xbox", "xbox_bluetooth", "ps5"] = "xbox"
-    timeout_s: float = Field(default=0.5, gt=0.0)
     queue_capacity: int = Field(default=256, gt=0)
 
     @model_validator(mode="after")
@@ -249,7 +258,7 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
         return self
 
 
-class VelocityZmqCtrlCfg(CtrlCfg):
+class VelocityZmqCtrlCfg(VelocitySourceCfg):
     """ROS Twist-shaped velocity commands received from a ZMQ publisher."""
 
     ctrl_type: str = "VelocityZmqCtrl"

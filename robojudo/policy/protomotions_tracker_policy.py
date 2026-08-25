@@ -26,10 +26,10 @@ import logging
 import re
 
 import numpy as np
-import onnxruntime as ort
 import yaml
 
 from robojudo.policy import Policy, policy_registry
+from robojudo.policy.onnx_runtime import create_onnx_session
 from robojudo.policy.policy_cfgs import PolicyCfg
 from robojudo.tools.tool_cfgs import DoFConfig
 from robojudo.utils.motion_utils import (
@@ -88,9 +88,7 @@ class ProtoMotionsTrackerPolicy(Policy):
 
         # ONNX session
         logger.info(f"[TrackerPolicy] Loading ONNX: {onnx_path}")
-        self._session = ort.InferenceSession(
-            onnx_path, providers=["CPUExecutionProvider"]
-        )
+        self._session = create_onnx_session(onnx_path, self.cfg_policy, providers=["CPUExecutionProvider"])
         self._onnx_in_names = [inp.name for inp in self._session.get_inputs()]
         self._onnx_out_names = [out.name for out in self._session.get_outputs()]
         self._onnx_name_to_key = runtime["onnx_name_to_in_key"]

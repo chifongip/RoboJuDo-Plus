@@ -3,9 +3,9 @@ import os
 from collections import deque
 
 import numpy as np
-import onnxruntime as ort
 
 from robojudo.policy import Policy, policy_registry
+from robojudo.policy.onnx_runtime import create_onnx_session
 from robojudo.policy.policy_cfgs import AmpRecoveryPolicyCfg
 from robojudo.utils.util_func import get_gravity_orientation
 
@@ -32,7 +32,7 @@ class AmpRecoveryPolicy(Policy):
             raise FileNotFoundError(f"Model file not found at {cfg_policy.policy_file}")
 
         super().__init__(cfg_policy=cfg_policy, device=device)
-        self.session = ort.InferenceSession(cfg_policy.policy_file, providers=["CPUExecutionProvider"])
+        self.session = create_onnx_session(cfg_policy.policy_file, cfg_policy, providers=["CPUExecutionProvider"])
         self.action_scales = np.asarray(cfg_policy.action_scales, dtype=np.float32)
         self._validate_model_io()
         logger.info("Loaded AMP Recovery ONNX model from %s", cfg_policy.policy_file)

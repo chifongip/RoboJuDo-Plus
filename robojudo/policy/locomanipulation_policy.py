@@ -2,9 +2,10 @@ import logging
 from collections import deque
 
 import numpy as np
-import onnxruntime as ort
 
+from robojudo.controller.velocity_source import JOYSTICK_SOURCE_TYPES, get_selected_velocity_source
 from robojudo.policy import Policy, PolicyCfg
+from robojudo.policy.onnx_runtime import create_onnx_session
 from robojudo.policy.utils.velocity_command import clip_velocity, get_fresh_zmq_velocity
 from robojudo.utils.util_func import command_remap, quat_rotate_inverse_np
 
@@ -16,8 +17,9 @@ class LocomanipulationPolicyBase(Policy):
 
     def __init__(self, cfg_policy: PolicyCfg, device: str):
         super().__init__(cfg_policy=cfg_policy, device=device)
-        self.session = ort.InferenceSession(
+        self.session = create_onnx_session(
             cfg_policy.policy_file,
+            cfg_policy,
             providers=self._providers_for_device(device),
         )
         self.action_scales = np.asarray(cfg_policy.action_scales, dtype=np.float32)
@@ -60,46 +62,33 @@ class LocomanipulationPolicyBase(Policy):
     def _get_commands(self, ctrl_data) -> np.ndarray:
         commands = self.cmd.copy()
         target_vel = np.zeros(3, dtype=np.float32)
-        local_velocity_seen = False
+        selected = get_selected_velocity_source(ctrl_data)
 
-        for key in ctrl_data.keys():
-            if key == "VelocityZmqCtrl":
-                velocity = get_fresh_zmq_velocity(ctrl_data[key])
-                if velocity is not None and not local_velocity_seen:
-                    target_vel = clip_velocity(velocity, self.commands_map[:3])
-                    break
-                continue
-            if key in ("JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"):
-                local_velocity_seen = True
-                axes = ctrl_data[key]["axes"]
-                lx, ly, rx = (
-                    axis if abs(axis) >= 0.1 else 0.0
-                    for axis in (axes["LeftX"], axes["LeftY"], axes["RightX"])
-                )
-                target_vel[0] = command_remap(ly, self.commands_map[0])
-                target_vel[1] = command_remap(lx, self.commands_map[1])
-                target_vel[2] = command_remap(rx, self.commands_map[2])
+        for key in JOYSTICK_SOURCE_TYPES.intersection(ctrl_data.keys()):
+            for event in ctrl_data[key]["button_event"]:
+                if event["type"] != "button" or not event["pressed"]:
+                    continue
+                if event["name"] in ("Up", "Down"):
+                    sign = 1.0 if event["name"] == "Up" else -1.0
+                    self._target_height = self._clip_command(
+                        self._target_height + sign * self.cfg_policy.height_step,
+                        self.commands_map[3],
+                    )
+                elif event["name"] in ("Left", "Right"):
+                    sign = 1.0 if event["name"] == "Left" else -1.0
+                    self._target_waist_yaw = self._clip_command(
+                        self._target_waist_yaw + sign * self.cfg_policy.waist_yaw_step,
+                        self.commands_map[4],
+                    )
+                elif event["name"] in ("Back", "Select", "F1"):
+                    self._reset_commands()
 
-                for event in ctrl_data[key]["button_event"]:
-                    if event["type"] != "button" or not event["pressed"]:
-                        continue
-                    if event["name"] in ("Up", "Down"):
-                        sign = 1.0 if event["name"] == "Up" else -1.0
-                        self._target_height = self._clip_command(
-                            self._target_height + sign * self.cfg_policy.height_step,
-                            self.commands_map[3],
-                        )
-                    elif event["name"] in ("Left", "Right"):
-                        sign = 1.0 if event["name"] == "Left" else -1.0
-                        self._target_waist_yaw = self._clip_command(
-                            self._target_waist_yaw + sign * self.cfg_policy.waist_yaw_step,
-                            self.commands_map[4],
-                        )
-                    elif event["name"] in ("Back", "Select", "F1"):
-                        self._reset_commands()
-            if key == "KeyboardCtrl":
-                local_velocity_seen = True
-                events = ctrl_data[key]["keyboard_event"]
+        keyboard_entry = ctrl_data.get("KeyboardCtrl")
+        if keyboard_entry is not None:
+            events = keyboard_entry["keyboard_event"]
+            if "pressed_keys" in keyboard_entry:
+                self._held_keys = set(keyboard_entry["pressed_keys"])
+            else:
                 for event in events:
                     if event["type"] != "keyboard":
                         continue
@@ -108,44 +97,58 @@ class LocomanipulationPolicyBase(Policy):
                     else:
                         self._held_keys.discard(event["name"])
 
-                vel_keys = {
-                    "w": (0, 1.0),
-                    "s": (0, -1.0),
-                    "a": (1, 1.0),
-                    "d": (1, -1.0),
-                    "q": (2, 1.0),
-                    "e": (2, -1.0),
-                }
-                for held_key in self._held_keys:
-                    if held_key in vel_keys:
-                        axis, sign = vel_keys[held_key]
-                        low = min(self.commands_map[axis][0], self.commands_map[axis][2])
-                        high = max(self.commands_map[axis][0], self.commands_map[axis][2])
-                        target_vel[axis] += sign * (high if sign > 0 else abs(low))
+            for event in events:
+                if event["type"] != "keyboard" or not event["pressed"]:
+                    continue
+                if event["name"] == "r":
+                    self._target_height = self._clip_command(
+                        self._target_height + self.cfg_policy.height_step, self.commands_map[3]
+                    )
+                elif event["name"] == "f":
+                    self._target_height = self._clip_command(
+                        self._target_height - self.cfg_policy.height_step, self.commands_map[3]
+                    )
+                elif event["name"] == "z":
+                    self._target_waist_yaw = self._clip_command(
+                        self._target_waist_yaw + self.cfg_policy.waist_yaw_step,
+                        self.commands_map[4],
+                    )
+                elif event["name"] == "c":
+                    self._target_waist_yaw = self._clip_command(
+                        self._target_waist_yaw - self.cfg_policy.waist_yaw_step,
+                        self.commands_map[4],
+                    )
+                elif event["name"] == "x":
+                    self._reset_commands()
 
-                for event in events:
-                    if event["type"] != "keyboard" or not event["pressed"]:
-                        continue
-                    if event["name"] == "r":
-                        self._target_height = self._clip_command(
-                            self._target_height + self.cfg_policy.height_step, self.commands_map[3]
-                        )
-                    elif event["name"] == "f":
-                        self._target_height = self._clip_command(
-                            self._target_height - self.cfg_policy.height_step, self.commands_map[3]
-                        )
-                    elif event["name"] == "z":
-                        self._target_waist_yaw = self._clip_command(
-                            self._target_waist_yaw + self.cfg_policy.waist_yaw_step,
-                            self.commands_map[4],
-                        )
-                    elif event["name"] == "c":
-                        self._target_waist_yaw = self._clip_command(
-                            self._target_waist_yaw - self.cfg_policy.waist_yaw_step,
-                            self.commands_map[4],
-                        )
-                    elif event["name"] == "x":
-                        self._reset_commands()
+        if selected == "VelocityZmqCtrl":
+            velocity = get_fresh_zmq_velocity(ctrl_data[selected])
+            if velocity is not None:
+                target_vel = clip_velocity(velocity, self.commands_map[:3])
+        elif selected in JOYSTICK_SOURCE_TYPES:
+            axes = ctrl_data[selected]["axes"]
+            lx, ly, rx = (
+                axis if abs(axis) >= 0.1 else 0.0
+                for axis in (axes["LeftX"], axes["LeftY"], axes["RightX"])
+            )
+            target_vel[0] = command_remap(ly, self.commands_map[0])
+            target_vel[1] = command_remap(lx, self.commands_map[1])
+            target_vel[2] = command_remap(rx, self.commands_map[2])
+        elif selected == "KeyboardCtrl":
+            vel_keys = {
+                "w": (0, 1.0),
+                "s": (0, -1.0),
+                "a": (1, 1.0),
+                "d": (1, -1.0),
+                "q": (2, 1.0),
+                "e": (2, -1.0),
+            }
+            for held_key in self._held_keys:
+                if held_key in vel_keys:
+                    axis, sign = vel_keys[held_key]
+                    low = min(self.commands_map[axis][0], self.commands_map[axis][2])
+                    high = max(self.commands_map[axis][0], self.commands_map[axis][2])
+                    target_vel[axis] += sign * (high if sign > 0 else abs(low))
         if np.linalg.norm(target_vel) < 1e-6:
             self.current_vel_cmd *= self.cfg_policy.command_decay
             if np.linalg.norm(self.current_vel_cmd) < self.cfg_policy.standing_command_threshold:

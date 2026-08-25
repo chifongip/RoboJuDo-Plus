@@ -88,7 +88,7 @@ class RosJoystickCtrl(JoystickCtrl):
             self._stale = True
 
         axes = self._translator.axes.copy() if fresh else neutral_axes()
-        return {"axes": axes, "button_event": events}
+        return {"axes": axes, "button_event": events, "fresh": fresh, "age_s": result.age_s}
 
     def post_step_callback(self, commands: list[str] | None = None):
         if commands and "[SHUTDOWN]" in commands:

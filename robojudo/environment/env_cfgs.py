@@ -1,3 +1,4 @@
+import math
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -151,13 +152,28 @@ class AgiBotEnvCfg(RobotEnvCfg):
         """AimDK ROS 2 topic and timing configuration."""
 
         node_name: str = "robojudo_aimdk_cpp"
-        control_dt: float = 0.02
-        publish_dt: float = 0.002
-        command_timeout: float = 0.1
-        shutdown_damping: float = 5.0
-        shutdown_publish_duration: float = 0.2
-        state_timeout: float = 0.1
-        odometry_timeout: float = 0.1
+        control_dt: float = Field(default=0.02, gt=0.0, allow_inf_nan=False)
+        publish_dt: float = Field(default=0.002, gt=0.0, allow_inf_nan=False)
+        command_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+        """Position-command age that enters the temporary measured-position hold state."""
+
+        command_damping_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+        """Position-command age that enters latched damping; equal to command_timeout preserves legacy behavior."""
+
+        shutdown_damping: float = Field(default=5.0, ge=0.0, allow_inf_nan=False)
+        shutdown_publish_duration: float = Field(default=0.2, ge=0.0, allow_inf_nan=False)
+        state_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+        """State-stream age that enters the temporary measured-position hold state."""
+
+        state_damping_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+        """IMU/joint state age that enters latched damping; equal to state_timeout preserves legacy behavior."""
+
+        odometry_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+        """Odometry age that enters the temporary measured-position hold state when odometry is required."""
+
+        odometry_damping_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+        """Odometry age that enters latched damping; equal to odometry_timeout preserves legacy behavior."""
+        telemetry_window_sec: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
         base_imu_topic: str = "/aima/hal/imu/torso/state"
         odometry_topic: str = "/aima/mc/leg_odometry"
         odometry_parent_frame: str = "leg_odom"
@@ -186,6 +202,22 @@ class AgiBotEnvCfg(RobotEnvCfg):
         waist_command_topic: str = "/aima/hal/joint/waist/command"
         arm_command_topic: str = "/aima/hal/joint/arm/command"
         head_command_topic: str = "/aima/hal/joint/head/command"
+
+        @model_validator(mode="after")
+        def check_watchdog_timeouts(self):
+            timeout_pairs = (
+                ("command", self.command_timeout, self.command_damping_timeout),
+                ("state", self.state_timeout, self.state_damping_timeout),
+                ("odometry", self.odometry_timeout, self.odometry_damping_timeout),
+            )
+            for name, hold_timeout, damping_timeout in timeout_pairs:
+                if not math.isfinite(hold_timeout) or not math.isfinite(damping_timeout):
+                    raise ValueError(f"aimdk {name} hold and damping timeouts must be finite")
+                if hold_timeout <= 0.0 or damping_timeout <= 0.0:
+                    raise ValueError(f"aimdk {name} hold and damping timeouts must be positive")
+                if damping_timeout < hold_timeout:
+                    raise ValueError(f"aimdk {name} damping timeout must not be shorter than its hold timeout")
+            return self
 
     env_type: str = "AgiBotCppEnv"
     aimdk: AimdkCfg = AimdkCfg()

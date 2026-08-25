@@ -20,6 +20,7 @@ class KeyboardCtrl(Controller):
         self.reset()
 
     def reset(self):
+        self.pressed_keys: set[str] = set()
         while not self.event_queue.empty():
             try:
                 self.event_queue.get_nowait()
@@ -32,12 +33,21 @@ class KeyboardCtrl(Controller):
             try:
                 event = self.event_queue.get_nowait()
                 events.append(event)
+                if event["pressed"]:
+                    self.pressed_keys.add(event["name"])
+                else:
+                    self.pressed_keys.discard(event["name"])
             except Empty:
                 break
         return events
 
     def get_data(self):
-        return {"keyboard_event": self.get_events()}
+        events = self.get_events()
+        return {
+            "keyboard_event": events,
+            "pressed_keys": sorted(self.pressed_keys),
+            "fresh": self.keyboard_thread.is_alive(),
+        }
 
     def process_triggers(self, ctrl_data):
         commands = []

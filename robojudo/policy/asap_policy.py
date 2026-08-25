@@ -3,10 +3,15 @@ import os
 import time
 
 import numpy as np
-import onnxruntime as ort
 
+from robojudo.controller.velocity_source import (
+    JOYSTICK_SOURCE_TYPES,
+    get_pressed_velocity_keys,
+    get_selected_velocity_source,
+)
 from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 from robojudo.policy import Policy, policy_registry
+from robojudo.policy.onnx_runtime import create_onnx_session
 from robojudo.policy.policy_cfgs import AsapLocoPolicyCfg, AsapPolicyCfg
 from robojudo.policy.utils.velocity_command import get_fresh_zmq_velocity
 from robojudo.utils.progress import ProgressBar
@@ -26,7 +31,7 @@ class AsapPolicy(Policy):
             raise FileNotFoundError(f"Model file not found at {cfg_policy.policy_file}")
 
         logger.debug(f"Loading mimic policy '{cfg_policy.policy_name}' from {cfg_policy.policy_file}")
-        self.session = ort.InferenceSession(cfg_policy.policy_file)
+        self.session = create_onnx_session(cfg_policy.policy_file, cfg_policy)
 
         self.input_names = [i.name for i in self.session.get_inputs()]
         self.output_names = [o.name for o in self.session.get_outputs()]
@@ -176,7 +181,7 @@ class AsapLocoPolicy(Policy):
             raise FileNotFoundError(f"Model file not found at {cfg_policy.policy_file}")
 
         logger.debug(f"Loading mimic policy '{cfg_policy.policy_name}' from {cfg_policy.policy_file}")
-        self.session = ort.InferenceSession(cfg_policy.policy_file)
+        self.session = create_onnx_session(cfg_policy.policy_file, cfg_policy)
 
         self.input_names = [i.name for i in self.session.get_inputs()]
         self.output_names = [o.name for o in self.session.get_outputs()]
@@ -320,78 +325,65 @@ class AsapLocoPolicy(Policy):
     def _update_commands(self, ctrl_data):
         if (ref_dof_pos := ctrl_data.get("ref_dof_pos", None)) is not None:
             self.ref_upper_dof_pos = ref_dof_pos.copy()[-self.num_upper_dofs :]
-        zmq_configured = False
-        selected = False
-        for key in ctrl_data.keys():
-            if key == "VelocityZmqCtrl":
-                zmq_configured = True
-                velocity = get_fresh_zmq_velocity(ctrl_data[key])
-                if velocity is None or selected:
-                    continue
+        stand_toggle_requested = False
+        stop_requested = False
+        for key in JOYSTICK_SOURCE_TYPES.intersection(ctrl_data.keys()):
+            for event in ctrl_data[key]["button_event"]:
+                if event["type"] == "button" and event["pressed"]:
+                    match event["name"]:
+                        case "Left":
+                            stand_toggle_requested = not stand_toggle_requested
+                        case "Up":
+                            self.base_height_command[0] += 0.05
+                        case "Down":
+                            self.base_height_command[0] -= 0.05
+
+        keyboard_entry = ctrl_data.get("KeyboardCtrl", {})
+        for event in keyboard_entry.get("keyboard_event", []):
+            if event["type"] == "keyboard" and event["pressed"]:
+                match event["name"]:
+                    case "z":
+                        stop_requested = True
+                    case "1":
+                        self.base_height_command += 0.05
+                    case "2":
+                        self.base_height_command -= 0.05
+                    case "=":
+                        stand_toggle_requested = not stand_toggle_requested
+
+        selected = get_selected_velocity_source(ctrl_data)
+        if selected == "VelocityZmqCtrl":
+            velocity = get_fresh_zmq_velocity(ctrl_data[selected])
+            if velocity is None:
+                self.lin_vel_command.fill(0.0)
+                self.ang_vel_command.fill(0.0)
+                self.stand_command.fill(0)
+            else:
                 self.lin_vel_command[:] = np.clip(velocity[:2], [-0.5, -0.5], [0.5, 0.5])
                 self.ang_vel_command[0] = np.clip(velocity[2], -1.0, 1.0)
                 self.stand_command[0] = int(np.linalg.norm(velocity) > 1e-6)
-                selected = True
-                break
-            if key in ["JoystickCtrl", "RosJoystickCtrl", "UnitreeCtrl"]:
-                axes = ctrl_data[key]["axes"]
-                lx, ly, rx, _ry = axes["LeftX"], axes["LeftY"], axes["RightX"], axes["RightY"]
-
-                self.lin_vel_command[1] = command_remap(lx, [0.5, 0, -0.5]) * self.stand_command[0]
-                self.lin_vel_command[0] = command_remap(ly, [-0.5, 0, 0.5]) * self.stand_command[0]
-                self.ang_vel_command[0] = command_remap(rx, [1, 0, -1]) * self.stand_command[0]
-
-                button_event = ctrl_data[key]["button_event"]
-                selected = True
-                for event in button_event:
-                    if event["type"] == "button" and event["pressed"]:
-                        match event["name"]:
-                            case "Left":
-                                self.stand_command = 1 - self.stand_command
-                                if self.stand_command == 0:
-                                    self.ang_vel_command[0] = 0.0
-                                    self.lin_vel_command[0] = 0.0
-                                    self.lin_vel_command[1] = 0.0
-                            case "Up":
-                                self.base_height_command[0] += 0.05
-                            case "Down":
-                                self.base_height_command[0] -= 0.05
-                break
-            elif key == "KeyboardCtrl":
-                selected = True
-                for event in ctrl_data[key]["keyboard_event"]:
-                    if event["type"] == "keyboard" and event["pressed"]:
-                        match event["name"]:
-                            case "w":
-                                self.lin_vel_command[0] += 0.1 if self.stand_command else 0.0
-                            case "s":
-                                self.lin_vel_command[0] -= 0.1 if self.stand_command else 0.0
-                            case "a":
-                                self.lin_vel_command[1] += 0.1 if self.stand_command else 0.0
-                            case "d":
-                                self.lin_vel_command[1] -= 0.1 if self.stand_command else 0.0
-                            case "q":
-                                self.ang_vel_command[0] -= 0.1
-                            case "e":
-                                self.ang_vel_command[0] += 0.1
-                            case "z":
-                                self.ang_vel_command[0] = 0.0
-                                self.lin_vel_command[0] = 0.0
-                                self.lin_vel_command[1] = 0.0
-                            case "1":
-                                self.base_height_command += 0.05
-                            case "2":
-                                self.base_height_command -= 0.05
-                            case "=":
-                                self.stand_command = 1 - self.stand_command
-                                if self.stand_command == 0:
-                                    self.ang_vel_command[0] = 0.0
-                                    self.lin_vel_command[0] = 0.0
-                                    self.lin_vel_command[1] = 0.0
-        if zmq_configured and not selected:
+        elif selected in JOYSTICK_SOURCE_TYPES:
+            axes = ctrl_data[selected]["axes"]
+            lx, ly, rx = axes["LeftX"], axes["LeftY"], axes["RightX"]
+            self.lin_vel_command[1] = command_remap(lx, [0.5, 0, -0.5]) * self.stand_command[0]
+            self.lin_vel_command[0] = command_remap(ly, [-0.5, 0, 0.5]) * self.stand_command[0]
+            self.ang_vel_command[0] = command_remap(rx, [1, 0, -1]) * self.stand_command[0]
+        elif selected == "KeyboardCtrl":
+            pressed = get_pressed_velocity_keys(keyboard_entry)
+            self.lin_vel_command[0] = 0.1 * (("w" in pressed) - ("s" in pressed)) * self.stand_command[0]
+            self.lin_vel_command[1] = 0.1 * (("a" in pressed) - ("d" in pressed)) * self.stand_command[0]
+            self.ang_vel_command[0] = 0.1 * (("e" in pressed) - ("q" in pressed))
+        else:
             self.lin_vel_command.fill(0.0)
             self.ang_vel_command.fill(0.0)
-            self.stand_command.fill(0)
+            if "VelocityZmqCtrl" in ctrl_data:
+                self.stand_command.fill(0)
+
+        if stand_toggle_requested:
+            self.stand_command = 1 - self.stand_command
+        if stop_requested or self.stand_command[0] == 0:
+            self.lin_vel_command.fill(0.0)
+            self.ang_vel_command.fill(0.0)
 
     def debug_viz(self, visualizer: MujocoVisualizer, env_data, ctrl_data, extras):
         base_pos = env_data["base_pos"]

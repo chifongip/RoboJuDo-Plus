@@ -319,6 +319,12 @@ Configurations that enable `AIMDK` odometry require
 
 For the complete topic, frame, timeout, and preflight description, see [`docs/x2_sim2real.md`](docs/x2_sim2real.md).
 
+### ROS 2 DDS latency workaround
+
+The X2 robot's ROS 2 DDS configuration can cause data latency. When deploying on X2, refer to
+[ros2-domain-bridge](https://github.com/chifongip/ros2-domain-bridge.git) for a temporary workaround that relays the
+affected data and mitigates the latency issue.
+
 ### Run an X2 policy
 
 Run the real configuration only with the robot supported and an operator holding the emergency stop:
@@ -465,10 +471,13 @@ The controller subscribes to `tcp://127.0.0.1:8558` by default. Positive `x` is 
 positive angular `z` is counter-clockwise yaw. Locomotion policies use those three planar components, clamp them to
 their trained ranges, and ignore the remaining validated Twist components.
 
-Messages older than `0.25` seconds are stale. Controller-list order determines priority: the first fresh velocity
-source wins, so the opt-in `g1_zmq` and `g1_real_zmq` configurations put ZMQ first and use the joystick or Unitree
-remote as fallback. A stale stream with no fallback produces zero planar velocity. Current configurations remain
-unchanged.
+Messages older than `0.25` seconds are stale. When multiple velocity sources are configured, each must have a unique
+`velocity_priority`; larger values win. The opt-in `g1_zmq` and `g1_real_zmq` configurations assign joystick or
+Unitree priority `300` and ZMQ priority `100`, so manual stick activity takes control immediately. Centering the
+stick holds an authoritative zero command for the configured `0.5` second lease, after which a fresh ZMQ command
+resumes. Continuous neutral stick samples do not
+renew the lease. Buttons and safety triggers remain active regardless of which source currently owns velocity.
+A stale stream with no active fallback produces zero planar velocity.
 
 Test in MuJoCo before using a real robot:
 
@@ -478,10 +487,11 @@ python scripts/run_pipeline.py -c g1_zmq
 python scripts/test_velocity_zmq.py
 ```
 
-For a custom configuration, place `VelocityZmqCtrlCfg()` before the desired local controller. Use
-`VelocityZmqCtrlCfg(endpoint="tcp://127.0.0.1:9000", timeout_s=0.5)` to override transport settings. The interface is
-supported by Unitree, Unitree-without-gait, Smooth, AMO, ASAP Loco, and G1/X2 Locomanipulation policies; motion mimic,
-tracking, recovery, H2H, X2 deploy, and TWIST motion-stream policies do not consume velocity commands.
+For a custom configuration, assign every velocity source a unique priority; controller-list order is irrelevant. For
+example, use `JoystickCtrlCfg(velocity_priority=300)` with
+`VelocityZmqCtrlCfg(velocity_priority=100, endpoint="tcp://127.0.0.1:9000", timeout_s=0.5)`. The interface is supported
+by Unitree, Unitree-without-gait, Smooth, AMO, ASAP Loco, and G1/X2 Locomanipulation policies; motion mimic, tracking,
+recovery, H2H, X2 deploy, and TWIST motion-stream policies do not consume velocity commands.
 
 ## Safety and troubleshooting
 
