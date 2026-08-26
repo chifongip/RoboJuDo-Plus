@@ -98,7 +98,7 @@ class AgiBotCppEnv(Environment):
     def self_check(self):
         if self.aimdk is None:
             return
-        if self.aimdk.self_check():
+        if self.aimdk.self_check(self.cfg_env.aimdk.startup_state_timeout):
             return
 
         report = self.aimdk.get_state_freshness_report(self.cfg_env.aimdk.state_timeout)

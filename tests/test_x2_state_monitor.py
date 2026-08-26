@@ -201,8 +201,15 @@ class TestX2StateMonitor(unittest.TestCase):
     def test_startup_recheck_accepts_state_that_recovered_after_timeout(self):
         from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
 
+        startup_timeout = 7.5
+        self_check_timeouts = []
+
+        def self_check(timeout):
+            self_check_timeouts.append(timeout)
+            return False
+
         backend = SimpleNamespace(
-            self_check=lambda: False,
+            self_check=self_check,
             get_state_freshness_report=lambda timeout: freshness_report(
                 required_streams_fresh=True,
                 reasons=[],
@@ -216,9 +223,13 @@ class TestX2StateMonitor(unittest.TestCase):
         env = AgiBotCppEnv.__new__(AgiBotCppEnv)
         env.aimdk = backend
         env._odometry_type = "NONE"
-        env.cfg_env = SimpleNamespace(aimdk=SimpleNamespace(state_timeout=0.1))
+        env.cfg_env = SimpleNamespace(
+            aimdk=SimpleNamespace(startup_state_timeout=startup_timeout, state_timeout=0.1)
+        )
 
         env.self_check()
+
+        self.assertEqual(self_check_timeouts, [startup_timeout])
 
     def test_existing_output_requires_an_explicit_mode(self):
         with tempfile.TemporaryDirectory() as directory:

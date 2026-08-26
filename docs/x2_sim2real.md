@@ -47,6 +47,11 @@ require fresh joint and IMU state only. When a configuration enables `odometry_t
 `/aima/mc/leg_odometry`; the SuperOdom loco-mimic preset requires `/laser_odometry`. Missing or stale required state
 prevents activation and triggers damping.
 
+At startup, `aimdk.startup_state_timeout` bounds the wait for the first complete, valid joint and IMU state
+snapshot; it defaults to `2.0` seconds. Increase it when the robot's state publishers are expected to come up after
+the deployment process. Keep `aimdk.state_timeout` at its control-safety value because it governs freshness after
+startup.
+
 To capture the exact inputs to the freshness decision, run the passive monitor in a second terminal with the same
 deployment config:
 

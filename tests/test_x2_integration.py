@@ -93,6 +93,7 @@ class TestX2Integration(unittest.TestCase):
         self.assertEqual(real_cfg.env.aimdk.publish_dt, 0.002)
         self.assertEqual(real_cfg.env.aimdk.command_timeout, 0.1)
         self.assertEqual(real_cfg.env.aimdk.command_damping_timeout, 0.5)
+        self.assertEqual(real_cfg.env.aimdk.startup_state_timeout, 2.0)
         self.assertEqual(real_cfg.env.aimdk.state_timeout, 0.1)
         self.assertEqual(real_cfg.env.aimdk.state_damping_timeout, 0.5)
         self.assertEqual(real_cfg.env.aimdk.odometry_damping_timeout, 0.5)
@@ -122,6 +123,7 @@ class TestX2Integration(unittest.TestCase):
         timeout_fields = (
             "command_timeout",
             "command_damping_timeout",
+            "startup_state_timeout",
             "state_timeout",
             "state_damping_timeout",
             "odometry_timeout",

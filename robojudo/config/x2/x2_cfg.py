@@ -13,7 +13,7 @@ from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 
 from .env.x2_env_cfg import X2_ARM_JOINT_NAMES, X2JointDefaultDoF
 from .env.x2_mujuco_env_cfg import X2MujocoEnvCfg
-from .env.x2_real_env_cfg import X2RealEnvCfg
+from .env.x2_real_env_cfg import X2AimdkCfg, X2RealEnvCfg
 from .pipeline.x2_loco_mimic_pipeline_cfg import X2LocomanipulationLocoMimicPipelineCfg
 from .policy.x2_amp_recovery_policy_cfg import X2AmpRecoveryPolicyCfg
 from .policy.x2_beyondmimic_policy_cfg import X2BeyondMimicPolicyCfg
@@ -380,6 +380,7 @@ class x2_locomimic_real(x2_locomimic):
     env: X2RealEnvCfg = X2RealEnvCfg(
         dof=X2LocomanipulationEnvDoF(),
         odometry_type="NONE",
+        aimdk=X2AimdkCfg(startup_state_timeout=10.0),
     )
     ctrl: list[RosJoystickCtrlCfg | UpperBodyZmqCtrlCfg | VelocityZmqCtrlCfg] = [
         RosJoystickCtrlCfg(

@@ -457,6 +457,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertTrue(sim_cfg.do_safety_check)
         self.assertEqual(sim_cfg.ctrl[1].triggers_extra["["], "[POLICY_MIMIC]")
         self.assertEqual(real_cfg.env.env_type, "AgiBotCppEnv")
+        self.assertEqual(real_cfg.env.aimdk.startup_state_timeout, 10.0)
         self.assertTrue(real_cfg.do_safety_check)
         self.assertTrue(real_cfg.realign_on_policy_switch)
         self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")

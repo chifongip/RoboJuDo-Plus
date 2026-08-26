@@ -162,6 +162,8 @@ class AgiBotEnvCfg(RobotEnvCfg):
 
         shutdown_damping: float = Field(default=5.0, ge=0.0, allow_inf_nan=False)
         shutdown_publish_duration: float = Field(default=0.2, ge=0.0, allow_inf_nan=False)
+        startup_state_timeout: float = Field(default=2.0, gt=0.0, allow_inf_nan=False)
+        """Maximum time to wait for the initial complete AimDK state snapshot."""
         state_timeout: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
         """State-stream age that enters the temporary measured-position hold state."""
 
