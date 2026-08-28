@@ -95,11 +95,30 @@ def make_profile(label: str, joint_names: list[str], default_pos: list[float], p
         for name, limit in zip(names, position_limits, strict=True)
     }
     elbow_sign = -1.0 if label == "X2" else 1.0
+    poses = make_poses(default_pose, elbow_sign)
+    if label == "X2":
+        poses["mirrored_arms"] = {
+            **default_pose,
+            "left_shoulder_pitch_joint": 0.3792,
+            "left_shoulder_roll_joint": -0.0129,
+            "left_shoulder_yaw_joint": -0.5437,
+            "left_elbow_joint": -1.7308,
+            "left_wrist_pitch_joint": -0.4580,
+            "left_wrist_roll_joint": -0.4,
+            "left_wrist_yaw_joint": 1.6873,
+            "right_shoulder_pitch_joint": 0.3792,
+            "right_shoulder_roll_joint": 0.0129,
+            "right_shoulder_yaw_joint": 0.5437,
+            "right_elbow_joint": -1.7308,
+            "right_wrist_pitch_joint": -0.4580,
+            "right_wrist_roll_joint": 0.4,
+            "right_wrist_yaw_joint": -1.6873,
+        }
     return TestProfile(
         label=label,
         joint_names=names,
         position_limits=limits,
-        poses=make_poses(default_pose, elbow_sign),
+        poses=poses,
     )
 
 
@@ -131,6 +150,7 @@ KEY_TO_POSE = {
     "3": "wide",
     "4": "carry",
     "5": "wave_left",
+    "6": "mirrored_arms",
 }
 
 
@@ -170,7 +190,6 @@ def parse_args():
     )
     parser.add_argument(
         "--pose",
-        choices=KEY_TO_POSE.values(),
         default="default",
         help="Initial predefined pose (default: default)",
     )
@@ -185,7 +204,8 @@ def parse_args():
 def print_controls(profile: TestProfile):
     print(f"\nPredefined {profile.label} arm poses:")
     for key, pose_name in KEY_TO_POSE.items():
-        print(f"  {key} - {pose_name}")
+        if pose_name in profile.poses:
+            print(f"  {key} - {pose_name}")
     print("  q - stop publishing and quit")
     print("\nThe robot returns toward its default arm pose after publishing stops.\n")
 
@@ -193,6 +213,8 @@ def print_controls(profile: TestProfile):
 def main():
     args = parse_args()
     profile = PROFILES[args.robot]
+    if args.pose not in profile.poses:
+        raise SystemExit(f"Pose {args.pose!r} is not available for {profile.label}")
     validate_profile(profile)
 
     context = zmq.Context()
@@ -224,7 +246,7 @@ def main():
                 key = sys.stdin.read(1).lower()
                 if key == "q":
                     break
-                if key in KEY_TO_POSE:
+                if key in KEY_TO_POSE and KEY_TO_POSE[key] in profile.poses:
                     current_pose_name = KEY_TO_POSE[key]
                     print(f"\nPose: {current_pose_name}")
 
