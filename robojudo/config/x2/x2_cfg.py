@@ -385,7 +385,7 @@ class x2_locomimic_real(x2_locomimic):
     ctrl: list[RosJoystickCtrlCfg | UpperBodyZmqCtrlCfg | VelocityZmqCtrlCfg] = [
         RosJoystickCtrlCfg(
             velocity_priority=300,
-            profile="ps5_bluetooth",
+            profile="ps5_bluetooth_jetson",
             topic="/joy",
             timeout_s=0.5,
             triggers={

@@ -60,11 +60,14 @@ class TestRosJoyTranslator(unittest.TestCase):
         self.assertEqual(unchanged.events, [])
 
     def test_calibrated_horizontal_stick_directions_are_normalized(self):
-        for profile, button_count in (("xbox", 11), ("ps5", 13), ("ps5_bluetooth", 13)):
+        for profile, button_count in (("xbox", 11), ("ps5", 13), ("ps5_bluetooth", 13), ("ps5_bluetooth_jetson", 17)):
             with self.subTest(profile=profile):
                 translator = RosJoyTranslator(profile)
+                raw_axes = [-1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 0.0, 0.0]
+                if profile == "ps5_bluetooth_jetson":
+                    raw_axes = [-1.0, 1.0, -1.0, 1.0, 1.0, 1.0]
                 result = translator.translate(
-                    [-1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 0.0, 0.0],
+                    raw_axes,
                     [0] * button_count,
                     1.0,
                 )
@@ -116,6 +119,18 @@ class TestRosJoyTranslator(unittest.TestCase):
                 11: "L",
                 12: "R",
             },
+            "ps5_bluetooth_jetson": {
+                0: "A",
+                1: "B",
+                2: "X",
+                3: "Y",
+                4: "Back",
+                6: "Start",
+                7: "L",
+                8: "R",
+                9: "LB",
+                10: "RB",
+            },
         }
         for profile, expected_map in expected.items():
             with self.subTest(profile=profile):
@@ -124,6 +139,26 @@ class TestRosJoyTranslator(unittest.TestCase):
                     {index: translator.button_map[index] for index in expected_map},
                     expected_map,
                 )
+
+    def test_ps5_bluetooth_jetson_axes_triggers_and_dpad_buttons(self):
+        translator = RosJoyTranslator("ps5_bluetooth_jetson")
+        buttons = [0] * 17
+        buttons[2] = 1  # Square
+        buttons[10] = 1  # R1
+        buttons[11] = 1  # D-pad Up
+        buttons[14] = 1  # D-pad Right
+
+        result = translator.translate([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0], buttons, 1.0)
+
+        self.assertEqual(
+            result.axes,
+            {"LeftX": 1.0, "LeftY": 1.0, "RightX": 1.0, "RightY": 1.0, "LT": 1.0, "RT": 0.0},
+        )
+        self.assertEqual(
+            [(event["name"], event["pressed"]) for event in result.events],
+            [("X", True), ("RB", True), ("Up", True), ("Right", True)],
+        )
+        self.assertEqual(result.invalid_fields, [])
 
     def test_xbox_bluetooth_calibrated_axis_layout(self):
         translator = RosJoyTranslator("xbox_bluetooth")
@@ -189,6 +224,7 @@ class TestRosJoystickCtrl(unittest.TestCase):
             RosJoystickCtrlCfg(profile="unknown")
         self.assertEqual(RosJoystickCtrlCfg(profile="xbox_bluetooth").profile, "xbox_bluetooth")
         self.assertEqual(RosJoystickCtrlCfg(profile="ps5_bluetooth").profile, "ps5_bluetooth")
+        self.assertEqual(RosJoystickCtrlCfg(profile="ps5_bluetooth_jetson").profile, "ps5_bluetooth_jetson")
         with self.assertRaises(ValidationError):
             RosJoystickCtrlCfg(topic=" ")
         with self.assertRaises(ValidationError):

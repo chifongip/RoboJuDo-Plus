@@ -62,6 +62,26 @@ BUTTON_MAPS = {
         11: "L",  # L3
         12: "R",  # R3
     },
+    # Jetson PS5 Bluetooth calibration: face buttons 0-3, Create/Options 4/6,
+    # stick clicks 7-8, and shoulders 9-10.
+    "ps5_bluetooth_jetson": {
+        0: "A",  # Cross
+        1: "B",  # Circle
+        2: "X",  # Square
+        3: "Y",  # Triangle
+        4: "Back",  # Create
+        6: "Start",  # Options
+        7: "L",  # L3
+        8: "R",  # R3
+        9: "LB",  # L1
+        10: "RB",  # R1
+    },
+}
+
+# This Jetson joy_node layout sends D-pad directions as individual buttons,
+# rather than the two D-pad axes used by the other supported profiles.
+DPAD_BUTTON_MAPS = {
+    "ps5_bluetooth_jetson": {11: "Up", 12: "Down", 13: "Left", 14: "Right"},
 }
 
 # Measured joy_node layouts report horizontal sticks with right=-1.
@@ -71,6 +91,7 @@ AXIS_SIGNS = {
     "xbox_bluetooth": {"LeftX": -1.0, "LeftY": 1.0, "RightX": -1.0, "RightY": 1.0},
     "ps5": {"LeftX": -1.0, "LeftY": 1.0, "RightX": -1.0, "RightY": 1.0},
     "ps5_bluetooth": {"LeftX": -1.0, "LeftY": 1.0, "RightX": -1.0, "RightY": 1.0},
+    "ps5_bluetooth_jetson": {"LeftX": -1.0, "LeftY": 1.0, "RightX": -1.0, "RightY": 1.0},
 }
 
 AXIS_MAPS = {
@@ -96,6 +117,7 @@ AXIS_MAPS = {
         "DPadX": 6,
         "DPadY": 7,
     },
+    "ps5_bluetooth_jetson": {"LeftX": 0, "LeftY": 1, "RightX": 2, "RightY": 3, "LT": 4, "RT": 5},
 }
 
 
@@ -169,8 +191,6 @@ class RosJoyTranslator:
         right_x_index = self.axis_map["RightX"]
         right_y_index = self.axis_map["RightY"]
         right_trigger_index = self.axis_map["RT"]
-        dpad_x_index = self.axis_map["DPadX"]
-        dpad_y_index = self.axis_map["DPadY"]
         left_x = self._axis(raw_axes, left_x_index, 0.0, f"axes[{left_x_index}]/LeftX", invalid_fields)
         left_y = self._axis(raw_axes, left_y_index, 0.0, f"axes[{left_y_index}]/LeftY", invalid_fields)
         left_trigger = self._axis(
@@ -181,9 +201,6 @@ class RosJoyTranslator:
         right_trigger = self._axis(
             raw_axes, right_trigger_index, 1.0, f"axes[{right_trigger_index}]/RT", invalid_fields
         )
-        dpad_x = self._axis(raw_axes, dpad_x_index, 0.0, f"axes[{dpad_x_index}]/DPadX", invalid_fields)
-        dpad_y = self._axis(raw_axes, dpad_y_index, 0.0, f"axes[{dpad_y_index}]/DPadY", invalid_fields)
-
         self.axes = {
             "LeftX": round(left_x * self.axis_signs["LeftX"], 3),
             "LeftY": round(left_y * self.axis_signs["LeftY"], 3),
@@ -197,14 +214,27 @@ class RosJoyTranslator:
             name: self._button(raw_buttons, index, f"buttons[{index}]/{name}", invalid_fields)
             for index, name in self.button_map.items()
         }
-        current.update(
-            {
-                "Left": dpad_x > 0.5,
-                "Right": dpad_x < -0.5,
-                "Up": dpad_y > 0.5,
-                "Down": dpad_y < -0.5,
-            }
-        )
+        dpad_button_map = DPAD_BUTTON_MAPS.get(self.profile)
+        if dpad_button_map is not None:
+            current.update(
+                {
+                    name: self._button(raw_buttons, index, f"buttons[{index}]/{name}", invalid_fields)
+                    for index, name in dpad_button_map.items()
+                }
+            )
+        else:
+            dpad_x_index = self.axis_map["DPadX"]
+            dpad_y_index = self.axis_map["DPadY"]
+            dpad_x = self._axis(raw_axes, dpad_x_index, 0.0, f"axes[{dpad_x_index}]/DPadX", invalid_fields)
+            dpad_y = self._axis(raw_axes, dpad_y_index, 0.0, f"axes[{dpad_y_index}]/DPadY", invalid_fields)
+            current.update(
+                {
+                    "Left": dpad_x > 0.5,
+                    "Right": dpad_x < -0.5,
+                    "Up": dpad_y > 0.5,
+                    "Down": dpad_y < -0.5,
+                }
+            )
 
         events = []
         for name, pressed in current.items():

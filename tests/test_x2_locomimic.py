@@ -462,7 +462,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertTrue(real_cfg.realign_on_policy_switch)
         self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")
         self.assertEqual(real_cfg.ctrl[0].velocity_priority, 300)
-        self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
+        self.assertEqual(real_cfg.ctrl[0].profile, "ps5_bluetooth_jetson")
         self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
         self.assertEqual(real_cfg.ctrl[0].triggers["Back"], "[POLICY_LOCO]")
         self.assertEqual(real_cfg.ctrl[0].triggers["RB"], "[POLICY_SWITCH],NEXT")
