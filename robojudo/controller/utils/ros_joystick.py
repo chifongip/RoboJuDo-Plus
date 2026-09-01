@@ -45,6 +45,23 @@ BUTTON_MAPS = {
         11: "L",  # L3
         12: "R",  # R3
     },
+    # PS5 Bluetooth calibration: face buttons 0-3, shoulders/triggers 4-7,
+    # Create/Options 8-9, and stick clicks 11-12.
+    "ps5_bluetooth": {
+        0: "A",  # Cross
+        1: "B",  # Circle
+        2: "Y",  # Triangle
+        3: "X",  # Square
+        4: "LB",  # L1
+        5: "RB",  # R1
+        6: "LT",  # L2 digital button
+        7: "RT",  # R2 digital button
+        8: "Back",  # Create
+        9: "Start",  # Options
+        10: "Xbox",  # PS
+        11: "L",  # L3
+        12: "R",  # R3
+    },
 }
 
 # Measured joy_node layouts report horizontal sticks with right=-1.
@@ -53,6 +70,7 @@ AXIS_SIGNS = {
     "xbox": {"LeftX": -1.0, "LeftY": 1.0, "RightX": -1.0, "RightY": 1.0},
     "xbox_bluetooth": {"LeftX": -1.0, "LeftY": 1.0, "RightX": -1.0, "RightY": 1.0},
     "ps5": {"LeftX": -1.0, "LeftY": 1.0, "RightX": -1.0, "RightY": 1.0},
+    "ps5_bluetooth": {"LeftX": -1.0, "LeftY": 1.0, "RightX": -1.0, "RightY": 1.0},
 }
 
 AXIS_MAPS = {
@@ -68,6 +86,16 @@ AXIS_MAPS = {
         "DPadY": 7,
     },
     "ps5": {"LeftX": 0, "LeftY": 1, "LT": 2, "RightX": 3, "RightY": 4, "RT": 5, "DPadX": 6, "DPadY": 7},
+    "ps5_bluetooth": {
+        "LeftX": 0,
+        "LeftY": 1,
+        "LT": 2,
+        "RightX": 3,
+        "RightY": 4,
+        "RT": 5,
+        "DPadX": 6,
+        "DPadY": 7,
+    },
 }
 
 

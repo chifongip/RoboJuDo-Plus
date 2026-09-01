@@ -60,7 +60,7 @@ class TestRosJoyTranslator(unittest.TestCase):
         self.assertEqual(unchanged.events, [])
 
     def test_calibrated_horizontal_stick_directions_are_normalized(self):
-        for profile, button_count in (("xbox", 11), ("ps5", 13)):
+        for profile, button_count in (("xbox", 11), ("ps5", 13), ("ps5_bluetooth", 13)):
             with self.subTest(profile=profile):
                 translator = RosJoyTranslator(profile)
                 result = translator.translate(
@@ -89,6 +89,20 @@ class TestRosJoyTranslator(unittest.TestCase):
                 15: "Back",
             },
             "ps5": {
+                0: "A",
+                1: "B",
+                2: "Y",
+                3: "X",
+                4: "LB",
+                5: "RB",
+                6: "LT",
+                7: "RT",
+                8: "Back",
+                9: "Start",
+                11: "L",
+                12: "R",
+            },
+            "ps5_bluetooth": {
                 0: "A",
                 1: "B",
                 2: "Y",
@@ -174,6 +188,7 @@ class TestRosJoystickCtrl(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RosJoystickCtrlCfg(profile="unknown")
         self.assertEqual(RosJoystickCtrlCfg(profile="xbox_bluetooth").profile, "xbox_bluetooth")
+        self.assertEqual(RosJoystickCtrlCfg(profile="ps5_bluetooth").profile, "ps5_bluetooth")
         with self.assertRaises(ValidationError):
             RosJoystickCtrlCfg(topic=" ")
         with self.assertRaises(ValidationError):

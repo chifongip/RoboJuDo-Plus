@@ -63,7 +63,7 @@ class RosJoystickCtrlCfg(JoystickCtrlCfg):
 
     ctrl_type: str = "RosJoystickCtrl"
     topic: str = "/joy"
-    profile: Literal["xbox", "xbox_bluetooth", "ps5"] = "xbox"
+    profile: Literal["xbox", "xbox_bluetooth", "ps5", "ps5_bluetooth"] = "xbox"
     queue_capacity: int = Field(default=256, gt=0)
 
     @model_validator(mode="after")

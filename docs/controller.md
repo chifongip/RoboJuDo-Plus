@@ -87,7 +87,7 @@ Select the raw `joy_node` layout explicitly in the pipeline configuration:
 from robojudo.controller.ctrl_cfgs import RosJoystickCtrlCfg
 
 RosJoystickCtrlCfg(
-    profile="xbox",  # "xbox", "xbox_bluetooth", or "ps5"
+    profile="xbox",  # "xbox", "xbox_bluetooth", "ps5", or "ps5_bluetooth"
     topic="/joy",
     timeout_s=0.5,
     triggers_extra={"RB+Down": "[POLICY_SWITCH],0"},
@@ -101,6 +101,10 @@ Circle, Square, and Triangle are normalized to `A`, `B`, `X`, and `Y`; Create, O
 Xbox controllers use different raw layouts over USB and Bluetooth. Select `profile="xbox"` for USB and
 `profile="xbox_bluetooth"` for Bluetooth.
 
+PS5 controllers calibrated over Bluetooth use the same raw layout as the PS5 profile: axes 0/1 and 3/4 are the
+left/right sticks, axes 2/5 are L2/R2, axes 6/7 are the D-pad, and buttons 0-12 use the standard PS5 mapping.
+Select `profile="ps5_bluetooth"` when using that connection.
+
 The controller returns neutral axes until the first message. If `/joy` becomes stale, it neutralizes all axes and
 emits release events for held buttons once. `joy_node` does not include a device identity in `sensor_msgs/msg/Joy`,
 so the controller profile cannot be detected reliably from the message itself.
@@ -110,6 +114,7 @@ To measure the raw layout of a specific controller and connection mode, run the 
 
 ```bash
 python scripts/calibrate_ros_joystick.py --profile ps5 --connection usb
+python scripts/calibrate_ros_joystick.py --profile ps5 --connection bluetooth
 python scripts/calibrate_ros_joystick.py --profile xbox --connection bluetooth
 ```
 
