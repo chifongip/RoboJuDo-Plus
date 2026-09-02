@@ -127,6 +127,9 @@ python submodule_install.py dex_teleop
 # OmniHand Python SDK; selects the active CPython ABI and x86_64/aarch64 wheel.
 python submodule_install.py omnihand_sdk
 
+# CASIA Hand-M SDK; builds its bundled native extension for the active Linux architecture.
+python submodule_install.py casiahand_sdk
+
 # PHC motion controller support.
 python submodule_install.py phc
 ```

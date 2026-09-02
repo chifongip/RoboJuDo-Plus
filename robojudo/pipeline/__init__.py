@@ -35,6 +35,7 @@ pipeline_registry.add(
     ".x2_locomanipulation_loco_mimic_pipeline",
 )
 pipeline_registry.add("G1LocomanipulationPipeline", ".g1_locomanipulation_pipeline")
+pipeline_registry.add("G1CasiaHandLocomanipulationPipeline", ".g1_casia_hand_locomanipulation_pipeline")
 pipeline_registry.add("G1Gr00tLocomanipulationPipeline", ".g1_gr00t_locomanipulation_pipeline")
 pipeline_registry.add(
     "G1LocomanipulationLocoMimicPipeline",

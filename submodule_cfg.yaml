@@ -50,6 +50,13 @@ omnihand_sdk:
   installer: scripts/install_omnihand.py
 
 
+# CASIA Hand-M Python SDK. The editable install builds its bundled C++
+# extension for the active Linux architecture and Python environment.
+casiahand_sdk:
+  install: false
+  path: third_party/casiahand_sdk
+
+
 # For OmniH2O, motionlib controller
 phc:
   install: false

@@ -1,10 +1,12 @@
 from robojudo.config import cfg_registry
 from robojudo.controller.ctrl_cfgs import (
+    CasiaHandCfg,
     Gr00tCameraCfg,
     Gr00tZmqCtrlCfg,
     JoystickCtrlCfg,  # noqa: F401
     KeyboardCtrlCfg,  # noqa: F401
     UnitreeCtrlCfg,  # noqa: F401
+    UpperBodyCasiaHandZmqCtrlCfg,
     UpperBodyZmqCtrlCfg,
     VelocityZmqCtrlCfg,
 )
@@ -389,6 +391,62 @@ class g1_29_locomanipulation_stiff_real(g1_29_locomanipulation_stiff):
         G1Locomanipulation29ObsDoF().joint_names[15:]
     )
     do_safety_check: bool = True
+
+
+def _g1_casia_locomanipulation_real_ctrl(
+    joint_names: list[str],
+) -> list[UnitreeCtrlCfg | UpperBodyCasiaHandZmqCtrlCfg]:
+    return [
+        UnitreeCtrlCfg(
+            combination_init_buttons=["L1", "R1"],
+            triggers={
+                "A": "[PASSIVE_DEFAULT]",
+                "B": "[DAMPING_DEFAULT]",
+                "Y": "[JOINT_DEFAULT]",
+                "X": "[RL_DEFAULT]",
+                "Start": "[UPPER_BODY_TOGGLE]",
+                "L1+R1+Start": "[RECORD_START_STOP]",
+                "L1+R1+Select": "[RECORD_PAUSE_RESUME]",
+                "L1+R1+X": "[RECORD_CONFIRM_SAVE]",
+                "L1+R1+B": "[RECORD_DISCARD]",
+                "L1+R1+A": "[SHUTDOWN]",
+            },
+        ),
+        UpperBodyCasiaHandZmqCtrlCfg(
+            joint_names=joint_names,
+            casia_hand=CasiaHandCfg(),
+        ),
+    ]
+
+
+@cfg_registry.register
+class g1_23_casia_locomanipulation_default_real(g1_23_locomanipulation_default_real):
+    """G1 23-DOF default-gain policy with direct dual CASIA Hand control."""
+
+    pipeline_type: str = "G1CasiaHandLocomanipulationPipeline"
+    ctrl: list[UnitreeCtrlCfg | UpperBodyCasiaHandZmqCtrlCfg] = _g1_casia_locomanipulation_real_ctrl(
+        G1Locomanipulation23ObsDoF().joint_names[13:]
+    )
+
+
+@cfg_registry.register
+class g1_23_casia_locomanipulation_stiff_real(g1_23_locomanipulation_stiff_real):
+    """G1 23-DOF stiff-gain policy with direct dual CASIA Hand control."""
+
+    pipeline_type: str = "G1CasiaHandLocomanipulationPipeline"
+    ctrl: list[UnitreeCtrlCfg | UpperBodyCasiaHandZmqCtrlCfg] = _g1_casia_locomanipulation_real_ctrl(
+        G1Locomanipulation23ObsDoF().joint_names[13:]
+    )
+
+
+@cfg_registry.register
+class g1_29_casia_locomanipulation_stiff_real(g1_29_locomanipulation_stiff_real):
+    """G1 29-DOF stiff-gain policy with direct dual CASIA Hand control."""
+
+    pipeline_type: str = "G1CasiaHandLocomanipulationPipeline"
+    ctrl: list[UnitreeCtrlCfg | UpperBodyCasiaHandZmqCtrlCfg] = _g1_casia_locomanipulation_real_ctrl(
+        G1Locomanipulation29ObsDoF().joint_names[15:]
+    )
 
 
 def _g1_gr00t_locomanipulation_sim_ctrl(

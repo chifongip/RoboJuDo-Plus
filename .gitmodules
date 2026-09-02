@@ -32,3 +32,6 @@
 [submodule "third_party/omnihand_sdk"]
 	path = third_party/omnihand_sdk
 	url = https://github.com/AgibotTech/agillink_omnihand_sdk.git
+[submodule "third_party/casiahand_sdk"]
+	path = third_party/casiahand_sdk
+	url = https://github.com/Breezewrf/casiahand_sdk.git

@@ -23,6 +23,10 @@ The dedicated `UpperBodyHandZmqCtrlCfg` path appends the 24 measured OmniHand ac
 commands to the arm schema. Hand joints remain separate from the X2/AimDK environment joint list; arm-only controllers
 and pipelines do not import or initialize the hand runtime.
 
+The symmetric `UpperBodyCasiaHandZmqCtrlCfg` path appends the 20 physical CASIA Hand-M motor positions and commands
+to a G1 arm schema. It accepts only dex teleop's 10-joint-per-hand `sim2real` layout; the 14-joint-per-hand MuJoCo
+layout is deliberately rejected.
+
 ## Stage 1: real-time capture
 
 Install and start the standalone service:
@@ -62,6 +66,38 @@ python teleop/robot_control/vr_arm_hand_teleop.py \
 
 RoboJuDo subscribes to the atomic 14-arm-plus-24-hand frames on dex teleop port 8560; the old per-hand ports are not
 used. Use a new dataset root/repository for this 38-joint schema; it cannot be appended to an existing arm-only dataset.
+
+For G1 with dual CASIA Hand-M hardware, install the source-built SDK in the deployment environment:
+
+```bash
+python submodule_install.py casiahand_sdk
+```
+
+Make sure the active user can access the configured serial device (default `/dev/ttyUSB0`). Start dex teleop with only
+the synchronized stream; the legacy ports 5555/5556 are unnecessary because RoboJuDo owns the CASIA SDK directly:
+
+```bash
+python teleop/robot_control/vr_arm_hand_teleop.py \
+  --backend real \
+  --robot g1_23 \
+  --hand casia \
+  --no-casia-enable-zmq \
+  --sync-frame-enable-zmq
+```
+
+Then run the matching real pipeline, for example:
+
+```bash
+python scripts/run_pipeline.py \
+  -c g1_23_casia_locomanipulation_stiff_real \
+  --record \
+  --record-task "pick up the red cup"
+```
+
+The available CASIA presets are `g1_23_casia_locomanipulation_default_real`,
+`g1_23_casia_locomanipulation_stiff_real`, and `g1_29_casia_locomanipulation_stiff_real`. They record 10 or 14 arm
+joints followed by the same 20 physical hand motors in both state and action. Do not start a standalone CASIA ZMQ
+receiver or hardware server alongside RoboJuDo.
 
 The recorder service binds `tcp://*:8560` by default and the pipeline connects to `tcp://127.0.0.1:8560`. Recording
 controls are documented in [the recorder README](../packages/robojudo_recorder/README.md).
