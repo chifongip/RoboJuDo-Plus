@@ -1,9 +1,9 @@
 control_endpoint: tcp://127.0.0.1:8560
 
 dataset:
-  root: record_data/x2_move_box_center_test
-  raw_root: record_data/x2_move_box_center_test_raw
-  repo_id: Breeze-park/x2_move_box_center_test
+  root: record_data/x2_step_to_box_move_box_center_test
+  raw_root: record_data/x2_step_to_box_move_box_center_test_raw
+  repo_id: Breeze-park/x2_step_to_box_move_box_center_test
   fps: 30
   codec: libx264
   jpeg_quality: 90
