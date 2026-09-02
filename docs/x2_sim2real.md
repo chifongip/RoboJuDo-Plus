@@ -23,6 +23,7 @@ Initialize and build the pinned AimDK SDK, then install the ROS 2 extension with
 source /opt/ros/humble/setup.bash
 conda activate robojudo-plus
 python submodule_install.py aimdk
+python submodule_install.py omnihand_sdk
 source third_party/aimdk/install/setup.bash
 ```
 
@@ -31,6 +32,15 @@ only `aimdk_msgs`, installs the Python/CMake build tools into the active environ
 PEP 517 build isolation. Source the generated AimDK setup file in every shell used for real X2 deployment. Use
 `python submodule_install.py --clean aimdk` only when you intentionally want to discard AimDK C++ backend changes and
 restore its repository-pinned revision.
+
+`x2_omnihand_locomanipulation_real` embeds direct dual OmniHand Pro control. The OmniHand installer only installs the
+platform-matched Python wheel; it does not modify `/usr/local`. On first use, install USB-CAN permissions with
+`sudo bash third_party/omnihand_sdk/linux/x64/setup_udev.sh` (or `linux/aarch64`) and log out and back in. The default HCAN
+mapping is left adapter index 1 and right adapter index 0; HCAN channel zero is fixed internally and is not configurable.
+RoboJuDo subscribes to dex teleop's synchronized arm-and-hand stream on port 8560, splits each complete frame inside
+`UpperBodyHandZmqCtrl`, and calls the SDK directly. This dedicated controller and its
+`X2OmniHandLocomanipulationPipeline` leave the existing arm-only controller, simulation pipeline, and GR00T path
+unchanged. The old per-hand ports 5555/5556 and a standalone OmniHand ZMQ server are not used.
 
 Verify the native backend explicitly after installation:
 
@@ -152,8 +162,8 @@ height, `Z/C` for waist yaw, and `X` to reset commands. Its deployment command l
 
 ## Locomanipulation Upper-Body ZMQ Control
 
-The two locomanipulation presets subscribe to `tcp://127.0.0.1:8559` for optional arm targets. The publisher must bind
-that endpoint and send JSON objects in radians using the following envelope:
+The simulation locomanipulation preset subscribes to `tcp://127.0.0.1:8559` for optional arm-only targets. The
+publisher must bind that endpoint and send JSON objects in radians using the following envelope:
 
 ```json
 {
@@ -168,6 +178,10 @@ Updates may contain any non-empty subset of the 14 arm joints: shoulder pitch/ro
 for the left and right sides. Values from earlier partial updates remain active while messages are fresh. Waist joints
 remain policy-controlled, and the head remains at its configured default pose. Unknown joints, malformed envelopes,
 and non-finite values cause the complete message to be rejected.
+
+`x2_locomanipulation_real` instead connects to dex teleop at `tcp://10.0.1.20:8560` and requires one complete
+`synchronized_teleop_frame` containing all 14 arm joints and both sets of 12 OmniHand joints. It rejects incomplete,
+locally timed-out, duplicate/out-of-order, `sim2sim`, or incorrectly ordered frames atomically.
 
 External arm control starts disabled. Press joystick `Start` in `RL_DEFAULT`, or release keyboard `T` in simulation, to
 toggle it. Targets are clamped to the X2 joint limits and filtered at 50 Hz with an EMA alpha of `0.95`. If no valid

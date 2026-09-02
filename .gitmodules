@@ -29,3 +29,6 @@
 	path = packages/ros2_joy_cpp
 	url = https://github.com/chifongip/ros2_joy_cpp.git
 	branch = main
+[submodule "third_party/omnihand_sdk"]
+	path = third_party/omnihand_sdk
+	url = https://github.com/AgibotTech/agillink_omnihand_sdk.git

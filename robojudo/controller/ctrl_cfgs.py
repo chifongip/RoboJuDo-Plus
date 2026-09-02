@@ -192,6 +192,31 @@ class TwistRedisCtrlCfg(CtrlCfg):
     buffer_size: int = 5  # size of the data buffer to store recent commands
 
 
+class OmniHandCfg(Config):
+    """Direct dual OmniHand Pro hardware control embedded in an upper-body controller."""
+
+    transport: Literal["hcan", "zlgcan", "socketcan"] = "hcan"
+    left_adapter_index: int = Field(default=1, ge=0)
+    right_adapter_index: int = Field(default=0, ge=0)
+    zlgcan_left_channel_id: int | None = Field(default=None, ge=0)
+    zlgcan_right_channel_id: int | None = Field(default=None, ge=0)
+    left_interface: str = "can0"
+    right_interface: str = "can1"
+    hand_can_id: int | None = Field(default=None, ge=1, le=254)
+    command_timeout_s: float = Field(default=0.25, gt=0.0)
+    joint_state_fps: float = Field(default=100.0, gt=0.0)
+    joint_state_timeout_s: float = Field(default=0.25, gt=0.0)
+    startup_timeout_s: float = Field(default=5.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def validate_omnihand(self):
+        if self.transport == "socketcan" and (
+            not self.left_interface.strip() or not self.right_interface.strip()
+        ):
+            raise ValueError("OmniHand SocketCAN interfaces must not be empty")
+        return self
+
+
 class UpperBodyZmqCtrlCfg(CtrlCfg):
     """Named upper-body joint targets received from a ZMQ publisher."""
 
@@ -210,6 +235,14 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
         if len(self.joint_names) != len(set(self.joint_names)):
             raise ValueError("Upper-body ZMQ joint_names must be unique")
         return self
+
+
+class UpperBodyHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
+    """Atomic arm and dual-hand targets received from the synchronized teleop stream."""
+
+    ctrl_type: str = "UpperBodyHandZmqCtrl"
+    endpoint: str = "tcp://127.0.0.1:8560"
+    omnihand: OmniHandCfg = OmniHandCfg()
 
 
 class Gr00tCameraCfg(Config):

@@ -4,7 +4,9 @@ from robojudo.controller.ctrl_cfgs import (
     Gr00tZmqCtrlCfg,
     JoystickCtrlCfg,
     KeyboardCtrlCfg,
+    OmniHandCfg,
     RosJoystickCtrlCfg,
+    UpperBodyHandZmqCtrlCfg,
     UpperBodyZmqCtrlCfg,
     VelocityZmqCtrlCfg,
 )
@@ -217,6 +219,46 @@ class x2_locomanipulation_real(x2_locomanipulation):
             },
         ),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
+    ]
+    do_safety_check: bool = True
+
+
+@cfg_registry.register
+class x2_omnihand_locomanipulation_real(x2_locomanipulation):
+    """AgiBot X2 and Omnihand locomanipulation policy, Sim2Real through AimDK."""
+
+    pipeline_type: str = "X2OmniHandLocomanipulationPipeline"
+    env: X2RealEnvCfg = X2RealEnvCfg(
+        dof=X2LocomanipulationEnvDoF(),
+        odometry_type="NONE",
+    )
+    ctrl: list[RosJoystickCtrlCfg | UpperBodyHandZmqCtrlCfg] = [
+        RosJoystickCtrlCfg(
+            profile="xbox_bluetooth",
+            topic="/joy",
+            timeout_s=0.5,
+            triggers={
+                "A": "[PASSIVE_DEFAULT]",
+                "B": "[DAMPING_DEFAULT]",
+                "Y": "[JOINT_DEFAULT]",
+                "X": "[RL_DEFAULT]",
+                "Start": "[UPPER_BODY_TOGGLE]",
+                "LB+RB+Start": "[RECORD_START_STOP]",
+                "LB+RB+Back": "[RECORD_PAUSE_RESUME]",
+                "LB+RB+X": "[RECORD_CONFIRM_SAVE]",
+                "LB+RB+B": "[RECORD_DISCARD]",
+                "LB+RB+A": "[SHUTDOWN]",
+            },
+        ),
+        UpperBodyHandZmqCtrlCfg(
+            joint_names=X2_ARM_JOINT_NAMES,
+            endpoint="tcp://10.0.1.20:8560",
+            omnihand=OmniHandCfg(
+                transport="hcan",
+                left_adapter_index=1,
+                right_adapter_index=0,
+            ),
+        ),
     ]
     do_safety_check: bool = True
 

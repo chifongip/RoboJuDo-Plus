@@ -19,7 +19,9 @@ implementation while producing separate fixed-schema datasets.
 - `observation.images.<camera name>`: synchronized RGB video.
 - `action`: final joint position targets followed by `vx`, `vy`, yaw rate, and height command.
 
-Adding hand joints to `UpperBodyZmqCtrlCfg.joint_names` automatically extends state and action. 
+The dedicated `UpperBodyHandZmqCtrlCfg` path appends the 24 measured OmniHand active joints and their final clipped
+commands to the arm schema. Hand joints remain separate from the X2/AimDK environment joint list; arm-only controllers
+and pipelines do not import or initialize the hand runtime.
 
 ## Stage 1: real-time capture
 
@@ -39,8 +41,30 @@ python scripts/run_pipeline.py \
   --record-task "pick up the red cup"
 ```
 
-The pipeline binds `tcp://*:8560` by default and the recorder connects to `tcp://127.0.0.1:8560`. Recording controls
-are documented in [the recorder README](../packages/robojudo_recorder/README.md).
+For the X2 OmniHand preset, install the vendor wheel once in the deployment environment:
+
+```bash
+python submodule_install.py omnihand_sdk
+sudo bash third_party/omnihand_sdk/linux/x64/setup_udev.sh  # use linux/aarch64 on ARM
+```
+
+Log out and back in after installing the udev rules. RoboJuDo then owns the OmniHand SDK and HCAN adapters directly;
+do not start the standalone `omnihand_zmq_server.py`. Start dex teleop with its synchronized arm-and-hand stream, then
+run the real pipeline above:
+
+```bash
+python teleop/robot_control/vr_arm_hand_teleop.py \
+  --backend real \
+  --robot x2 \
+  --hand omnihand \
+  --sync-frame-enable-zmq
+```
+
+RoboJuDo subscribes to the atomic 14-arm-plus-24-hand frames on dex teleop port 8560; the old per-hand ports are not
+used. Use a new dataset root/repository for this 38-joint schema; it cannot be appended to an existing arm-only dataset.
+
+The recorder service binds `tcp://*:8560` by default and the pipeline connects to `tcp://127.0.0.1:8560`. Recording
+controls are documented in [the recorder README](../packages/robojudo_recorder/README.md).
 
 The real-time stage writes each control sample immediately to `controls.jsonl`, including source and receive timestamps,
 measured state, final action, and locomotion command. Camera frames are written independently per camera with both
