@@ -414,6 +414,7 @@ def _g1_casia_locomanipulation_real_ctrl(
         ),
         UpperBodyCasiaHandZmqCtrlCfg(
             joint_names=joint_names,
+            endpoint="tcp://192.168.252.72:8560",
             casia_hand=CasiaHandCfg(),
         ),
     ]

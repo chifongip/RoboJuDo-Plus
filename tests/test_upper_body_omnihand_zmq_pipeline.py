@@ -4,11 +4,11 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from robojudo.pipeline.upper_body_hand_zmq_pipeline import UpperBodyHandZmqPipelineMixin
+from robojudo.pipeline.upper_body_omnihand_zmq_pipeline import UpperBodyOmniHandZmqPipelineMixin
 from robojudo.pipeline.upper_body_zmq_pipeline import UpperBodyZmqPipelineMixin
 
 
-class TestPipeline(UpperBodyHandZmqPipelineMixin, UpperBodyZmqPipelineMixin):
+class TestPipeline(UpperBodyOmniHandZmqPipelineMixin, UpperBodyZmqPipelineMixin):
     pass
 
 
@@ -20,7 +20,7 @@ class FakeRecorderClient:
         self.samples.append(sample)
 
 
-class TestUpperBodyHandZmqPipeline(unittest.TestCase):
+class TestUpperBodyOmniHandZmqPipeline(unittest.TestCase):
     def setUp(self):
         self.pipeline = TestPipeline.__new__(TestPipeline)
         self.pipeline._recorder_client = FakeRecorderClient()
@@ -37,7 +37,7 @@ class TestUpperBodyHandZmqPipeline(unittest.TestCase):
     @staticmethod
     def ctrl_data(*, hand_fresh=True):
         return {
-            "UpperBodyHandZmqCtrl": {
+            "UpperBodyOmniHandZmqCtrl": {
                 "fresh": True,
                 "joint_positions": {"left_arm": 0.1, "right_arm": 0.2},
                 "omnihand": {
@@ -75,7 +75,7 @@ class TestUpperBodyHandZmqPipeline(unittest.TestCase):
     def test_takeover_state_is_forwarded_only_by_hand_pipeline(self):
         controller = Mock()
         self.pipeline.ctrl_manager = SimpleNamespace(
-            controllers={"UpperBodyHandZmqCtrl": SimpleNamespace(inst=controller)}
+            controllers={"UpperBodyOmniHandZmqCtrl": SimpleNamespace(inst=controller)}
         )
         self.pipeline._upper_body_enabled = False
 
@@ -103,17 +103,17 @@ class TestUpperBodyHandZmqPipeline(unittest.TestCase):
         np.testing.assert_allclose(result, [0.1, 0.2])
 
     def test_x2_real_config_selects_only_the_dedicated_hand_path(self):
-        from robojudo.config.x2 import x2_locomanipulation, x2_locomanipulation_real
+        from robojudo.config.x2 import x2_locomanipulation, x2_omnihand_locomanipulation_real
 
         sim_cfg = x2_locomanipulation()
-        real_cfg = x2_locomanipulation_real()
+        real_cfg = x2_omnihand_locomanipulation_real()
         self.assertEqual(sim_cfg.pipeline_type, "X2LocomanipulationPipeline")
         self.assertEqual(sim_cfg.ctrl[-1].ctrl_type, "UpperBodyZmqCtrl")
         self.assertFalse(hasattr(sim_cfg.ctrl[-1], "omnihand"))
         self.assertEqual(real_cfg.pipeline_type, "X2OmniHandLocomanipulationPipeline")
         self.assertEqual(
             [ctrl.ctrl_type for ctrl in real_cfg.ctrl],
-            ["RosJoystickCtrl", "UpperBodyHandZmqCtrl"],
+            ["RosJoystickCtrl", "UpperBodyOmniHandZmqCtrl"],
         )
         self.assertEqual(real_cfg.ctrl[-1].endpoint, "tcp://10.0.1.20:8560")
         self.assertEqual(real_cfg.ctrl[-1].omnihand.transport, "hcan")

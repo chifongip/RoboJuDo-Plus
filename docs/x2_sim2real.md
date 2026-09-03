@@ -38,7 +38,7 @@ platform-matched Python wheel; it does not modify `/usr/local`. On first use, in
 `sudo bash third_party/omnihand_sdk/linux/x64/setup_udev.sh` (or `linux/aarch64`) and log out and back in. The default HCAN
 mapping is left adapter index 1 and right adapter index 0; HCAN channel zero is fixed internally and is not configurable.
 RoboJuDo subscribes to dex teleop's synchronized arm-and-hand stream on port 8560, splits each complete frame inside
-`UpperBodyHandZmqCtrl`, and calls the SDK directly. This dedicated controller and its
+`UpperBodyOmniHandZmqCtrl`, and calls the SDK directly. This dedicated controller and its
 `X2OmniHandLocomanipulationPipeline` leave the existing arm-only controller, simulation pipeline, and GR00T path
 unchanged. The old per-hand ports 5555/5556 and a standalone OmniHand ZMQ server are not used.
 

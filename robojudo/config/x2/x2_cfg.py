@@ -6,7 +6,7 @@ from robojudo.controller.ctrl_cfgs import (
     KeyboardCtrlCfg,
     OmniHandCfg,
     RosJoystickCtrlCfg,
-    UpperBodyHandZmqCtrlCfg,
+    UpperBodyOmniHandZmqCtrlCfg,
     UpperBodyZmqCtrlCfg,
     VelocityZmqCtrlCfg,
 )
@@ -232,7 +232,7 @@ class x2_omnihand_locomanipulation_real(x2_locomanipulation):
         dof=X2LocomanipulationEnvDoF(),
         odometry_type="NONE",
     )
-    ctrl: list[RosJoystickCtrlCfg | UpperBodyHandZmqCtrlCfg] = [
+    ctrl: list[RosJoystickCtrlCfg | UpperBodyOmniHandZmqCtrlCfg] = [
         RosJoystickCtrlCfg(
             profile="xbox_bluetooth",
             topic="/joy",
@@ -250,7 +250,7 @@ class x2_omnihand_locomanipulation_real(x2_locomanipulation):
                 "LB+RB+A": "[SHUTDOWN]",
             },
         ),
-        UpperBodyHandZmqCtrlCfg(
+        UpperBodyOmniHandZmqCtrlCfg(
             joint_names=X2_ARM_JOINT_NAMES,
             endpoint="tcp://10.0.1.20:8560",
             omnihand=OmniHandCfg(

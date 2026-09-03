@@ -32,7 +32,7 @@ class TestUpperBodyCasiaHandZmqPipeline(unittest.TestCase):
         self.pipeline._recording_active = True
         self.pipeline._recording_paused = False
         self.pipeline._upper_body_control_available = lambda: True
-        self.pipeline._upper_body_casia_hand_ctrl_data = self.ctrl_data()
+        self.pipeline._upper_body_hand_ctrl_data = self.ctrl_data()
         self.env_data = SimpleNamespace(dof_pos=np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float32))
 
     @staticmethod
@@ -64,7 +64,7 @@ class TestUpperBodyCasiaHandZmqPipeline(unittest.TestCase):
         np.testing.assert_allclose(sample["joint_position_commands"], [11.0, 13.0, 0.4, 0.5])
 
     def test_skips_recording_until_hand_command_and_feedback_are_fresh(self):
-        self.pipeline._upper_body_casia_hand_ctrl_data = self.ctrl_data(hand_fresh=False)
+        self.pipeline._upper_body_hand_ctrl_data = self.ctrl_data(hand_fresh=False)
         self.pipeline._record_upper_body_sample(
             self.env_data,
             {"locomotion_command": np.zeros(4)},

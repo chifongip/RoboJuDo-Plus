@@ -19,7 +19,7 @@ implementation while producing separate fixed-schema datasets.
 - `observation.images.<camera name>`: synchronized RGB video.
 - `action`: final joint position targets followed by `vx`, `vy`, yaw rate, and height command.
 
-The dedicated `UpperBodyHandZmqCtrlCfg` path appends the 24 measured OmniHand active joints and their final clipped
+The dedicated `UpperBodyOmniHandZmqCtrlCfg` path appends the 24 measured OmniHand active joints and their final clipped
 commands to the arm schema. Hand joints remain separate from the X2/AimDK environment joint list; arm-only controllers
 and pipelines do not import or initialize the hand runtime.
 
@@ -36,7 +36,7 @@ pip install -e "packages/robojudo_recorder[ros2]"
 robojudo-recorder --config packages/robojudo_recorder/recorder.ros2.example.yaml
 ```
 
-Then start a supported pipeline:
+Then start the arm-only X2 pipeline:
 
 ```bash
 python scripts/run_pipeline.py \
@@ -53,8 +53,7 @@ sudo bash third_party/omnihand_sdk/linux/x64/setup_udev.sh  # use linux/aarch64 
 ```
 
 Log out and back in after installing the udev rules. RoboJuDo then owns the OmniHand SDK and HCAN adapters directly;
-do not start the standalone `omnihand_zmq_server.py`. Start dex teleop with its synchronized arm-and-hand stream, then
-run the real pipeline above:
+do not start the standalone `omnihand_zmq_server.py`. Start dex teleop with its synchronized arm-and-hand stream:
 
 ```bash
 python teleop/robot_control/vr_arm_hand_teleop.py \
@@ -62,6 +61,15 @@ python teleop/robot_control/vr_arm_hand_teleop.py \
   --robot x2 \
   --hand omnihand \
   --sync-frame-enable-zmq
+```
+
+Then run the dedicated OmniHand pipeline:
+
+```bash
+python scripts/run_pipeline.py \
+  -c x2_omnihand_locomanipulation_real \
+  --record \
+  --record-task "pick up the red cup"
 ```
 
 RoboJuDo subscribes to the atomic 14-arm-plus-24-hand frames on dex teleop port 8560; the old per-hand ports are not

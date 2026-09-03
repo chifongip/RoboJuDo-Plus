@@ -223,7 +223,7 @@ class CasiaHandCfg(Config):
     left_hand_id: int = Field(default=2, ge=0, le=255)
     right_hand_id: int = Field(default=0x20, ge=0, le=255)
     baudrate: int = Field(default=115200, gt=0)
-    port_name: str = "/dev/ttyUSB0"
+    port_name: str = "/dev/ttyCH341USB0"
     command_timeout_s: float = Field(default=0.25, gt=0.0)
     joint_state_fps: float = Field(default=100.0, gt=0.0)
     joint_state_timeout_s: float = Field(default=0.25, gt=0.0)
@@ -258,10 +258,10 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
         return self
 
 
-class UpperBodyHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
-    """Atomic arm and dual-hand targets received from the synchronized teleop stream."""
+class UpperBodyOmniHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
+    """Atomic arm and dual-OmniHand targets received from synchronized teleoperation."""
 
-    ctrl_type: str = "UpperBodyHandZmqCtrl"
+    ctrl_type: str = "UpperBodyOmniHandZmqCtrl"
     endpoint: str = "tcp://127.0.0.1:8560"
     omnihand: OmniHandCfg = OmniHandCfg()
 

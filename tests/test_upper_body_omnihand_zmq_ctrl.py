@@ -6,12 +6,12 @@ import numpy as np
 import zmq
 
 from robojudo.config.x2.env.x2_env_cfg import X2_ARM_JOINT_NAMES
-from robojudo.controller.ctrl_cfgs import UpperBodyHandZmqCtrlCfg
+from robojudo.controller.ctrl_cfgs import UpperBodyOmniHandZmqCtrlCfg
 from robojudo.controller.omnihand_runtime import (
     OMNIHAND_LEFT_JOINT_NAMES,
     OMNIHAND_RIGHT_JOINT_NAMES,
 )
-from robojudo.controller.upper_body_hand_zmq_ctrl import UpperBodyHandZmqCtrl
+from robojudo.controller.upper_body_omnihand_zmq_ctrl import UpperBodyOmniHandZmqCtrl
 
 
 class FakeZmqSocket:
@@ -46,9 +46,9 @@ class FakeOmniHandRuntime:
         return np.concatenate((left_command, right_command)).astype(np.float32)
 
 
-class TestUpperBodyHandZmqCtrl(unittest.TestCase):
+class TestUpperBodyOmniHandZmqCtrl(unittest.TestCase):
     def make_controller(self, messages=None):
-        controller = UpperBodyHandZmqCtrl.__new__(UpperBodyHandZmqCtrl)
+        controller = UpperBodyOmniHandZmqCtrl.__new__(UpperBodyOmniHandZmqCtrl)
         controller.cfg_ctrl = SimpleNamespace(timeout_s=0.25)
         controller._arm_joint_names = tuple(X2_ARM_JOINT_NAMES)
         controller._socket = FakeZmqSocket(messages)
@@ -58,7 +58,7 @@ class TestUpperBodyHandZmqCtrl(unittest.TestCase):
         controller._latest_source_timestamp_ns = None
         controller._last_received_at = None
         controller._last_invalid_log_at = float("-inf")
-        controller._omnihand = FakeOmniHandRuntime()
+        controller._hand_runtime = FakeOmniHandRuntime()
         return controller
 
     @staticmethod
@@ -89,8 +89,8 @@ class TestUpperBodyHandZmqCtrl(unittest.TestCase):
         }
 
     def test_config_uses_dedicated_controller_and_port(self):
-        cfg = UpperBodyHandZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES)
-        self.assertEqual(cfg.ctrl_type, "UpperBodyHandZmqCtrl")
+        cfg = UpperBodyOmniHandZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES)
+        self.assertEqual(cfg.ctrl_type, "UpperBodyOmniHandZmqCtrl")
         self.assertEqual(cfg.endpoint, "tcp://127.0.0.1:8560")
         self.assertEqual(cfg.omnihand.transport, "hcan")
 
@@ -100,10 +100,10 @@ class TestUpperBodyHandZmqCtrl(unittest.TestCase):
         with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.0):
             data = controller.get_data()
 
-        self.assertEqual(controller._omnihand.enabled, [True])
+        self.assertEqual(controller._hand_runtime.enabled, [True])
         self.assertEqual(data["frame_id"], 7)
         self.assertEqual(data["joint_positions"]["left_elbow_joint"], 0.3)
-        self.assertEqual(controller._omnihand.queued[0][3], 7)
+        self.assertEqual(controller._hand_runtime.queued[0][3], 7)
         np.testing.assert_allclose(data["omnihand"]["joint_position_commands"][:12], 0.1)
         self.assertTrue(data["omnihand"]["fresh"])
 
@@ -114,7 +114,7 @@ class TestUpperBodyHandZmqCtrl(unittest.TestCase):
 
         self.assertFalse(data["has_received"])
         self.assertEqual(data["joint_positions"], {})
-        self.assertEqual(controller._omnihand.queued, [])
+        self.assertEqual(controller._hand_runtime.queued, [])
 
     def test_repeated_frame_id_is_rejected_while_stream_is_fresh(self):
         frame = self.synchronized_frame()
@@ -122,7 +122,7 @@ class TestUpperBodyHandZmqCtrl(unittest.TestCase):
         with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.0):
             self.assertTrue(controller.get_data()["fresh"])
             self.assertTrue(controller.get_data()["fresh"])
-        self.assertEqual(len(controller._omnihand.queued), 1)
+        self.assertEqual(len(controller._hand_runtime.queued), 1)
 
 
 if __name__ == "__main__":

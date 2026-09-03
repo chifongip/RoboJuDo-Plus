@@ -1,3 +1,5 @@
+"""Shared physical-hand takeover and recorder composition."""
+
 import logging
 import time
 
@@ -6,8 +8,12 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-class UpperBodyHandZmqPipelineMixin:
-    """Add physical OmniHand takeover and recording to an upper-body pipeline."""
+class UpperBodyHandZmqPipelineMixinBase:
+    """Connect one hand-specific controller to upper-body control and recording."""
+
+    hand_controller_type: str
+    hand_data_key: str
+    hand_display_name: str
 
     def _set_upper_body_enabled(self, enabled: bool):
         was_enabled = getattr(self, "_upper_body_enabled", False)
@@ -15,12 +21,12 @@ class UpperBodyHandZmqPipelineMixin:
         is_enabled = getattr(self, "_upper_body_enabled", False)
         if was_enabled == is_enabled:
             return
-        controller = self.ctrl_manager.controllers.get("UpperBodyHandZmqCtrl")
+        controller = self.ctrl_manager.controllers.get(self.hand_controller_type)
         if controller is not None:
             controller.inst.set_takeover_enabled(is_enabled)
 
     def _apply_pd_target_override(self, pd_target: np.ndarray, ctrl_data) -> np.ndarray:
-        stream_data = ctrl_data.get("UpperBodyHandZmqCtrl")
+        stream_data = ctrl_data.get(self.hand_controller_type)
         if stream_data is None:
             return super()._apply_pd_target_override(pd_target, ctrl_data)
         upper_body_ctrl_data = dict(ctrl_data)
@@ -52,7 +58,7 @@ class UpperBodyHandZmqPipelineMixin:
             return
 
         ctrl_data = getattr(self, "_upper_body_hand_ctrl_data", None) or {}
-        hand_data = ctrl_data.get("UpperBodyHandZmqCtrl", {}).get("omnihand")
+        hand_data = ctrl_data.get(self.hand_controller_type, {}).get(self.hand_data_key)
         if not hand_data or not hand_data.get("fresh", False):
             return
         hand_names = list(hand_data.get("joint_names", []))
@@ -60,7 +66,7 @@ class UpperBodyHandZmqPipelineMixin:
         hand_commands = np.asarray(hand_data.get("joint_position_commands"), dtype=np.float32)
         expected_shape = (len(hand_names),)
         if not hand_names or hand_positions.shape != expected_shape or hand_commands.shape != expected_shape:
-            logger.warning("Skipped recording frame with an invalid OmniHand snapshot")
+            logger.warning("Skipped recording frame with an invalid %s snapshot", self.hand_display_name)
             return
 
         arm_positions = np.asarray(env_data.dof_pos, dtype=np.float32)[self._upper_body_indices]
@@ -74,4 +80,4 @@ class UpperBodyHandZmqPipelineMixin:
         )
 
 
-__all__ = ["UpperBodyHandZmqPipelineMixin"]
+__all__ = ["UpperBodyHandZmqPipelineMixinBase"]

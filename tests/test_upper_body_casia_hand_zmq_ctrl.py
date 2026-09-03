@@ -57,7 +57,7 @@ class TestUpperBodyCasiaHandZmqCtrl(unittest.TestCase):
         controller._latest_source_timestamp_ns = None
         controller._last_received_at = None
         controller._last_invalid_log_at = float("-inf")
-        controller._casia_hand = FakeCasiaHandRuntime()
+        controller._hand_runtime = FakeCasiaHandRuntime()
         return controller
 
     @staticmethod
@@ -102,40 +102,40 @@ class TestUpperBodyCasiaHandZmqCtrl(unittest.TestCase):
     def test_synchronized_frame_drives_arm_and_both_hands_atomically(self):
         controller = self.make_controller([self.synchronized_frame()])
         controller.set_takeover_enabled(True)
-        with patch("robojudo.controller.upper_body_casia_hand_zmq_ctrl.time.monotonic", return_value=10.0):
+        with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.0):
             data = controller.get_data()
 
-        self.assertEqual(controller._casia_hand.enabled, [True])
+        self.assertEqual(controller._hand_runtime.enabled, [True])
         self.assertEqual(data["frame_id"], 7)
         self.assertEqual(data["joint_positions"]["left_elbow_joint"], 0.3)
-        self.assertEqual(controller._casia_hand.queued[0][3], 7)
+        self.assertEqual(controller._hand_runtime.queued[0][3], 7)
         np.testing.assert_allclose(data["casia_hand"]["joint_position_commands"][:10], 0.1)
         self.assertTrue(data["casia_hand"]["fresh"])
 
     def test_incomplete_frame_is_rejected_as_a_whole(self):
         controller = self.make_controller([self.synchronized_frame(right_valid=False)])
-        with patch("robojudo.controller.upper_body_casia_hand_zmq_ctrl.time.monotonic", return_value=10.0):
+        with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.0):
             data = controller.get_data()
 
         self.assertFalse(data["has_received"])
-        self.assertEqual(controller._casia_hand.queued, [])
+        self.assertEqual(controller._hand_runtime.queued, [])
 
     def test_simulation_joint_schema_and_other_hand_type_are_rejected(self):
         controller = self.make_controller(
             [self.synchronized_frame(physical_schema=False), self.synchronized_frame(hand_type="omnihand")]
         )
-        with patch("robojudo.controller.upper_body_casia_hand_zmq_ctrl.time.monotonic", return_value=10.0):
+        with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.0):
             self.assertFalse(controller.get_data()["has_received"])
             self.assertFalse(controller.get_data()["has_received"])
-        self.assertEqual(controller._casia_hand.queued, [])
+        self.assertEqual(controller._hand_runtime.queued, [])
 
     def test_repeated_frame_id_is_rejected_while_stream_is_fresh(self):
         frame = self.synchronized_frame()
         controller = self.make_controller([frame, frame])
-        with patch("robojudo.controller.upper_body_casia_hand_zmq_ctrl.time.monotonic", return_value=10.0):
+        with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.0):
             self.assertTrue(controller.get_data()["fresh"])
             self.assertTrue(controller.get_data()["fresh"])
-        self.assertEqual(len(controller._casia_hand.queued), 1)
+        self.assertEqual(len(controller._hand_runtime.queued), 1)
 
 
 if __name__ == "__main__":

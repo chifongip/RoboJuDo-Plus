@@ -7,7 +7,7 @@ from box import Box
 
 class TestX2Locomanipulation(unittest.TestCase):
     def test_configs_use_recorded_training_parameters(self):
-        from robojudo.config.x2 import x2_locomanipulation, x2_locomanipulation_real
+        from robojudo.config.x2 import x2_locomanipulation, x2_omnihand_locomanipulation_real
         from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import (
             X2_LOCOMANIPULATION_ACTION_SCALES,
             X2_LOCOMANIPULATION_DAMPING,
@@ -18,7 +18,7 @@ class TestX2Locomanipulation(unittest.TestCase):
         )
 
         sim_cfg = x2_locomanipulation()
-        real_cfg = x2_locomanipulation_real()
+        real_cfg = x2_omnihand_locomanipulation_real()
         policy = sim_cfg.policy
 
         self.assertEqual(policy.obs_dof.joint_names, X2_LOCOMANIPULATION_JOINT_NAMES)
@@ -47,7 +47,7 @@ class TestX2Locomanipulation(unittest.TestCase):
         self.assertEqual(real_cfg.pipeline_type, "X2OmniHandLocomanipulationPipeline")
         self.assertEqual(
             [ctrl.ctrl_type for ctrl in real_cfg.ctrl],
-            ["RosJoystickCtrl", "UpperBodyHandZmqCtrl"],
+            ["RosJoystickCtrl", "UpperBodyOmniHandZmqCtrl"],
         )
         self.assertEqual(real_cfg.ctrl[0].profile, "xbox_bluetooth")
         self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
