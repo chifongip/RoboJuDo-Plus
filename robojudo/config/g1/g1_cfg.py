@@ -362,7 +362,7 @@ class g1_23_locomanipulation_stiff_real(g1_23_locomanipulation_stiff):
     env: G1_23RealEnvCfg = G1_23RealEnvCfg(
         dof=G1Locomanipulation23ObsDoF.from_preset("stiff"),
         unitree=G1UnitreeCfg(
-            net_if="enp58s0",
+            net_if="eth0",
             command_timeout=0.1,
             state_timeout=0.1,
             shutdown_damping=5.0,
@@ -508,6 +508,7 @@ def _g1_gr00t_locomanipulation_real_ctrl(
         ),
         Gr00tZmqCtrlCfg(
             joint_names=joint_names,
+            casia_hand=CasiaHandCfg(),
             ema_alpha=0.0,
             max_joint_velocity_rad_s=4.0,
             observation_enabled=True,

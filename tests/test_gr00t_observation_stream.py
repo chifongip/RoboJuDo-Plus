@@ -3,7 +3,7 @@ import time
 import unittest
 import uuid
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cv2
 import msgpack
@@ -11,6 +11,7 @@ import numpy as np
 import zmq
 from robojudo_recorder.cameras.base import CameraFrame
 
+from robojudo.controller.casia_hand_runtime import CASIA_JOINT_NAMES
 from robojudo.controller.ctrl_cfgs import Gr00tCameraCfg, Gr00tZmqCtrlCfg
 from robojudo.controller.gr00t_zmq_ctrl import Gr00tZmqCtrl
 
@@ -156,6 +157,32 @@ class TestGr00tObservationStream(unittest.TestCase):
         self.assertTrue(controller.set_takeover_enabled(False))
         controller.set_takeover_enabled(True)
         self.assertEqual(controller._control_session, 2)
+
+    def test_combines_robot_arm_and_fresh_casia_feedback_for_observation(self):
+        controller = Gr00tZmqCtrl.__new__(Gr00tZmqCtrl)
+        controller.cfg_ctrl = SimpleNamespace(observation_enabled=True)
+        controller._joint_indices = np.asarray([1, 2], dtype=np.int32)
+        controller._hand_joint_names = CASIA_JOINT_NAMES
+        controller._observation_snapshot_lock = threading.Lock()
+        controller._observation_snapshot = None
+        controller._hand_runtime = Mock()
+        controller._hand_runtime.get_data.return_value = {
+            "joint_names": list(CASIA_JOINT_NAMES),
+            "joint_positions": np.arange(20, dtype=np.float32) / 10,
+            "joint_state_fresh": True,
+        }
+        controller.get_data = Mock(return_value={"fresh": False})
+
+        result = controller.get_data_with_hook(
+            {},
+            {"dof_pos": np.asarray([9.0, 0.25, -0.5], dtype=np.float32)},
+        )
+
+        self.assertEqual(result, {"fresh": False})
+        _, positions = controller._observation_snapshot
+        self.assertEqual(positions.shape, (22,))
+        np.testing.assert_allclose(positions[:2], [0.25, -0.5])
+        np.testing.assert_allclose(positions[2:], np.arange(20, dtype=np.float32) / 10)
 
 
 if __name__ == "__main__":

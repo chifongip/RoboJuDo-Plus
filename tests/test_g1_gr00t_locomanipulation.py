@@ -34,6 +34,7 @@ class TestG1Gr00tLocomanipulation(unittest.TestCase):
                 self.assertTrue(cfg.ctrl[-1].observation_enabled)
                 self.assertEqual(cfg.ctrl[-1].observation_profile, "g1_23dof")
                 self.assertEqual(cfg.ctrl[-1].camera.type, "realsense")
+                self.assertEqual(cfg.ctrl[-1].casia_hand is not None, is_real)
                 expected_controls = ["UnitreeCtrl", "Gr00tZmqCtrl"] if is_real else [
                     "JoystickCtrl",
                     "KeyboardCtrl",

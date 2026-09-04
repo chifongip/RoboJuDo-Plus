@@ -10,6 +10,12 @@ import numpy as np
 import zmq
 
 from robojudo.controller import ControllerHook, ctrl_registry
+from robojudo.controller.casia_hand_runtime import (
+    CASIA_JOINT_NAMES,
+    CASIA_LEFT_JOINT_NAMES,
+    CASIA_RIGHT_JOINT_NAMES,
+    CasiaHandRuntime,
+)
 from robojudo.controller.ctrl_cfgs import Gr00tZmqCtrlCfg
 
 logger = logging.getLogger(__name__)
@@ -36,7 +42,9 @@ class Gr00tZmqCtrl(ControllerHook):
     def __init__(self, cfg_ctrl: Gr00tZmqCtrlCfg, env=None, device="cpu"):
         super().__init__(cfg_ctrl=cfg_ctrl, env=env, device=device)
         self._joint_names = tuple(cfg_ctrl.joint_names)
-        self._joint_name_set = set(self._joint_names)
+        self._hand_joint_names = CASIA_JOINT_NAMES if cfg_ctrl.casia_hand is not None else ()
+        self._policy_joint_names = (*self._joint_names, *self._hand_joint_names)
+        self._joint_name_set = set(self._policy_joint_names)
         self._context = zmq.Context.instance()
         self._socket = self._context.socket(zmq.SUB)
         self._socket.setsockopt(zmq.LINGER, 0)
@@ -69,13 +77,16 @@ class Gr00tZmqCtrl(ControllerHook):
         self._observation_error: Exception | None = None
         self._published_observations = 0
         self._dropped_observations = 0
+        self._hand_runtime = None
         logger.info("Gr00tZmqCtrl subscribed to %s", cfg_ctrl.endpoint)
-        if cfg_ctrl.observation_enabled:
-            try:
+        try:
+            if cfg_ctrl.casia_hand is not None:
+                self._hand_runtime = CasiaHandRuntime(cfg_ctrl.casia_hand)
+            if cfg_ctrl.observation_enabled:
                 self._start_observation_worker()
-            except Exception:
-                self.close()
-                raise
+        except Exception:
+            self.close()
+            raise
 
     def reset(self):
         self._latest_positions.clear()
@@ -86,6 +97,9 @@ class Gr00tZmqCtrl(ControllerHook):
         self._last_received_at = None
         with self._observation_snapshot_lock:
             self._takeover_enabled = False
+        hand_runtime = getattr(self, "_hand_runtime", None)
+        if hand_runtime is not None:
+            hand_runtime.reset()
         for _ in range(100):
             try:
                 self._socket.recv(flags=zmq.NOBLOCK)
@@ -99,6 +113,10 @@ class Gr00tZmqCtrl(ControllerHook):
             if self._observation_thread.is_alive():
                 logger.warning("GR00T observation worker did not stop within 3 seconds")
             self._observation_thread = None
+        hand_runtime = getattr(self, "_hand_runtime", None)
+        if hand_runtime is not None:
+            hand_runtime.close()
+            self._hand_runtime = None
         self._socket.close(linger=0)
 
     def _start_observation_worker(self):
@@ -130,6 +148,9 @@ class Gr00tZmqCtrl(ControllerHook):
             self._latest_command_stream_id = None
             self._latest_command_session = None
             self._last_received_at = None
+        hand_runtime = getattr(self, "_hand_runtime", None)
+        if changed and hand_runtime is not None:
+            hand_runtime.set_takeover_enabled(enabled)
         return changed
 
     @staticmethod
@@ -259,7 +280,7 @@ class Gr00tZmqCtrl(ControllerHook):
                     "camera_name": self.cfg_ctrl.camera.name,
                     "encoding": "jpeg",
                     "shape": list(image_shape),
-                    "joint_names": list(self._joint_names),
+                    "joint_names": list(self._policy_joint_names),
                     "joint_positions": joint_positions.tolist(),
                 }
                 try:
@@ -301,6 +322,23 @@ class Gr00tZmqCtrl(ControllerHook):
                 raise ValueError(f"position for {name} must be finite")
             positions[name] = position
         return positions
+
+    def _split_policy_positions(
+        self, positions: dict[str, float]
+    ) -> tuple[dict[str, float], np.ndarray | None, np.ndarray | None]:
+        """Split one validated policy target into robot-arm and optional CASIA commands."""
+        arm_positions = {name: positions[name] for name in self._joint_names}
+        if getattr(self, "_hand_runtime", None) is None:
+            return arm_positions, None, None
+        left_hand = np.asarray(
+            [positions[name] for name in CASIA_LEFT_JOINT_NAMES],
+            dtype=np.float64,
+        )
+        right_hand = np.asarray(
+            [positions[name] for name in CASIA_RIGHT_JOINT_NAMES],
+            dtype=np.float64,
+        )
+        return arm_positions, left_hand, right_hand
 
     @staticmethod
     def _decode_locomotion_command(value) -> np.ndarray:
@@ -393,7 +431,20 @@ class Gr00tZmqCtrl(ControllerHook):
                 )
                 continue
 
-            self._latest_positions = positions
+            try:
+                arm_positions, left_hand, right_hand = self._split_policy_positions(positions)
+                hand_runtime = getattr(self, "_hand_runtime", None)
+                if hand_runtime is not None:
+                    hand_runtime.set_joint_commands(
+                        left_hand,
+                        right_hand,
+                        time.monotonic_ns(),
+                        sequence,
+                    )
+            except ValueError as exc:
+                self._log_invalid_message(exc, now)
+                continue
+            self._latest_positions = arm_positions
             self._latest_locomotion_command = locomotion_command
             self._latest_sequence = sequence
             self._latest_command_stream_id = stream_id
@@ -417,7 +468,7 @@ class Gr00tZmqCtrl(ControllerHook):
         )
         observation_error = getattr(self, "_observation_error", None)
         observation_ready = getattr(self, "_observation_ready", None)
-        return {
+        result = {
             "joint_positions": self._latest_positions.copy(),
             "locomotion_command": (
                 None if self._latest_locomotion_command is None else self._latest_locomotion_command.copy()
@@ -440,12 +491,31 @@ class Gr00tZmqCtrl(ControllerHook):
             "published_observations": getattr(self, "_published_observations", 0),
             "dropped_observations": getattr(self, "_dropped_observations", 0),
         }
+        hand_runtime = getattr(self, "_hand_runtime", None)
+        if hand_runtime is not None:
+            result["casia_hand"] = hand_runtime.get_data()
+        return result
 
     def get_data_with_hook(self, prior_ctrl_data: dict, env_data: dict):
         # Control flow: env joints -> shared snapshot; latest GR00T command -> pipeline.
         del prior_ctrl_data
         if self.cfg_ctrl.observation_enabled:
             joint_positions = np.asarray(env_data["dof_pos"], dtype=np.float32)[self._joint_indices]
+            hand_runtime = getattr(self, "_hand_runtime", None)
+            if hand_runtime is not None:
+                hand_data = hand_runtime.get_data()
+                if not hand_data.get("joint_state_fresh", False):
+                    return self.get_data()
+                if tuple(hand_data.get("joint_names", ())) != self._hand_joint_names:
+                    raise ValueError("CASIA hand joint names or order do not match the GR00T profile")
+                hand_positions = np.asarray(hand_data.get("joint_positions"), dtype=np.float32)
+                expected_shape = (len(self._hand_joint_names),)
+                if hand_positions.shape != expected_shape:
+                    raise ValueError(
+                        f"CASIA hand joint positions have shape {hand_positions.shape}, "
+                        f"expected {expected_shape}"
+                    )
+                joint_positions = np.concatenate((joint_positions, hand_positions))
             if not np.isfinite(joint_positions).all():
                 raise FloatingPointError("GR00T observation joint positions contain non-finite values")
             with self._observation_snapshot_lock:

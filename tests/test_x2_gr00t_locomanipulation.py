@@ -7,7 +7,8 @@ import numpy as np
 import zmq
 from box import Box
 
-from robojudo.controller.ctrl_cfgs import Gr00tZmqCtrlCfg
+from robojudo.controller.casia_hand_runtime import CASIA_LEFT_JOINT_NAMES, CASIA_RIGHT_JOINT_NAMES
+from robojudo.controller.ctrl_cfgs import CasiaHandCfg, Gr00tZmqCtrlCfg
 from robojudo.controller.gr00t_zmq_ctrl import Gr00tZmqCtrl
 from robojudo.pipeline.four_mode_pipeline import ControlMode
 from robojudo.pipeline.x2_gr00t_locomanipulation_pipeline import X2Gr00tLocomanipulationPipeline
@@ -23,6 +24,22 @@ class FakeZmqSocket:
         if not self.messages:
             raise zmq.Again()
         return self.messages.pop(0)
+
+
+class FakeCasiaHandRuntime:
+    def __init__(self):
+        self.queued = []
+
+    def set_joint_commands(self, left_command, right_command, source_timestamp_ns, frame_id):
+        self.queued.append((left_command.copy(), right_command.copy(), source_timestamp_ns, frame_id))
+        return np.concatenate((left_command, right_command)).astype(np.float32)
+
+    def get_data(self):
+        return {
+            "joint_names": [*CASIA_LEFT_JOINT_NAMES, *CASIA_RIGHT_JOINT_NAMES],
+            "joint_positions": np.zeros(20, dtype=np.float32),
+            "joint_state_fresh": True,
+        }
 
 
 class TestGr00tZmqCtrl(unittest.TestCase):
@@ -45,6 +62,7 @@ class TestGr00tZmqCtrl(unittest.TestCase):
         controller._observation_stream_id = "test-stream"
         controller._takeover_enabled = True
         controller._control_session = 1
+        controller._hand_runtime = None
         return controller
 
     def message(self, *, sequence=1, command=None):
@@ -124,6 +142,49 @@ class TestGr00tZmqCtrl(unittest.TestCase):
                     "locomotion_command": [0.0, 0.0, 0.0, 0.64],
                 }
             )
+
+    def test_casia_command_is_split_from_the_atomic_gr00t_frame(self):
+        controller = self.make_controller()
+        controller.cfg_ctrl = Gr00tZmqCtrlCfg(
+            joint_names=self.joint_names,
+            casia_hand=CasiaHandCfg(),
+        )
+        controller._hand_joint_names = (*CASIA_LEFT_JOINT_NAMES, *CASIA_RIGHT_JOINT_NAMES)
+        controller._policy_joint_names = (*controller._joint_names, *controller._hand_joint_names)
+        controller._joint_name_set = set(controller._policy_joint_names)
+        controller._hand_runtime = FakeCasiaHandRuntime()
+        positions = {
+            **{"left_arm": 0.2, "right_arm": -0.3},
+            **{name: 0.1 for name in CASIA_LEFT_JOINT_NAMES},
+            **{name: 0.2 for name in CASIA_RIGHT_JOINT_NAMES},
+        }
+        message = self.message(sequence=7)
+        message["positions"] = positions
+        controller._socket = FakeZmqSocket([message])
+
+        with patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=10.0):
+            data = controller.get_data()
+
+        self.assertEqual(data["joint_positions"], {"left_arm": 0.2, "right_arm": -0.3})
+        self.assertEqual(data["sequence"], 7)
+        self.assertEqual(len(controller._hand_runtime.queued), 1)
+        left, right, source_timestamp_ns, frame_id = controller._hand_runtime.queued[0]
+        np.testing.assert_allclose(left, 0.1)
+        np.testing.assert_allclose(right, 0.2)
+        self.assertGreater(source_timestamp_ns, 0)
+        self.assertEqual(frame_id, 7)
+
+    def test_casia_command_requires_all_hand_positions(self):
+        controller = self.make_controller()
+        controller._hand_joint_names = (*CASIA_LEFT_JOINT_NAMES, *CASIA_RIGHT_JOINT_NAMES)
+        controller._policy_joint_names = (*controller._joint_names, *controller._hand_joint_names)
+        controller._joint_name_set = set(controller._policy_joint_names)
+        controller._hand_runtime = FakeCasiaHandRuntime()
+        message = self.message()
+        message["positions"].update({name: 0.1 for name in controller._hand_joint_names[:-1]})
+
+        with self.assertRaisesRegex(ValueError, "missing joints"):
+            controller._decode_message(message)
 
 
 class TestX2Gr00tLocomanipulationPolicy(unittest.TestCase):

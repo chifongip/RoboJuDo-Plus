@@ -294,6 +294,7 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
     """Bidirectional GR00T command and observation transport."""
 
     ctrl_type: str = "Gr00tZmqCtrl"
+    casia_hand: CasiaHandCfg | None = None
     require_complete_positions: bool = True
     max_joint_velocity_rad_s: float = Field(default=4.0, gt=0.0)
     observation_enabled: bool = False
