@@ -278,7 +278,7 @@ class TestX2Gr00tLocomanipulationPipeline(unittest.TestCase):
         pipeline._upper_body_cfg = SimpleNamespace(
             joint_names=["left_arm", "right_arm"],
             ema_alpha=0.0,
-            max_joint_velocity_rad_s=4.0,
+            max_joint_velocity_rad_s=0.5,
         )
         pipeline._upper_body_indices = np.asarray([0, 1], dtype=np.int32)
         pipeline._upper_body_default = np.zeros(2, dtype=np.float32)
@@ -295,7 +295,7 @@ class TestX2Gr00tLocomanipulationPipeline(unittest.TestCase):
         }
 
         target = pipeline._apply_pd_target_override(np.zeros(2, dtype=np.float32), ctrl_data)
-        np.testing.assert_allclose(target, [0.08, -0.08])
+        np.testing.assert_allclose(target, [0.01, -0.01])
         np.testing.assert_allclose(pipeline._upper_body_filtered, target)
 
     def test_configs_are_isolated_from_existing_locomanipulation(self):

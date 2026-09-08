@@ -55,7 +55,10 @@ class TestX2Locomanipulation(unittest.TestCase):
 
         cfg = x2_locomanipulation()
         pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
-        pipeline._upper_body_cfg = cfg.ctrl[-1].model_copy(update={"ema_alpha": 0.0})
+        pipeline.dt = 0.02
+        pipeline._upper_body_cfg = cfg.ctrl[-1].model_copy(
+            update={"ema_alpha": 0.0, "max_joint_velocity_rad_s": 1000.0}
+        )
         pipeline._upper_body_enabled = True
         pipeline._upper_body_stream_was_fresh = False
         pipeline._upper_body_indices = np.asarray(
@@ -94,6 +97,7 @@ class TestX2Locomanipulation(unittest.TestCase):
         before_timeout = pipeline._upper_body_filtered.copy()
         returned = pipeline._apply_pd_target_override(policy_target, {"UpperBodyZmqCtrl": {"fresh": False}})
         expected = 0.95 * before_timeout + 0.05 * pipeline._upper_body_default
+        expected = np.clip(expected, before_timeout - 0.02, before_timeout + 0.02)
         np.testing.assert_allclose(returned[pipeline._upper_body_indices], expected, rtol=1e-6)
 
     def test_upper_body_toggle_requires_rl_mode(self):

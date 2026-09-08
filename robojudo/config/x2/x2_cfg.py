@@ -255,7 +255,6 @@ class x2_gr00t_locomanipulation(x2_locomanipulation):
         Gr00tZmqCtrlCfg(
             joint_names=X2_ARM_JOINT_NAMES,
             ema_alpha=0.0,
-            max_joint_velocity_rad_s=4.0,
             observation_enabled=True,
             observation_profile="x2",
             camera=Gr00tCameraCfg(
@@ -300,7 +299,6 @@ class x2_gr00t_locomanipulation_real(x2_gr00t_locomanipulation):
         Gr00tZmqCtrlCfg(
             joint_names=X2_ARM_JOINT_NAMES,
             ema_alpha=0.0,
-            max_joint_velocity_rad_s=4.0,
             observation_enabled=True,
             observation_profile="x2",
             camera=Gr00tCameraCfg(

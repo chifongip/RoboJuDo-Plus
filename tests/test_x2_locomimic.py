@@ -596,7 +596,10 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
             interp_state=PolicyInterpManager.InterpState.IN_PROGRESS,
         )
         pipeline.policy_manager = manager
-        pipeline._upper_body_cfg = SimpleNamespace(ema_alpha=0.9, joint_names=["left_arm", "right_arm"])
+        pipeline.dt = 0.02
+        pipeline._upper_body_cfg = SimpleNamespace(
+            ema_alpha=0.9, joint_names=["left_arm", "right_arm"], max_joint_velocity_rad_s=0.5
+        )
         pipeline._upper_body_indices = np.asarray([1, 3], dtype=np.int32)
         pipeline._upper_body_default = np.asarray([0.2, -0.2], dtype=np.float32)
         pipeline._upper_body_filtered = np.asarray([1.5, -1.5], dtype=np.float32)
@@ -642,7 +645,10 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
             policy_loco_id=0,
             interp_state=PolicyInterpManager.InterpState.IDLE,
         )
-        pipeline._upper_body_cfg = SimpleNamespace(ema_alpha=0.5, joint_names=["left_arm"])
+        pipeline.dt = 0.02
+        pipeline._upper_body_cfg = SimpleNamespace(
+            ema_alpha=0.5, joint_names=["left_arm"], max_joint_velocity_rad_s=0.5
+        )
         pipeline._upper_body_indices = np.asarray([1], dtype=np.int32)
         pipeline._upper_body_default = np.asarray([0.0], dtype=np.float32)
         pipeline._upper_body_filtered = np.asarray([1.0], dtype=np.float32)
@@ -655,8 +661,8 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
 
         pd_target, _ = pipeline._step_rl_policy(Box({}), Box({}), dry_run=True)
 
-        self.assertEqual(pd_target[1], 0.5)
-        self.assertEqual(pipeline._upper_body_filtered[0], 0.5)
+        self.assertAlmostEqual(pd_target[1], 0.99)
+        self.assertAlmostEqual(pipeline._upper_body_filtered[0], 0.99)
         self.assertTrue(pipeline._upper_body_override_was_available)
 
     def test_leaving_rl_resets_loco_and_cancels_policy_state(self):
