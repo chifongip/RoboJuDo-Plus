@@ -246,6 +246,7 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
     joint_names: list[str] = []
     timeout_s: float = Field(default=0.25, gt=0.0)
     ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
+    max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_upper_body_zmq(self):
@@ -296,7 +297,6 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
     ctrl_type: str = "Gr00tZmqCtrl"
     casia_hand: CasiaHandCfg | None = None
     require_complete_positions: bool = True
-    max_joint_velocity_rad_s: float = Field(default=4.0, gt=0.0)
     observation_enabled: bool = False
     observation_endpoint: str = "tcp://*:8561"
     """observation_profile: Exact deployment schema identifier, including joint layout and order."""

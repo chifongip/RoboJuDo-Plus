@@ -188,6 +188,10 @@ toggle it. Targets are clamped to the X2 joint limits and filtered at 50 Hz with
 message arrives for `0.25 s`, or external control is disabled, the arms smoothly return to the recorded locomanipulation
 pose. A fresh message resumes control after a timeout without another toggle. Leaving `RL_DEFAULT`, resetting the
 simulation, or entering a safety mode disables the override.
+After smoothing, `UpperBodyZmqCtrlCfg.max_joint_velocity_rad_s` limits each commanded joint to `1.0 rad/s` by default
+(`0.02 rad` per cycle at 50 Hz). This applies to live commands, reconnection, and returns on timeout or disable.
+The limit uses the configured control timestep and bounds commanded position changes, not measured speed or torque.
+Validate changes to this setting in simulation first. GR00T uses the same `1.0 rad/s` default.
 
 Use the interactive predefined-pose publisher to exercise the interface:
 

@@ -117,9 +117,13 @@ class UpperBodyZmqPipelineMixin:
 
         self._upper_body_stream_was_fresh = self._upper_body_enabled and stream_is_fresh
         alpha = self._upper_body_cfg.ema_alpha
-        self._upper_body_filtered = alpha * self._upper_body_filtered + (1.0 - alpha) * desired
-        snap = np.abs(self._upper_body_filtered - desired) < 0.001
-        self._upper_body_filtered[snap] = desired[snap]
+        previous = self._upper_body_filtered
+        filtered = alpha * previous + (1.0 - alpha) * desired
+        snap = np.abs(filtered - desired) < 0.001
+        filtered[snap] = desired[snap]
+        # Limit after smoothing and snapping so every emitted step respects the cap.
+        max_delta = self._upper_body_cfg.max_joint_velocity_rad_s * self.dt
+        self._upper_body_filtered = np.clip(filtered, previous - max_delta, previous + max_delta).astype(np.float32)
 
         target = np.asarray(pd_target, dtype=np.float32).copy()
         target[self._upper_body_indices] = self._upper_body_filtered

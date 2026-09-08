@@ -308,6 +308,10 @@ The upper-body controller subscribes to `tcp://127.0.0.1:8559` by default and ac
 Unknown joints and non-finite values are rejected. Targets are clamped to joint limits, smoothed, and returned toward
 the default pose if messages become stale. The stream starts disabled and affects only joints outside the policy action
 set.
+`UpperBodyZmqCtrlCfg.max_joint_velocity_rad_s` defaults to `1.0 rad/s` per joint and must be finite and positive.
+The limit applies after smoothing to live targets and returns to default on timeout or disable, including reconnection.
+At 50 Hz, commanded positions change by at most `0.02 rad` per cycle; this does not bound measured speed or torque.
+GR00T uses the same `1.0 rad/s` default.
 
 Native Unitree real-robot variants are also registered:
 

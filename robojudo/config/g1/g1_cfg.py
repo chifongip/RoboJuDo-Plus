@@ -480,7 +480,6 @@ def _g1_gr00t_locomanipulation_sim_ctrl(
         Gr00tZmqCtrlCfg(
             joint_names=joint_names,
             ema_alpha=0.0,
-            max_joint_velocity_rad_s=4.0,
             observation_enabled=True,
             observation_profile="g1_23dof",
             camera=Gr00tCameraCfg(
@@ -510,7 +509,6 @@ def _g1_gr00t_locomanipulation_real_ctrl(
             joint_names=joint_names,
             casia_hand=CasiaHandCfg(),
             ema_alpha=0.0,
-            max_joint_velocity_rad_s=4.0,
             observation_enabled=True,
             observation_profile="g1_23dof",
             camera=Gr00tCameraCfg(
