@@ -29,6 +29,10 @@ class FakeZmqSocket:
 class FakeCasiaHandRuntime:
     def __init__(self):
         self.queued = []
+        self.takeover_changes = []
+
+    def set_takeover_enabled(self, enabled, *, return_to_default=False):
+        self.takeover_changes.append((enabled, return_to_default))
 
     def set_joint_commands(self, left_command, right_command, source_timestamp_ns, frame_id):
         self.queued.append((left_command.copy(), right_command.copy(), source_timestamp_ns, frame_id))
@@ -185,6 +189,14 @@ class TestGr00tZmqCtrl(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "missing joints"):
             controller._decode_message(message)
+
+    def test_disabling_takeover_requests_casia_default_pose(self):
+        controller = self.make_controller()
+        controller._hand_runtime = FakeCasiaHandRuntime()
+
+        self.assertTrue(controller.set_takeover_enabled(False, return_hand_to_default=True))
+
+        self.assertEqual(controller._hand_runtime.takeover_changes, [(False, True)])
 
 
 class TestX2Gr00tLocomanipulationPolicy(unittest.TestCase):
@@ -358,6 +370,26 @@ class TestX2Gr00tLocomanipulationPipeline(unittest.TestCase):
         target = pipeline._apply_pd_target_override(np.zeros(2, dtype=np.float32), ctrl_data)
         np.testing.assert_allclose(target, [0.01, -0.01])
         np.testing.assert_allclose(pipeline._upper_body_filtered, target)
+
+    def test_disabling_upper_body_returns_embedded_hand_to_default(self):
+        pipeline = X2Gr00tLocomanipulationPipeline.__new__(X2Gr00tLocomanipulationPipeline)
+        pipeline.mode = ControlMode.RL_DEFAULT
+        pipeline._upper_body_cfg = SimpleNamespace()
+        pipeline._upper_body_enabled = True
+        pipeline._upper_body_stream_was_fresh = True
+        pipeline._upper_body_control_available = lambda: True
+        set_takeover_enabled = Mock(return_value=True)
+        pipeline.ctrl_manager = SimpleNamespace(
+            controllers={
+                "Gr00tZmqCtrl": SimpleNamespace(
+                    inst=SimpleNamespace(set_takeover_enabled=set_takeover_enabled)
+                )
+            }
+        )
+
+        pipeline._set_upper_body_enabled(False)
+
+        set_takeover_enabled.assert_called_once_with(False, return_hand_to_default=True)
 
     def test_configs_are_isolated_from_existing_locomanipulation(self):
         from robojudo.config.x2 import x2_gr00t_locomanipulation, x2_gr00t_locomanipulation_real

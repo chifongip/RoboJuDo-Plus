@@ -134,7 +134,7 @@ class Gr00tZmqCtrl(ControllerHook):
         if self._observation_error is not None:
             raise RuntimeError("failed to start GR00T observation publisher") from self._observation_error
 
-    def set_takeover_enabled(self, enabled: bool) -> bool:
+    def set_takeover_enabled(self, enabled: bool, *, return_hand_to_default: bool = False) -> bool:
         """Publish takeover state and advance the session on each enable edge."""
         enabled = bool(enabled)
         with self._observation_snapshot_lock:
@@ -150,7 +150,10 @@ class Gr00tZmqCtrl(ControllerHook):
             self._last_received_at = None
         hand_runtime = getattr(self, "_hand_runtime", None)
         if changed and hand_runtime is not None:
-            hand_runtime.set_takeover_enabled(enabled)
+            hand_runtime.set_takeover_enabled(
+                enabled,
+                return_to_default=bool(not enabled and return_hand_to_default),
+            )
         return changed
 
     @staticmethod

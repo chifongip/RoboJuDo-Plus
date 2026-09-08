@@ -4,21 +4,28 @@ from robojudo.pipeline.four_mode_pipeline import ControlMode
 class Gr00tLocomanipulationPipelineMixin:
     """Gate and rate-limit atomic GR00T arm and locomotion commands."""
 
-    def _set_gr00t_takeover_state(self, enabled: bool):
+    def _set_gr00t_takeover_state(self, enabled: bool, *, return_hand_to_default: bool = False):
         ctrl_manager = getattr(self, "ctrl_manager", None)
         controllers = getattr(ctrl_manager, "controllers", {})
         controller = controllers.get("Gr00tZmqCtrl")
         if controller is not None:
+            if return_hand_to_default:
+                return controller.inst.set_takeover_enabled(enabled, return_hand_to_default=True)
             return controller.inst.set_takeover_enabled(enabled)
         return False
 
     def _set_upper_body_enabled(self, enabled: bool):
+        was_enabled = getattr(self, "_upper_body_enabled", False)
         super()._set_upper_body_enabled(enabled)
+        is_enabled = getattr(self, "_upper_body_enabled", False)
         takeover_enabled = bool(
-            self.mode == ControlMode.RL_DEFAULT and self._upper_body_enabled and self._upper_body_control_available()
+            self.mode == ControlMode.RL_DEFAULT and is_enabled and self._upper_body_control_available()
         )
         if not takeover_enabled:
-            self._set_gr00t_takeover_state(False)
+            self._set_gr00t_takeover_state(
+                False,
+                return_hand_to_default=bool(was_enabled and not is_enabled),
+            )
 
     def _prepare_gr00t_stream(self, ctrl_data):
         stream = ctrl_data.get("Gr00tZmqCtrl", {})
