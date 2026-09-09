@@ -72,6 +72,7 @@ class RawEpisodeWriter:
         self._frame_handles = {}
         self._frame_counts = {name: 0 for name in camera_names}
         self._sequence_gaps = {name: 0 for name in camera_names}
+        self._writer_queue_drops = {name: 0 for name in camera_names}
         self._last_sequences: dict[str, int | None] = {name: None for name in camera_names}
         for name in camera_names:
             camera_dir = self.pending_path / "cameras" / name
@@ -89,6 +90,7 @@ class RawEpisodeWriter:
             "joint_names": None,
             "frame_counts": self._frame_counts,
             "sequence_gaps": self._sequence_gaps,
+            "writer_queue_drops": self._writer_queue_drops,
         }
         self._write_manifest()
         self._closed = False
@@ -157,12 +159,18 @@ class RawEpisodeWriter:
         _append_json_line(self._frame_handles[camera_name], asdict(record))
         self._frame_counts[camera_name] += 1
 
+    def record_writer_queue_drop(self, camera_name: str):
+        if self._closed:
+            raise RuntimeError("raw episode is closed")
+        self._writer_queue_drops[camera_name] += 1
+
     def close_for_review(self):
         if self._closed:
             return
         self._manifest["status"] = "review"
         self._manifest["frame_counts"] = dict(self._frame_counts)
         self._manifest["sequence_gaps"] = dict(self._sequence_gaps)
+        self._manifest["writer_queue_drops"] = dict(self._writer_queue_drops)
         self._write_manifest()
         self._close_handles()
 

@@ -1,8 +1,11 @@
 """Real-time phase of the two-stage RoboJuDo recorder."""
 
 import logging
+import queue
+import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 
 import msgpack
 import zmq
@@ -14,6 +17,62 @@ from .protocol import ControlSample
 from .raw import RawEpisodeWriter
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _FrameWriteTask:
+    writer: RawEpisodeWriter
+    camera_name: str
+    frame: CameraFrame
+
+
+class _CameraWriterWorker:
+    """Serialize one camera's JPEG encoding and writes outside the service loop."""
+
+    def __init__(self, camera_name: str, capacity: int):
+        self.camera_name = camera_name
+        self._tasks: queue.Queue[_FrameWriteTask | None] = queue.Queue(maxsize=capacity)
+        self._completed: queue.SimpleQueue[tuple[_FrameWriteTask, Exception | None]] = queue.SimpleQueue()
+        self._thread = threading.Thread(target=self._run, name=f"camera-writer-{camera_name}", daemon=True)
+        self._thread.start()
+
+    def submit(self, writer: RawEpisodeWriter, frame: CameraFrame) -> bool:
+        try:
+            self._tasks.put_nowait(_FrameWriteTask(writer, self.camera_name, frame))
+        except queue.Full:
+            return False
+        return True
+
+    def _run(self):
+        while True:
+            task = self._tasks.get()
+            try:
+                if task is None:
+                    return
+                error = None
+                try:
+                    task.writer.add_frame(task.camera_name, task.frame)
+                except Exception as exc:  # Propagate worker failures on the service thread.
+                    error = exc
+                self._completed.put((task, error))
+            finally:
+                self._tasks.task_done()
+
+    def drain_completed(self) -> list[tuple[_FrameWriteTask, Exception | None]]:
+        completed = []
+        while True:
+            try:
+                completed.append(self._completed.get_nowait())
+            except queue.Empty:
+                return completed
+
+    def flush(self):
+        self._tasks.join()
+
+    def close(self):
+        self.flush()
+        self._tasks.put(None)
+        self._thread.join(timeout=2)
 
 
 class RecorderService:
@@ -56,6 +115,7 @@ class RecorderService:
 
         self._last_camera_sequences = {item.name: -1 for item in cfg.cameras}
         self._camera_stream_ready = False
+        self._last_camera_frame_ns: dict[str, int | None] = {item.name: None for item in cfg.cameras}
         self._camera_missing_since_ns: int | None = None
         self._last_camera_wait_log_ns = 0
         self._episode_frame_counts = {item.name: 0 for item in cfg.cameras}
@@ -63,7 +123,14 @@ class RecorderService:
         self._throughput_input_frames = {item.name: 0 for item in cfg.cameras}
         self._throughput_written_frames = {item.name: 0 for item in cfg.cameras}
         self._throughput_sequence_gaps = {item.name: 0 for item in cfg.cameras}
+        self._throughput_writer_drops = {item.name: 0 for item in cfg.cameras}
         self._throughput_last_sequences: dict[str, int | None] = {item.name: None for item in cfg.cameras}
+        for camera in self.cameras:
+            camera.set_pending_capacity(cfg.sync.pending_frame_capacity)
+        self._writer_workers = {
+            item.name: _CameraWriterWorker(item.name, cfg.sync.pending_frame_capacity) for item in cfg.cameras
+        }
+        self._writer_workers_closed = False
         self.dropped_stale_frames = 0
 
     def _receive_messages(self):
@@ -99,6 +166,8 @@ class RecorderService:
         )
         self._active_task = task
         self._episode_frame_counts = {item.name: 0 for item in self.cfg.cameras}
+        for camera in self.cameras:
+            camera.clear_pending()
         self._reset_throughput_metrics()
         logger.info("Episode %d raw capture armed: %s", episode_id, task)
 
@@ -139,6 +208,14 @@ class RecorderService:
     def _finish_episode(self, *, save: bool | None):
         if self._raw_writer is None or self._active_episode_id is None:
             return
+        for worker in self._writer_workers.values():
+            worker.flush()
+        try:
+            self._drain_write_results()
+        except Exception:
+            self._raw_writer.discard()
+            self._reset_episode_state()
+            raise
         self._log_throughput(force=True)
         episode_id = self._active_episode_id
         frame_summary = ", ".join(f"{name}={count}" for name, count in self._episode_frame_counts.items())
@@ -148,11 +225,18 @@ class RecorderService:
             logger.warning("Episode %s raw capture pending operator review: %s", episode_id, frame_summary)
             return
         if save:
-            path = self._raw_writer.commit()
-            logger.info("Episode %s raw capture committed: %s, path=%s", episode_id, frame_summary, path)
+            if not any(self._episode_frame_counts.values()):
+                self._raw_writer.discard()
+                logger.warning("Episode %s raw capture discarded because it contains no camera frames", episode_id)
+            else:
+                path = self._raw_writer.commit()
+                logger.info("Episode %s raw capture committed: %s, path=%s", episode_id, frame_summary, path)
         else:
             self._raw_writer.discard()
             logger.info("Episode %s raw capture discarded: %s", episode_id, frame_summary)
+        self._reset_episode_state()
+
+    def _reset_episode_state(self):
         self._raw_writer = None
         self._active_episode_id = None
         self._active_episode_started_at_ns = None
@@ -167,17 +251,27 @@ class RecorderService:
         timestamp_ns = frame.source_timestamp_ns if self.cfg.sync.clock == "source" else frame.receive_timestamp_ns
         if self._active_episode_started_at_ns is not None and timestamp_ns < self._active_episode_started_at_ns:
             return
-        self._raw_writer.add_frame(camera_name, frame)
-        self._episode_frame_counts[camera_name] += 1
-        self._throughput_written_frames[camera_name] += 1
-        if self._episode_frame_counts[camera_name] == 1:
-            logger.info(
-                "Episode %s recording first raw frame: %s=%s encoding=%s",
-                self._active_episode_id,
-                camera_name,
-                frame.shape,
-                frame.encoding or "jpeg",
-            )
+        if not self._writer_workers[camera_name].submit(self._raw_writer, frame):
+            self._throughput_writer_drops[camera_name] += 1
+            self._raw_writer.record_writer_queue_drop(camera_name)
+
+    def _drain_write_results(self):
+        for camera_name, worker in self._writer_workers.items():
+            for task, error in worker.drain_completed():
+                if error is not None:
+                    raise RuntimeError(f"camera writer failed: {camera_name}") from error
+                if task.writer is not self._raw_writer:
+                    continue
+                self._episode_frame_counts[camera_name] += 1
+                self._throughput_written_frames[camera_name] += 1
+                if self._episode_frame_counts[camera_name] == 1:
+                    logger.info(
+                        "Episode %s recording first raw frame: %s=%s encoding=%s",
+                        self._active_episode_id,
+                        camera_name,
+                        task.frame.shape,
+                        task.frame.encoding or "jpeg",
+                    )
 
     def _observe_camera_throughput(self, camera_name: str, frame: CameraFrame):
         previous = self._throughput_last_sequences[camera_name]
@@ -195,6 +289,7 @@ class RecorderService:
         self._throughput_input_frames = {item.name: 0 for item in self.cfg.cameras}
         self._throughput_written_frames = {item.name: 0 for item in self.cfg.cameras}
         self._throughput_sequence_gaps = {item.name: 0 for item in self.cfg.cameras}
+        self._throughput_writer_drops = {item.name: 0 for item in self.cfg.cameras}
         self._throughput_last_sequences = {item.name: None for item in self.cfg.cameras}
 
     def _log_throughput(self, *, force: bool = False):
@@ -215,17 +310,19 @@ class RecorderService:
         input_summary = ", ".join(f"{name}={value:.1f}" for name, value in input_fps.items())
         write_summary = ", ".join(f"{name}={value:.1f}" for name, value in write_fps.items())
         gap_summary = ", ".join(f"{name}={value}" for name, value in self._throughput_sequence_gaps.items())
+        writer_drop_summary = ", ".join(f"{name}={value}" for name, value in self._throughput_writer_drops.items())
         expected_fps = {item.name: float(item.options.get("fps", self.cfg.dataset.fps)) for item in self.cfg.cameras}
         expected_summary = ", ".join(f"{name}={value:.1f}" for name, value in expected_fps.items())
         unhealthy = (
             any(input_fps[name] < expected * 0.9 for name, expected in expected_fps.items())
             or any(write_fps[name] < expected * 0.9 for name, expected in expected_fps.items())
             or any(self._throughput_sequence_gaps.values())
+            or any(self._throughput_writer_drops.values())
         )
         log = logger.warning if unhealthy else logger.info
         log(
             "Episode %s raw throughput (%.1f s): input_fps=[%s], write_fps=[%s], expected_fps=[%s], "
-            "output_fps=%.1f, sequence_gaps=[%s]",
+            "output_fps=%.1f, sequence_gaps=[%s], writer_queue_drops=[%s]",
             self._active_episode_id,
             elapsed_s,
             input_summary,
@@ -233,27 +330,41 @@ class RecorderService:
             expected_summary,
             self.cfg.dataset.fps,
             gap_summary,
+            writer_drop_summary,
         )
         self._throughput_window_started_ns = now_ns
         self._throughput_input_frames = {item.name: 0 for item in self.cfg.cameras}
         self._throughput_written_frames = {item.name: 0 for item in self.cfg.cameras}
         self._throughput_sequence_gaps = {item.name: 0 for item in self.cfg.cameras}
+        self._throughput_writer_drops = {item.name: 0 for item in self.cfg.cameras}
 
     def _update_camera_status(self, frames: dict[str, CameraFrame | None]):
-        missing = [name for name, frame in frames.items() if frame is None]
         now_ns = time.monotonic_ns()
+        for name, frame in frames.items():
+            if frame is not None:
+                self._last_camera_frame_ns[name] = now_ns
+
+        never_seen = [name for name, timestamp_ns in self._last_camera_frame_ns.items() if timestamp_ns is None]
+        if not never_seen and not self._camera_stream_ready:
+            self._camera_missing_since_ns = None
+            shapes = ", ".join(
+                f"{item.name}={camera.shape}" for item, camera in zip(self.cfg.cameras, self.cameras, strict=True)
+            )
+            logger.info("Camera stream ready: %s", shapes)
+            self._camera_stream_ready = True
+
+        stale = [
+            name
+            for name, timestamp_ns in self._last_camera_frame_ns.items()
+            if timestamp_ns is not None and now_ns - timestamp_ns >= 2_000_000_000
+        ]
+        missing = never_seen if never_seen else stale
         if not missing:
             self._camera_missing_since_ns = None
-            if not self._camera_stream_ready:
-                shapes = ", ".join(
-                    f"{item.name}={camera.shape}" for item, camera in zip(self.cfg.cameras, self.cameras, strict=True)
-                )
-                logger.info("Camera stream ready: %s", shapes)
-                self._camera_stream_ready = True
             return
         if self._camera_missing_since_ns is None:
             self._camera_missing_since_ns = now_ns
-        missing_long_enough = now_ns - self._camera_missing_since_ns >= 2_000_000_000
+        missing_long_enough = bool(stale) or now_ns - self._camera_missing_since_ns >= 2_000_000_000
         log_interval_elapsed = now_ns - self._last_camera_wait_log_ns >= 5_000_000_000
         if missing_long_enough and log_interval_elapsed:
             logger.warning("Waiting for camera frames: %s", ", ".join(missing))
@@ -261,18 +372,22 @@ class RecorderService:
 
     def step(self):
         self._receive_messages()
+        self._drain_write_results()
         if self._active_episode_id is None or self._review_episode_id is not None:
             return
-        frames = {
-            item.name: camera.read(self.cfg.sync.poll_timeout_ms)
+        frame_batches = {
+            item.name: camera.read_batch(self.cfg.sync.pending_frame_capacity)
             for item, camera in zip(self.cfg.cameras, self.cameras, strict=True)
         }
-        self._update_camera_status(frames)
-        for name, frame in frames.items():
-            if frame is None:
-                continue
-            self._observe_camera_throughput(name, frame)
-            self._record_frame(name, frame)
+        latest_frames = {name: frames[-1] if frames else None for name, frames in frame_batches.items()}
+        self._update_camera_status(latest_frames)
+        for name, frames in frame_batches.items():
+            for frame in frames:
+                self._observe_camera_throughput(name, frame)
+                self._record_frame(name, frame)
+        if not any(frame_batches.values()):
+            time.sleep(self.cfg.sync.poll_timeout_ms / 1000)
+        self._drain_write_results()
         self._log_throughput()
 
     def run(self):
@@ -285,6 +400,10 @@ class RecorderService:
         except Exception:
             for camera in reversed(connected):
                 camera.close()
+            for worker in self._writer_workers.values():
+                worker.close()
+            self._writer_workers_closed = True
+            self._socket.close(linger=0)
             raise
         self._running = True
         logger.info("Recorder connected to control endpoint %s", self.cfg.control_endpoint)
@@ -292,19 +411,29 @@ class RecorderService:
             "Raw episodes will be written to %s; run robojudo-finalize after collection",
             self.cfg.dataset.raw_root,
         )
+        failed = False
         try:
             while self._running:
                 self.step()
+        except Exception:
+            failed = True
+            raise
         finally:
-            self.close()
+            self.close(save_active=not failed)
 
     def stop(self):
         self._running = False
 
-    def close(self):
+    def close(self, *, save_active: bool = True):
         self._running = False
-        self._finish_episode(save=True)
-        for camera in self.cameras:
-            camera.close()
-        self._socket.close(linger=0)
+        try:
+            self._finish_episode(save=save_active)
+        finally:
+            for camera in self.cameras:
+                camera.close()
+            if not self._writer_workers_closed:
+                for worker in self._writer_workers.values():
+                    worker.close()
+                self._writer_workers_closed = True
+            self._socket.close(linger=0)
         logger.info("Recorder closed; raw episodes remain available for offline finalization")

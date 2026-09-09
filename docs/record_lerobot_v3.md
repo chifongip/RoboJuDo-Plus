@@ -113,7 +113,9 @@ controls are documented in [the recorder README](../packages/robojudo_recorder/R
 The real-time stage writes each control sample immediately to `controls.jsonl`, including source and receive timestamps,
 measured state, final action, and locomotion command. Camera frames are written independently per camera with both
 timestamps, sequence number, encoding, and shape. JPEG/PNG payloads are preserved byte-for-byte; raw RGB sources are
-JPEG-compressed but never H.264-encoded. No Parquet or MP4 is produced during capture.
+JPEG-compressed but never H.264-encoded. Each camera has a bounded capture FIFO and a dedicated ordered JPEG/write
+worker, so the recorder service loop only drains available frames and dispatches work without blocking on camera waits,
+encoding, or disk writes. `sync.pending_frame_capacity` bounds both queues. No Parquet or MP4 is produced during capture.
 
 Confirmed episodes are atomically moved from `dataset.raw_root/.pending` to `dataset.raw_root/episodes`. Discarded
 episodes are deleted. A crash leaves the current directory under `.pending` for inspection instead of exposing it as a
@@ -160,6 +162,7 @@ Each raw episode receives `finalize_report.json` with:
 
 - raw control and per-camera frame counts/FPS;
 - source sequence gaps;
+- writer queue drops;
 - requested, written, camera-dropped, and control-dropped target slots;
 - unique, duplicated, and unused camera-frame counts;
 - camera delta and control age mean/p95/max;

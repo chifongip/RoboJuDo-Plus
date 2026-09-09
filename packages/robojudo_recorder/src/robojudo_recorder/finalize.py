@@ -191,6 +191,7 @@ class RawDatasetFinalizer:
                 for name, timestamps in camera_timestamps.items()
             },
             "source_sequence_gaps": manifest.get("sequence_gaps", {}),
+            "writer_queue_drops": manifest.get("writer_queue_drops", {}),
             "target_slots": len(target_timestamps),
             "written_frames": 0,
             "dropped_camera_slots": 0,

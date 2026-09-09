@@ -23,6 +23,7 @@ APT_PACKAGES = (
     "libusb-1.0-0-dev",
     "libudev-dev",
     "pkg-config",
+    "v4l-utils",
 )
 
 
@@ -142,7 +143,9 @@ def verify_installation():
         [
             sys.executable,
             "-c",
-            "import pyrealsense2 as rs; print('pyrealsense2', rs.__version__)",
+            "import pyrealsense2 as rs; "
+            "assert hasattr(rs, 'pipeline') and hasattr(rs, 'context'); "
+            "print('pyrealsense2 ready:', rs.__file__)",
         ]
     )
 

@@ -36,6 +36,10 @@ RoboJuDo pipeline ── measured state/action samples ─┴─> recorder servi
 JPEG。实时路径不会编码 H.264，也不会写 Parquet。GR00T 模式下可直接保存 observation stream 已有的 JPEG。
 离线 finalize 才执行解码、时间对齐、H.264 编码和 Parquet 写盘。
 
+多相机 raw RGB 采集使用每相机独立的有界 FIFO 和 JPEG/写盘 worker。recorder 主线程只非阻塞地 drain
+已经到达的帧并投递写任务，不会依次等待相机或执行 JPEG 编码。结束、review 或 commit episode 前会等待全部
+已接受的写任务完成；相机或 writer 异常时不会提交空 episode。
+
 GR00T 配置下，相机由 `Gr00tZmqCtrl` 的后台线程读取，并发布包含 RGB、实测关节位置和 task 的 deployment
 observation stream。这个 stream 属于 GR00T 推理闭环，不依赖 recorder，也不需要 `--record`。只有在额外
 录制 VLA rollout 时，recorder 才可以作为可选的第二个 subscriber 复用其中的 RGB payload。
@@ -92,8 +96,57 @@ Jetson 构建默认使用 librealsense 的 RSUSB userspace backend，不修改�
 相机，并验证：
 
 ```bash
-python -c "import pyrealsense2 as rs; print(rs.__version__)"
+python -c "import pyrealsense2 as rs; assert hasattr(rs, 'pipeline'); print(rs.__file__)"
 ```
+
+### 查询 RealSense serial number
+
+连接所有需要使用的 RealSense 相机后，运行：
+
+```bash
+python - <<'PY'
+import pyrealsense2 as rs
+
+devices = rs.context().query_devices()
+if not devices:
+    raise SystemExit("No RealSense device found")
+
+for index, device in enumerate(devices):
+    name = device.get_info(rs.camera_info.name)
+    serial = device.get_info(rs.camera_info.serial_number)
+    print(f"[{index}] {name}: {serial}")
+PY
+```
+
+输出示例：
+
+```text
+[0] Intel RealSense D435I: 142422250116
+[1] Intel RealSense D455: 239722302941
+```
+
+将冒号后的值原样填入对应相机配置；serial number 建议使用字符串，避免 YAML 将其解析成数字：
+
+```yaml
+camera:
+  type: realsense
+  name: head_rgb
+  serial_number: "142422250116"
+```
+
+配置多个相机时，每个 `cameras` 条目使用各自的 serial number：
+
+```yaml
+cameras:
+  - type: realsense
+    name: head_rgb
+    serial_number: "142422250116"
+  - type: realsense
+    name: wrist_rgb
+    serial_number: "239722302941"
+```
+
+如果返回 `No RealSense device found`，请重新插拔相机；刚安装 udev rules 的 Jetson 可能需要先重启。
 
 ## 快速开始：ROS 2 相机
 
@@ -284,6 +337,7 @@ sync:
   max_control_age_ms: 50
   max_camera_delta_ms: 50
   poll_timeout_ms: 10
+  pending_frame_capacity: 16
 ```
 
 | 字段 | 含义 |
@@ -301,8 +355,9 @@ sync:
 | `sync.clock` | control sample 使用 `source` 或 `receive` timestamp |
 | `sync.max_control_age_ms` | 离线质量报告中 control age 的告警阈值 |
 | `sync.max_camera_delta_ms` | target timestamp 到最近相机帧允许的最大距离，超出则丢弃该 target slot |
-| `sync.poll_timeout_ms` | 每次等待相机帧的最长时间 |
-| `sync.throughput_log_interval_s` | 输出相机输入 FPS、raw 写入 FPS 和 sequence gap 的时间窗口 |
+| `sync.poll_timeout_ms` | 所有相机暂时无帧时，主循环的 idle sleep 时间 |
+| `sync.pending_frame_capacity` | 每相机 capture FIFO 和 writer queue 的最大帧数；队列满时丢弃并告警 |
+| `sync.throughput_log_interval_s` | 输出相机输入/写入 FPS、sequence gap 和 writer queue drop 的时间窗口 |
 
 单相机配置继续使用 `camera:`。同时采集多个相机时改用 `cameras:`：
 
@@ -448,8 +503,8 @@ finalize 输出符合 LeRobot v3 的主要结构：
 ```
 
 每个 episode 使用独立的 data Parquet 和视频文件。超过 1000 个 episode 后会自动进入下一个 chunk。
-`finalize_report.json` 记录 raw FPS、source sequence gaps、target slots、camera/control drop、重复/未使用图像帧、
-相机时间差和 control age。已经成功 finalize 且输出 parquet 仍存在的 episode 会被幂等跳过。
+`finalize_report.json` 记录 raw FPS、source sequence gaps、writer queue drops、target slots、camera/control drop、
+重复/未使用图像帧、相机时间差和 control age。已经成功 finalize 且输出 parquet 仍存在的 episode 会被幂等跳过。
 
 ### 继续已有 dataset
 
@@ -472,7 +527,7 @@ Camera backend connected: name=head_rgb type=ros2
 Camera stream ready: head_rgb=(1552, 2064, 3)
 Episode 1 armed: pick up the box
 Episode 1 recording first raw camera frame: head_rgb
-Episode 1 raw throughput (5.0 s): input_fps=[head_rgb=30.0], write_fps=[head_rgb=30.0], expected_fps=[head_rgb=30.0], output_fps=30.0, sequence_gaps=[head_rgb=0]
+Episode 1 raw throughput (5.0 s): input_fps=[head_rgb=30.0], write_fps=[head_rgb=30.0], expected_fps=[head_rgb=30.0], output_fps=30.0, sequence_gaps=[head_rgb=0], writer_queue_drops=[head_rgb=0]
 Episode 1 raw capture committed: controls=500, cameras=[head_rgb=300], root=record_data/example_raw/episodes/...
 ```
 
@@ -483,12 +538,13 @@ Episode 1 raw capture committed: controls=500, cameras=[head_rgb=300], root=reco
 录制期间还会按 `sync.throughput_log_interval_s` 输出吞吐统计：
 
 ```text
-Episode 1 raw throughput (5.0 s): input_fps=[head_rgb=19.8], write_fps=[head_rgb=19.8], expected_fps=[head_rgb=30.0], output_fps=30.0, sequence_gaps=[head_rgb=51]
+Episode 1 raw throughput (5.0 s): input_fps=[head_rgb=30.0], write_fps=[head_rgb=19.8], expected_fps=[head_rgb=30.0], output_fps=30.0, sequence_gaps=[head_rgb=0], writer_queue_drops=[head_rgb=19]
 ```
 
 `input_fps` 是 recorder 取得的新相机帧率，`write_fps` 是写入 raw spool 的帧率，`sequence_gaps` 是相机
-sequence 中缺失的帧数。compressed 输入的 input 正常但 write 偏低时，应检查磁盘吞吐；raw RGB 输入偏低时还要
-检查实时 JPEG 压缩开销。最终同步质量以 `finalize_report.json` 为准。
+sequence 中缺失的帧数，`writer_queue_drops` 是 JPEG/写盘 worker 队列饱和后拒绝的帧数。input 正常但
+write 偏低或 writer drop 增长时，应检查 JPEG 编码和磁盘吞吐；input 偏低且 sequence gap 增长时，应检查
+capture queue、相机链路和 USB 带宽。最终同步质量以 `finalize_report.json` 为准。
 
 ### `Recorder unavailable or saturated; dropped ... samples`
 
