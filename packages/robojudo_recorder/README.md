@@ -71,6 +71,30 @@ pip install -e "packages/robojudo_recorder[hub]"
 pip install -e "packages/robojudo_recorder[realsense,opencv]"
 ```
 
+### Jetson 上安装 RealSense
+
+Jetson 使用 `aarch64`。`pyrealsense2 2.56.4` 在 PyPI 上没有 Python 3.11 的 `aarch64` wheel，因此上面的
+extra 只能直接用于有匹配 wheel 的平台。Jetson 请在已激活的 RoboJuDo Python 环境中运行：
+
+```bash
+python scripts/install_realsense.py
+```
+
+脚本会安装 apt 编译依赖、以固定版本 `2.56.4` 构建 headless Python binding、把它安装到当前 Python 环境，
+并安装 RealSense udev rules（不会安装 `realsense-viewer`）。源码默认缓存在 `~/.cache/robojudo`。再次构建时
+可跳过已安装的系统部分：
+
+```bash
+python scripts/install_realsense.py --skip-system-deps --skip-udev-rules
+```
+
+Jetson 构建默认使用 librealsense 的 RSUSB userspace backend，不修改或 patch L4T kernel。安装完成后重新插拔
+相机，并验证：
+
+```bash
+python -c "import pyrealsense2 as rs; print(rs.__version__)"
+```
+
 ## 快速开始：ROS 2 相机
 
 ROS 2 Humble 通常使用系统 Python 3.10，而 `robop` 使用 Python 3.11。两者的二进制扩展不兼容，因此

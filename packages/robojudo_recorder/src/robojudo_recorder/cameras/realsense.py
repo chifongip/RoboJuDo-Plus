@@ -18,7 +18,10 @@ class RealSenseCameraSource(ThreadedCameraSource):
         try:
             import pyrealsense2 as rs
         except ImportError as exc:
-            raise RuntimeError("RealSense camera requires robojudo-recorder[realsense]") from exc
+            raise RuntimeError(
+                "RealSense camera support is not installed. Run `python scripts/install_realsense.py` "
+                "from the RoboJuDo repository (required on Jetson), or install robojudo-recorder[realsense]."
+            ) from exc
         self._rs = rs
         self._pipeline = rs.pipeline()
         config = rs.config()
