@@ -102,11 +102,21 @@ def configure_and_build(source_dir: Path, jobs: int):
     install_python_binding(source_dir, build_dir)
 
 
-def install_python_binding(source_dir: Path, build_dir: Path):
-    bindings = sorted((build_dir / "wrappers" / "python").glob("pyrealsense2*.so"))
+def find_python_binding(build_dir: Path) -> Path:
+    # Librealsense's multi-config output is normally build-robojudo/Release,
+    # while some generators place the extension under wrappers/python.
+    bindings = sorted(path for path in build_dir.rglob("pyrealsense2*.so") if path.is_file() and not path.is_symlink())
+    if not bindings:
+        # Some builds expose only the unversioned symlink. copy2 follows it.
+        bindings = sorted(path for path in build_dir.rglob("pyrealsense2*.so") if path.is_file())
     if len(bindings) != 1:
-        found = ", ".join(path.name for path in bindings) or "none"
+        found = ", ".join(path.as_posix() for path in bindings) or "none"
         raise RuntimeError(f"Expected one built pyrealsense2 extension, found: {found}")
+    return bindings[0]
+
+
+def install_python_binding(source_dir: Path, build_dir: Path):
+    binding = find_python_binding(build_dir)
 
     init_file = source_dir / "wrappers" / "python" / "pyrealsense2" / "__init__.py"
     if not init_file.is_file():
@@ -115,7 +125,7 @@ def install_python_binding(source_dir: Path, build_dir: Path):
     python_package_dir = Path(site.getsitepackages()[0]).resolve() / "pyrealsense2"
     python_package_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(init_file, python_package_dir / "__init__.py")
-    shutil.copy2(bindings[0], python_package_dir / bindings[0].name)
+    shutil.copy2(binding, python_package_dir / binding.name)
     print(f"Installed pyrealsense2 binding in {python_package_dir}")
 
 
