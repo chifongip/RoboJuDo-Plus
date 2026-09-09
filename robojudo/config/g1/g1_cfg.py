@@ -450,6 +450,20 @@ class g1_29_casia_locomanipulation_stiff_real(g1_29_locomanipulation_stiff_real)
     )
 
 
+G1_23_GR00T_UPPER_BODY_DEFAULT_POSE = [
+    0.35,
+    0.38,
+    0.0,
+    0.87,
+    0.0,
+    0.35,
+    -0.38,
+    0.0,
+    0.87,
+    0.0,
+]
+
+
 def _g1_gr00t_locomanipulation_sim_ctrl(
     joint_names: list[str],
 ) -> list[JoystickCtrlCfg | KeyboardCtrlCfg | Gr00tZmqCtrlCfg]:
@@ -479,6 +493,7 @@ def _g1_gr00t_locomanipulation_sim_ctrl(
         ),
         Gr00tZmqCtrlCfg(
             joint_names=joint_names,
+            upper_body_default_pose=G1_23_GR00T_UPPER_BODY_DEFAULT_POSE,
             ema_alpha=0.0,
             observation_enabled=True,
             observation_profile="g1_23dof",
@@ -507,6 +522,7 @@ def _g1_gr00t_locomanipulation_real_ctrl(
         ),
         Gr00tZmqCtrlCfg(
             joint_names=joint_names,
+            upper_body_default_pose=G1_23_GR00T_UPPER_BODY_DEFAULT_POSE,
             casia_hand=CasiaHandCfg(),
             ema_alpha=0.0,
             observation_enabled=True,

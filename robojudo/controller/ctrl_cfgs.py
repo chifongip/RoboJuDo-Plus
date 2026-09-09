@@ -244,6 +244,8 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
     ctrl_type: str = "UpperBodyZmqCtrl"
     endpoint: str = "tcp://127.0.0.1:8559"
     joint_names: list[str] = []
+    upper_body_default_pose: list[float] | None = None
+    """Optional controller-specific fallback pose, ordered like ``joint_names``."""
     timeout_s: float = Field(default=0.25, gt=0.0)
     ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
     max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
@@ -256,6 +258,11 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
             raise ValueError("Upper-body ZMQ joint_names must not be empty")
         if len(self.joint_names) != len(set(self.joint_names)):
             raise ValueError("Upper-body ZMQ joint_names must be unique")
+        if self.upper_body_default_pose is not None and len(self.upper_body_default_pose) != len(self.joint_names):
+            raise ValueError(
+                "Upper-body ZMQ upper_body_default_pose length "
+                f"{len(self.upper_body_default_pose)} must match joint_names length {len(self.joint_names)}"
+            )
         return self
 
 
