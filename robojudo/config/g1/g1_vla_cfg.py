@@ -38,9 +38,10 @@ def _g1_casia_locomanipulation_real_ctrl(
         ),
         UpperBodyCasiaHandZmqCtrlCfg(
             joint_names=joint_names,
+            upper_body_default_pose=G1_23_UPPER_BODY_DEFAULT_POSE,
             endpoint="tcp://192.168.252.72:8560",
             casia_hand=CasiaHandCfg(),
-        ),
+        )
     ]
 
 
