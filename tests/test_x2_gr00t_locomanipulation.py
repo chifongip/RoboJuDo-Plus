@@ -319,6 +319,24 @@ class TestX2Gr00tLocomanipulationPolicy(unittest.TestCase):
 
 
 class TestX2Gr00tLocomanipulationPipeline(unittest.TestCase):
+    def test_configured_upper_body_default_pose_overrides_environment_default(self):
+        pipeline = X2Gr00tLocomanipulationPipeline.__new__(X2Gr00tLocomanipulationPipeline)
+        pipeline._upper_body_cfg = Gr00tZmqCtrlCfg(
+            joint_names=["left_arm", "right_arm"],
+            upper_body_default_pose=[0.4, -0.3],
+        )
+        pipeline.env = SimpleNamespace(
+            joint_names=["lower", "left_arm", "right_arm"],
+            default_pos=np.asarray([0.0, 0.1, -0.1], dtype=np.float32),
+            dof_pos=np.asarray([0.0, 0.2, -0.2], dtype=np.float32),
+        )
+        pipeline._upper_body_action_joint_names = lambda: ["lower"]
+
+        pipeline._configure_upper_body_override()
+
+        np.testing.assert_allclose(pipeline._upper_body_default, [0.4, -0.3])
+        np.testing.assert_allclose(pipeline._upper_body_filtered, [0.2, -0.2])
+
     def test_takeover_gate_is_added_without_changing_controller_data(self):
         pipeline = X2Gr00tLocomanipulationPipeline.__new__(X2Gr00tLocomanipulationPipeline)
         pipeline.mode = ControlMode.RL_DEFAULT

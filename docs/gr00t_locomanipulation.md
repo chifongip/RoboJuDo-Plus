@@ -121,12 +121,7 @@ Select the configuration matching the lower-body model and PD gains used during 
 ```bash
 conda activate robop
 
-# Simulation
-python scripts/run_pipeline.py -c g1_23_gr00t_locomanipulation_default
-python scripts/run_pipeline.py -c g1_23_gr00t_locomanipulation_stiff
-
 # Real G1 with Unitree remote
-python scripts/run_pipeline.py -c g1_23_gr00t_locomanipulation_default_real
 python scripts/run_pipeline.py -c g1_23_gr00t_locomanipulation_stiff_real
 ```
 
@@ -153,8 +148,10 @@ value. Arm targets return toward their configured defaults through the pipeline'
 The default limit is 4 rad/s, or 0.08 rad per 50 Hz control step.
 
 Actively disabling upper-body takeover restores the standard Locomanipulation joystick velocity/height controls and
-rate-limits the arms back to their defaults. A stream timeout while takeover remains enabled does not fall back to the
-joystick; it keeps zero velocity until the operator explicitly disables takeover.
+rate-limits the arms back to their defaults. On CASIA-equipped G1 configurations, the same disable edge also commands
+both hands to their zero/default pose before leaving the hardware command gate closed. A stream timeout while takeover
+remains enabled does not fall back to the joystick; it keeps zero velocity until the operator explicitly disables
+takeover.
 
 ## Action-horizon scheduling
 

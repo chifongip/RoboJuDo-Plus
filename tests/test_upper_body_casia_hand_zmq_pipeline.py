@@ -91,31 +91,27 @@ class TestUpperBodyCasiaHandZmqPipeline(unittest.TestCase):
         self.pipeline._upper_body_cfg = SimpleNamespace(
             joint_names=["left_arm", "right_arm"],
             ema_alpha=0.0,
+            max_joint_velocity_rad_s=100.0,
         )
         self.pipeline.env = SimpleNamespace(
             position_limits=np.asarray([[-1.0, 1.0], [-1.0, 1.0]], dtype=np.float32)
         )
+        self.pipeline.dt = 0.02
 
         result = self.pipeline._apply_pd_target_override(np.zeros(2, dtype=np.float32), self.ctrl_data())
 
         np.testing.assert_allclose(result, [0.1, 0.2])
 
     def test_g1_casia_configs_are_dedicated_and_preserve_arm_only_configs(self):
-        from robojudo.config.g1.g1_cfg import (
-            g1_23_casia_locomanipulation_default_real,
-            g1_23_casia_locomanipulation_stiff_real,
-            g1_23_locomanipulation_default_real,
-            g1_29_casia_locomanipulation_stiff_real,
-        )
+        from robojudo.config.g1.g1_cfg import g1_23_locomanipulation_default_real
+        from robojudo.config.g1.g1_vla_cfg import g1_23_casia_locomanipulation_stiff_real
 
         arm_only = g1_23_locomanipulation_default_real()
         self.assertEqual(arm_only.pipeline_type, "G1LocomanipulationPipeline")
         self.assertEqual(arm_only.ctrl[-1].ctrl_type, "UpperBodyZmqCtrl")
 
         cases = [
-            (g1_23_casia_locomanipulation_default_real(), 10),
             (g1_23_casia_locomanipulation_stiff_real(), 10),
-            (g1_29_casia_locomanipulation_stiff_real(), 14),
         ]
         for cfg, arm_joint_count in cases:
             with self.subTest(config=type(cfg).__name__):
@@ -126,8 +122,8 @@ class TestUpperBodyCasiaHandZmqPipeline(unittest.TestCase):
                 )
                 self.assertEqual(len(cfg.ctrl[-1].joint_names), arm_joint_count)
                 self.assertEqual(len(cfg.ctrl[-1].joint_names) + len(CASIA_JOINT_NAMES), arm_joint_count + 20)
-                self.assertEqual(cfg.ctrl[-1].endpoint, "tcp://127.0.0.1:8560")
-                self.assertEqual(cfg.ctrl[-1].casia_hand.port_name, "/dev/ttyUSB0")
+                self.assertEqual(cfg.ctrl[-1].endpoint, "tcp://192.168.252.72:8560")
+                self.assertEqual(cfg.ctrl[-1].casia_hand.port_name, "/dev/ttyCH341USB0")
 
 
 if __name__ == "__main__":

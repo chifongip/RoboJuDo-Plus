@@ -39,11 +39,17 @@ class TestUpperBodyZmqCtrl(unittest.TestCase):
         self.assertEqual(cfg.endpoint, "tcp://127.0.0.1:8559")
         self.assertEqual(cfg.timeout_s, 0.25)
         self.assertEqual(cfg.ema_alpha, 0.95)
+        self.assertIsNone(cfg.upper_body_default_pose)
 
         with self.assertRaises(ValueError):
             UpperBodyZmqCtrlCfg(joint_names=[])
         with self.assertRaises(ValueError):
             UpperBodyZmqCtrlCfg(joint_names=[X2_ARM_JOINT_NAMES[0]] * 2)
+        with self.assertRaises(ValueError):
+            UpperBodyZmqCtrlCfg(
+                joint_names=["left", "right"],
+                upper_body_default_pose=[0.0],
+            )
 
     def test_named_partial_updates_are_merged(self):
         controller = self.make_controller(

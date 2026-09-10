@@ -11,6 +11,7 @@ from box import Box
 class TestG1Locomanipulation(unittest.TestCase):
     def test_configs_pair_models_with_recorded_presets(self):
         from robojudo.config.g1.g1_cfg import (
+            G1_23_UPPER_BODY_DEFAULT_POSE,
             g1_23_locomanipulation_default,
             g1_23_locomanipulation_stiff,
             g1_29_locomanipulation_stiff,
@@ -62,7 +63,21 @@ class TestG1Locomanipulation(unittest.TestCase):
                 self.assertEqual(cfg.joint_default_duration, 1.5)
                 self.assertEqual(cfg.default_damping, 5.0)
                 self.assertEqual(cfg.joint_default_dof.joint_names, cfg.env.dof.joint_names)
-                self.assertEqual(cfg.joint_default_dof.default_pos, cfg.policy.obs_dof.default_pos)
+                if policy_name == "policy_23dof_stiff":
+                    self.assertEqual(
+                        cfg.joint_default_dof.default_pos[:13],
+                        cfg.policy.obs_dof.default_pos[:13],
+                    )
+                    self.assertEqual(
+                        cfg.joint_default_dof.default_pos[13:],
+                        G1_23_UPPER_BODY_DEFAULT_POSE,
+                    )
+                    self.assertEqual(
+                        cfg.ctrl[-1].upper_body_default_pose,
+                        G1_23_UPPER_BODY_DEFAULT_POSE,
+                    )
+                else:
+                    self.assertEqual(cfg.joint_default_dof.default_pos, cfg.policy.obs_dof.default_pos)
                 self.assertEqual(cfg.joint_default_dof.stiffness, cfg.policy.obs_dof.stiffness)
                 self.assertEqual(cfg.joint_default_dof.damping, cfg.policy.obs_dof.damping)
                 self.assertEqual(round(cfg.joint_default_duration * cfg.policy.freq), 75)

@@ -102,9 +102,8 @@ python scripts/run_pipeline.py \
   --record-task "pick up the red cup"
 ```
 
-The available CASIA presets are `g1_23_casia_locomanipulation_default_real`,
-`g1_23_casia_locomanipulation_stiff_real`, and `g1_29_casia_locomanipulation_stiff_real`. They record 10 or 14 arm
-joints followed by the same 20 physical hand motors in both state and action. Do not start a standalone CASIA ZMQ
+The available CASIA preset is `g1_23_casia_locomanipulation_stiff_real`. It records 10 arm joints followed by the same
+20 physical hand motors in both state and action. Do not start a standalone CASIA ZMQ
 receiver or hardware server alongside RoboJuDo.
 
 The recorder service binds `tcp://*:8560` by default and the pipeline connects to `tcp://127.0.0.1:8560`. Recording

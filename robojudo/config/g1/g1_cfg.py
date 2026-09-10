@@ -1,12 +1,8 @@
 from robojudo.config import cfg_registry
 from robojudo.controller.ctrl_cfgs import (
-    CasiaHandCfg,
-    Gr00tCameraCfg,
-    Gr00tZmqCtrlCfg,
     JoystickCtrlCfg,  # noqa: F401
     KeyboardCtrlCfg,  # noqa: F401
     UnitreeCtrlCfg,  # noqa: F401
-    UpperBodyCasiaHandZmqCtrlCfg,
     UpperBodyZmqCtrlCfg,
     VelocityZmqCtrlCfg,
 )
@@ -39,7 +35,6 @@ from .policy.g1_beyondmimic_policy_cfg import (  # noqa: F401
     G1_23BeyondMimicPolicyCfg,
     G1BeyondMimicPolicyCfg,
 )
-from .policy.g1_gr00t_locomanipulation_policy_cfg import G1Gr00tLocomanipulation23PolicyCfg
 from .policy.g1_h2h_policy_cfg import G1H2HPolicyCfg  # noqa: F401
 from .policy.g1_kungfubot_policy_cfg import G1KungfuBotGeneralPolicyCfg, G1KungfuBotPolicyCfg  # noqa: F401
 from .policy.g1_locomanipulation_policy_cfg import (
@@ -222,8 +217,38 @@ class g1_locomimic(RlLocoMimicPipelineCfg):
 # ======================== Configs for supported Policy ======================== #
 
 
+G1_23_UPPER_BODY_DEFAULT_POSE = [
+    0.35,
+    0.38,
+    0.0,
+    0.87,
+    0.0,
+    0.35,
+    -0.38,
+    0.0,
+    0.87,
+    0.0,
+]
+
+# Override only the Y/JOINT_DEFAULT target;
+def _g1_23_joint_default_dof_with_upper_pose(
+    preset: str,
+    upper_body_pose: list[float],
+) -> G1Locomanipulation23ObsDoF:
+    dof = G1Locomanipulation23ObsDoF.from_preset(preset)
+    upper_body_joint_count = len(dof.joint_names) - 13
+    if len(upper_body_pose) != upper_body_joint_count:
+        raise ValueError(
+            f"G1 23-DoF upper-body pose must contain {upper_body_joint_count} values, got {len(upper_body_pose)}"
+        )
+    assert dof.default_pos is not None
+    dof.default_pos = [*dof.default_pos[:13], *upper_body_pose]
+    return dof
+
+
 def _g1_locomanipulation_sim_ctrl(
     joint_names: list[str],
+    upper_body_default_pose: list[float] | None = None,
 ) -> list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg]:
     return [
         JoystickCtrlCfg(
@@ -251,7 +276,10 @@ def _g1_locomanipulation_sim_ctrl(
                 "t": "[UPPER_BODY_TOGGLE]",
             }
         ),
-        UpperBodyZmqCtrlCfg(joint_names=joint_names),
+        UpperBodyZmqCtrlCfg(
+            joint_names=joint_names,
+            upper_body_default_pose=upper_body_default_pose,
+        ),
     ]
 
 
@@ -289,11 +317,20 @@ class g1_23_locomanipulation_stiff(g1_23_locomanipulation_default):
         sim_decimation=4,
         elastic_band=ElasticBandCfg(body_name="torso_link"),
     )
+    # Keep this pose in RL_DEFAULT until teleop is active, and return to it on stream timeout.
+    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg] = _g1_locomanipulation_sim_ctrl(
+        G1Locomanipulation23ObsDoF().joint_names[13:],
+        G1_23_UPPER_BODY_DEFAULT_POSE,
+    )
     policy: G1Locomanipulation23PolicyCfg = G1Locomanipulation23PolicyCfg(
         policy_name="policy_23dof_stiff",
         pd_gain_preset="stiff",
     )
-    joint_default_dof: G1Locomanipulation23ObsDoF = G1Locomanipulation23ObsDoF.from_preset("stiff")
+    # Separately use the same upper-body pose during Y/JOINT_DEFAULT interpolation.
+    joint_default_dof: G1Locomanipulation23ObsDoF = _g1_23_joint_default_dof_with_upper_pose(
+        "stiff",
+        G1_23_UPPER_BODY_DEFAULT_POSE,
+    )
 
 
 @cfg_registry.register
@@ -319,6 +356,7 @@ class g1_29_locomanipulation_stiff(RlPipelineCfg):
 
 def _g1_locomanipulation_real_ctrl(
     joint_names: list[str],
+    upper_body_default_pose: list[float] | None = None,
 ) -> list[UnitreeCtrlCfg | UpperBodyZmqCtrlCfg]:
     return [
         UnitreeCtrlCfg(
@@ -332,7 +370,10 @@ def _g1_locomanipulation_real_ctrl(
                 "L1+R1+A": "[SHUTDOWN]",
             },
         ),
-        UpperBodyZmqCtrlCfg(joint_names=joint_names),
+        UpperBodyZmqCtrlCfg(
+            joint_names=joint_names,
+            upper_body_default_pose=upper_body_default_pose,
+        ),
     ]
 
 
@@ -369,7 +410,8 @@ class g1_23_locomanipulation_stiff_real(g1_23_locomanipulation_stiff):
         ),
     )
     ctrl: list[UnitreeCtrlCfg | UpperBodyZmqCtrlCfg] = _g1_locomanipulation_real_ctrl(
-        G1Locomanipulation23ObsDoF().joint_names[13:]
+        G1Locomanipulation23ObsDoF().joint_names[13:],
+        G1_23_UPPER_BODY_DEFAULT_POSE,
     )
     do_safety_check: bool = True
 
@@ -391,204 +433,6 @@ class g1_29_locomanipulation_stiff_real(g1_29_locomanipulation_stiff):
         G1Locomanipulation29ObsDoF().joint_names[15:]
     )
     do_safety_check: bool = True
-
-
-def _g1_casia_locomanipulation_real_ctrl(
-    joint_names: list[str],
-) -> list[UnitreeCtrlCfg | UpperBodyCasiaHandZmqCtrlCfg]:
-    return [
-        UnitreeCtrlCfg(
-            combination_init_buttons=["L1", "R1"],
-            triggers={
-                "A": "[PASSIVE_DEFAULT]",
-                "B": "[DAMPING_DEFAULT]",
-                "Y": "[JOINT_DEFAULT]",
-                "X": "[RL_DEFAULT]",
-                "Start": "[UPPER_BODY_TOGGLE]",
-                "L1+R1+Start": "[RECORD_START_STOP]",
-                "L1+R1+Select": "[RECORD_PAUSE_RESUME]",
-                "L1+R1+X": "[RECORD_CONFIRM_SAVE]",
-                "L1+R1+B": "[RECORD_DISCARD]",
-                "L1+R1+A": "[SHUTDOWN]",
-            },
-        ),
-        UpperBodyCasiaHandZmqCtrlCfg(
-            joint_names=joint_names,
-            endpoint="tcp://192.168.252.72:8560",
-            casia_hand=CasiaHandCfg(),
-        ),
-    ]
-
-
-@cfg_registry.register
-class g1_23_casia_locomanipulation_default_real(g1_23_locomanipulation_default_real):
-    """G1 23-DOF default-gain policy with direct dual CASIA Hand control."""
-
-    pipeline_type: str = "G1CasiaHandLocomanipulationPipeline"
-    ctrl: list[UnitreeCtrlCfg | UpperBodyCasiaHandZmqCtrlCfg] = _g1_casia_locomanipulation_real_ctrl(
-        G1Locomanipulation23ObsDoF().joint_names[13:]
-    )
-
-
-@cfg_registry.register
-class g1_23_casia_locomanipulation_stiff_real(g1_23_locomanipulation_stiff_real):
-    """G1 23-DOF stiff-gain policy with direct dual CASIA Hand control."""
-
-    pipeline_type: str = "G1CasiaHandLocomanipulationPipeline"
-    ctrl: list[UnitreeCtrlCfg | UpperBodyCasiaHandZmqCtrlCfg] = _g1_casia_locomanipulation_real_ctrl(
-        G1Locomanipulation23ObsDoF().joint_names[13:]
-    )
-
-
-@cfg_registry.register
-class g1_29_casia_locomanipulation_stiff_real(g1_29_locomanipulation_stiff_real):
-    """G1 29-DOF stiff-gain policy with direct dual CASIA Hand control."""
-
-    pipeline_type: str = "G1CasiaHandLocomanipulationPipeline"
-    ctrl: list[UnitreeCtrlCfg | UpperBodyCasiaHandZmqCtrlCfg] = _g1_casia_locomanipulation_real_ctrl(
-        G1Locomanipulation29ObsDoF().joint_names[15:]
-    )
-
-
-G1_23_GR00T_UPPER_BODY_DEFAULT_POSE = [
-    0.35,
-    0.38,
-    0.0,
-    0.87,
-    0.0,
-    0.35,
-    -0.38,
-    0.0,
-    0.87,
-    0.0,
-]
-
-
-def _g1_gr00t_locomanipulation_sim_ctrl(
-    joint_names: list[str],
-) -> list[JoystickCtrlCfg | KeyboardCtrlCfg | Gr00tZmqCtrlCfg]:
-    return [
-        JoystickCtrlCfg(
-            triggers={
-                "A": "[PASSIVE_DEFAULT]",
-                "B": "[DAMPING_DEFAULT]",
-                "Y": "[JOINT_DEFAULT]",
-                "X": "[RL_DEFAULT]",
-                "Start": "[UPPER_BODY_TOGGLE]",
-                "LB+RB+A": "[SHUTDOWN]",
-                "LB+RB+Y": "[SIM_REBORN]",
-            }
-        ),
-        KeyboardCtrlCfg(
-            triggers={
-                "k": "[PASSIVE_DEFAULT]",
-                "l": "[DAMPING_DEFAULT]",
-                "i": "[JOINT_DEFAULT]",
-                "j": "[RL_DEFAULT]",
-                "7": "[ELASTIC_BAND_LOWER]",
-                "8": "[ELASTIC_BAND_LIFT]",
-                "9": "[ELASTIC_BAND_TOGGLE]",
-                "t": "[UPPER_BODY_TOGGLE]",
-            }
-        ),
-        Gr00tZmqCtrlCfg(
-            joint_names=joint_names,
-            upper_body_default_pose=G1_23_GR00T_UPPER_BODY_DEFAULT_POSE,
-            ema_alpha=0.0,
-            observation_enabled=True,
-            observation_profile="g1_23dof",
-            camera=Gr00tCameraCfg(
-                type="realsense",
-                options={"width": 640, "height": 480, "fps": 30},
-            ),
-        ),
-    ]
-
-
-def _g1_gr00t_locomanipulation_real_ctrl(
-    joint_names: list[str],
-) -> list[UnitreeCtrlCfg | Gr00tZmqCtrlCfg]:
-    return [
-        UnitreeCtrlCfg(
-            combination_init_buttons=["L1", "R1"],
-            triggers={
-                "A": "[PASSIVE_DEFAULT]",
-                "B": "[DAMPING_DEFAULT]",
-                "Y": "[JOINT_DEFAULT]",
-                "X": "[RL_DEFAULT]",
-                "Start": "[UPPER_BODY_TOGGLE]",
-                "L1+R1+A": "[SHUTDOWN]",
-            },
-        ),
-        Gr00tZmqCtrlCfg(
-            joint_names=joint_names,
-            upper_body_default_pose=G1_23_GR00T_UPPER_BODY_DEFAULT_POSE,
-            casia_hand=CasiaHandCfg(),
-            ema_alpha=0.0,
-            observation_enabled=True,
-            observation_profile="g1_23dof",
-            camera=Gr00tCameraCfg(
-                type="realsense",
-                options={"width": 640, "height": 480, "fps": 30},
-            ),
-        ),
-    ]
-
-
-@cfg_registry.register
-class g1_23_gr00t_locomanipulation_default(g1_23_locomanipulation_default):
-    """G1 23-DoF default-gain Locomanipulation driven by GR00T, Sim2Sim."""
-
-    pipeline_type: str = "G1Gr00tLocomanipulationPipeline"
-    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | Gr00tZmqCtrlCfg] = _g1_gr00t_locomanipulation_sim_ctrl(
-        G1Locomanipulation23ObsDoF().joint_names[13:]
-    )
-    policy: G1Gr00tLocomanipulation23PolicyCfg = G1Gr00tLocomanipulation23PolicyCfg(
-        policy_name="policy_23dof_default",
-        pd_gain_preset="default",
-    )
-
-
-@cfg_registry.register
-class g1_23_gr00t_locomanipulation_stiff(g1_23_locomanipulation_stiff):
-    """G1 23-DoF stiff-gain Locomanipulation driven by GR00T, Sim2Sim."""
-
-    pipeline_type: str = "G1Gr00tLocomanipulationPipeline"
-    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | Gr00tZmqCtrlCfg] = _g1_gr00t_locomanipulation_sim_ctrl(
-        G1Locomanipulation23ObsDoF().joint_names[13:]
-    )
-    policy: G1Gr00tLocomanipulation23PolicyCfg = G1Gr00tLocomanipulation23PolicyCfg(
-        policy_name="policy_23dof_stiff",
-        pd_gain_preset="stiff",
-    )
-
-
-@cfg_registry.register
-class g1_23_gr00t_locomanipulation_default_real(g1_23_locomanipulation_default_real):
-    """G1 23-DoF default-gain GR00T Locomanipulation, Sim2Real."""
-
-    pipeline_type: str = "G1Gr00tLocomanipulationPipeline"
-    ctrl: list[UnitreeCtrlCfg | Gr00tZmqCtrlCfg] = _g1_gr00t_locomanipulation_real_ctrl(
-        G1Locomanipulation23ObsDoF().joint_names[13:]
-    )
-    policy: G1Gr00tLocomanipulation23PolicyCfg = G1Gr00tLocomanipulation23PolicyCfg(
-        policy_name="policy_23dof_default",
-        pd_gain_preset="default",
-    )
-
-
-@cfg_registry.register
-class g1_23_gr00t_locomanipulation_stiff_real(g1_23_locomanipulation_stiff_real):
-    """G1 23-DoF stiff-gain GR00T Locomanipulation, Sim2Real."""
-
-    pipeline_type: str = "G1Gr00tLocomanipulationPipeline"
-    ctrl: list[UnitreeCtrlCfg | Gr00tZmqCtrlCfg] = _g1_gr00t_locomanipulation_real_ctrl(
-        G1Locomanipulation23ObsDoF().joint_names[13:]
-    )
-    policy: G1Gr00tLocomanipulation23PolicyCfg = G1Gr00tLocomanipulation23PolicyCfg(
-        policy_name="policy_23dof_stiff",
-        pd_gain_preset="stiff",
-    )
 
 
 @cfg_registry.register
