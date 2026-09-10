@@ -46,20 +46,59 @@ env_data.dof_pos
     -> return ctrl_data to the pipeline
 
 GR00T observation worker thread:
-camera frame
+independent camera capture threads
+    -> per-camera latest-only JPEG workers
+    -> timestamp matching with a maximum camera skew
     + latest upper-joint snapshot
     + task
-    -> msgpack/JPEG observation PUB :8561
+    -> one atomic msgpack/JPEG multipart observation PUB :8561
 ```
 
 The camera worker does not read the robot environment directly. Joint state is sampled by the control thread, then
 shared with the worker through the locked latest snapshot. Conversely, the worker only publishes observations; robot
 PD targets are still computed and applied synchronously by the pipeline control thread.
 
-The observation header is msgpack and the second multipart field is a JPEG payload. Camera capture, JPEG encoding, and
-publishing run outside the 50 Hz control thread. G1 uses the recorder's RealSense backend by default; both X2 simulation
-and X2 real use the ROS2 compressed-image topic configured in `x2_cfg.py`. All can be replaced through
-`Gr00tZmqCtrlCfg.camera`.
+The observation header is msgpack. A legacy single-camera configuration publishes protocol v1 as `[header, jpeg]`.
+A multi-camera configuration publishes protocol v2 as `[header, jpeg_0, ...]`, with payload order defined by
+`header["image_keys"]`. All image parts are sent by one `send_multipart()` call. Camera capture and per-camera JPEG
+encoding run outside the 50 Hz control thread, and bounded queues discard stale frames instead of accumulating deploy
+latency. `max_camera_skew_ms` rejects a candidate bundle when its earliest and latest image timestamps are too far
+apart.
+
+G1 uses recorder camera backends; both X2 simulation and X2 real use the ROS2 compressed-image topic configured in
+`x2_cfg.py`. Keep using `Gr00tZmqCtrlCfg.camera` for one camera, or set `Gr00tZmqCtrlCfg.cameras` for multiple cameras.
+For example, configure three RealSense devices by serial number in `g1_vla_cfg.py` (replace the placeholders with the
+serials reported by `rs-enumerate-devices -s`):
+
+```python
+cameras=[
+    Gr00tCameraCfg(
+        type="realsense",
+        name="head_rgb",
+        image_key="ego_view",
+        options={"serial_number": "HEAD_SERIAL", "width": 640, "height": 480, "fps": 30},
+    ),
+    Gr00tCameraCfg(
+        type="realsense",
+        name="left_wrist_rgb",
+        image_key="left_wrist_view",
+        options={"serial_number": "LEFT_WRIST_SERIAL", "width": 640, "height": 480, "fps": 30},
+    ),
+    Gr00tCameraCfg(
+        type="realsense",
+        name="right_wrist_rgb",
+        image_key="right_wrist_view",
+        options={"serial_number": "RIGHT_WRIST_SERIAL", "width": 640, "height": 480, "fps": 30},
+    ),
+],
+camera_pending_capacity=2,
+camera_encoder_queue_capacity=2,
+camera_poll_timeout_ms=2,
+max_camera_skew_ms=50,
+```
+
+The protocol v2 header additionally reports `image_shapes`, per-camera source/receive timestamps and sequences, and
+the selected bundle's `camera_skew_ns` for runtime diagnostics.
 
 Command messages remain JSON, and every message must contain all configured joints. Invalid positions,
 a command other than
@@ -160,11 +199,19 @@ Run the double-buffered deploy client from Isaac-GR00T:
 ```bash
 uv run python examples/RoboJuDo/run_robojudo_client.py \
   --profile g1_23dof \
+  --camera-layout mulcam \
   --robot-endpoint tcp://<robot-ip>:8561 \
-  --policy-host <policy-server-ip>
+  --policy-host <policy-server-ip> \
+  --policy-port 5555 \
+  --command-endpoint tcp://*:8559 \
+  --execution-mode rtc \
+  --execution-horizon 8 \
+  --rtc-prefix-schedule exp \
+  --rtc-max-guidance-weight 10
 ```
 
-Use `--profile x2` for X2. Eight commands at 30 Hz cover approximately 267 ms. The client receives observations and
+Omit `--camera-layout mulcam` for a legacy single-camera deployment. Use `--profile x2` for X2. Eight commands at 30
+Hz cover approximately 267 ms. The client receives observations and
 requests the next action chunk in background threads while its command loop continues publishing at 30 Hz.
 
 ## Recording

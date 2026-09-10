@@ -3,6 +3,8 @@ import math
 import threading
 import time
 import uuid
+from collections import deque
+from dataclasses import dataclass
 from numbers import Integral, Real
 
 import msgpack
@@ -21,6 +23,91 @@ from robojudo.controller.ctrl_cfgs import Gr00tZmqCtrlCfg
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _EncodedCameraFrame:
+    shape: tuple[int, int, int]
+    jpeg: bytes
+    timestamp_ns: int
+    source_timestamp_ns: int
+    receive_timestamp_ns: int
+    sequence: int
+
+
+class _JpegEncoderWorker:
+    """Encode one camera independently while keeping latency bounded."""
+
+    def __init__(self, name: str, cv2, jpeg_quality: int, capacity: int):
+        self.name = name
+        self._cv2 = cv2
+        self._jpeg_quality = jpeg_quality
+        self._capacity = capacity
+        self._condition = threading.Condition()
+        self._pending = deque()
+        self._completed = deque()
+        self._stopping = False
+        self._error: Exception | None = None
+        self.dropped_frames = 0
+        self._thread = threading.Thread(target=self._run, name=f"Gr00tJpegEncoder-{name}", daemon=True)
+        self._thread.start()
+
+    def submit(self, frame) -> None:
+        with self._condition:
+            if len(self._pending) >= self._capacity:
+                self._pending.popleft()
+                self.dropped_frames += 1
+            self._pending.append(frame)
+            self._condition.notify()
+
+    def drain(self) -> list[_EncodedCameraFrame]:
+        with self._condition:
+            if self._error is not None:
+                raise RuntimeError(f"GR00T JPEG encoder failed: {self.name}") from self._error
+            completed = list(self._completed)
+            self._completed.clear()
+            return completed
+
+    def _run(self) -> None:
+        try:
+            while True:
+                with self._condition:
+                    self._condition.wait_for(lambda: self._stopping or bool(self._pending))
+                    if self._stopping and not self._pending:
+                        return
+                    frame = self._pending.popleft()
+                shape, jpeg = Gr00tZmqCtrl._prepare_observation_jpeg(
+                    frame,
+                    self._cv2,
+                    self._jpeg_quality,
+                )
+                timestamp_ns = int(frame.timestamp_ns)
+                prepared = _EncodedCameraFrame(
+                    shape=shape,
+                    jpeg=jpeg,
+                    timestamp_ns=timestamp_ns,
+                    source_timestamp_ns=int(getattr(frame, "source_timestamp_ns", None) or timestamp_ns),
+                    receive_timestamp_ns=int(getattr(frame, "receive_timestamp_ns", None) or timestamp_ns),
+                    sequence=int(frame.sequence),
+                )
+                with self._condition:
+                    if len(self._completed) >= self._capacity:
+                        self._completed.popleft()
+                        self.dropped_frames += 1
+                    self._completed.append(prepared)
+        except Exception as exc:
+            with self._condition:
+                self._error = exc
+                self._condition.notify_all()
+
+    def close(self) -> None:
+        with self._condition:
+            self._stopping = True
+            self._pending.clear()
+            self._condition.notify_all()
+        self._thread.join(timeout=2.0)
+        if self._thread.is_alive():
+            logger.warning("GR00T JPEG encoder %s did not stop within 2 seconds", self.name)
+
+
 @ctrl_registry.register
 class Gr00tZmqCtrl(ControllerHook):
     """Receive atomic GR00T commands and publish camera/joint observations.
@@ -30,8 +117,9 @@ class Gr00tZmqCtrl(ControllerHook):
     - Control thread (pipeline rate): ``get_data_with_hook`` snapshots measured
       upper-body joints from ``env_data`` and non-blockingly returns the latest
       GR00T command to the pipeline.
-    - Observation worker: reads camera frames, combines each frame with the
-      latest thread-safe joint snapshot and task, then publishes to deploy.
+    - Observation worker: drains independent camera sources and JPEG workers,
+      time-aligns their frames, combines them with the latest thread-safe joint
+      snapshot and task, then publishes one atomic multipart message to deploy.
 
     The worker never reads robot state directly, and it never executes robot
     control; final targets are still applied synchronously by the pipeline.
@@ -77,6 +165,7 @@ class Gr00tZmqCtrl(ControllerHook):
         self._observation_error: Exception | None = None
         self._published_observations = 0
         self._dropped_observations = 0
+        self._camera_encoder_drops: dict[str, int] = {}
         self._hand_runtime = None
         logger.info("Gr00tZmqCtrl subscribed to %s", cfg_ctrl.endpoint)
         try:
@@ -109,9 +198,13 @@ class Gr00tZmqCtrl(ControllerHook):
     def close(self):
         self._observation_stop.set()
         if self._observation_thread is not None:
-            self._observation_thread.join(timeout=3.0)
+            shutdown_timeout_s = max(3.0, 2.5 * len(self.cfg_ctrl.observation_cameras))
+            self._observation_thread.join(timeout=shutdown_timeout_s)
             if self._observation_thread.is_alive():
-                logger.warning("GR00T observation worker did not stop within 3 seconds")
+                logger.warning(
+                    "GR00T observation worker did not stop within %.1f seconds",
+                    shutdown_timeout_s,
+                )
             self._observation_thread = None
         hand_runtime = getattr(self, "_hand_runtime", None)
         if hand_runtime is not None:
@@ -202,9 +295,44 @@ class Gr00tZmqCtrl(ControllerHook):
             raise RuntimeError("failed to encode GR00T camera frame as JPEG")
         return tuple(image.shape), encoded.tobytes()
 
+    @staticmethod
+    def _read_camera_batch(camera, max_frames: int):
+        read_batch = getattr(camera, "read_batch", None)
+        if callable(read_batch):
+            return read_batch(max_frames)
+        frame = camera.read(timeout_ms=0)
+        return [] if frame is None else [frame]
+
+    @staticmethod
+    def _camera_bundle_candidate(
+        buffers: dict[str, deque],
+    ) -> tuple[dict[str, _EncodedCameraFrame], int, int] | None:
+        """Select frames nearest the newest timestamp available from every camera."""
+        if any(not frames for frames in buffers.values()):
+            return None
+        target_ns = min(frames[-1].timestamp_ns for frames in buffers.values())
+        selected = {
+            name: min(
+                frames,
+                key=lambda frame: (abs(frame.timestamp_ns - target_ns), -frame.timestamp_ns),
+            )
+            for name, frames in buffers.items()
+        }
+        timestamps = [frame.timestamp_ns for frame in selected.values()]
+        return selected, target_ns, max(timestamps) - min(timestamps)
+
+    @staticmethod
+    def _consume_camera_bundle(buffers: dict[str, deque], selected: dict[str, _EncodedCameraFrame]) -> None:
+        for name, selected_frame in selected.items():
+            while buffers[name]:
+                frame = buffers[name].popleft()
+                if frame is selected_frame:
+                    break
+
     def _observation_loop(self):
-        # Worker flow: camera -> latest joint snapshot + task -> observation PUB.
-        camera = None
+        # Worker flow: independent cameras -> independent JPEG workers -> synchronized multipart PUB.
+        cameras = []
+        encoders: dict[str, _JpegEncoderWorker] = {}
         publisher = None
         try:
             try:
@@ -216,91 +344,166 @@ class Gr00tZmqCtrl(ControllerHook):
                     "GR00T observation publishing requires robojudo-recorder and OpenCV"
                 ) from exc
 
-            camera_cfg = CameraConfig(
-                type=self.cfg_ctrl.camera.type,
-                name=self.cfg_ctrl.camera.name,
-                options=dict(self.cfg_ctrl.camera.options),
-            )
-            camera = create_camera(camera_cfg)
-            camera.connect()
+            configured_cameras = self.cfg_ctrl.observation_cameras
+            image_keys = tuple(camera.resolved_image_key for camera in configured_cameras)
+            for configured in configured_cameras:
+                camera_cfg = CameraConfig(
+                    type=configured.type,
+                    name=configured.name,
+                    options=dict(configured.options),
+                )
+                camera = create_camera(camera_cfg)
+                set_pending_capacity = getattr(camera, "set_pending_capacity", None)
+                if callable(set_pending_capacity):
+                    set_pending_capacity(self.cfg_ctrl.camera_pending_capacity)
+                try:
+                    camera.connect()
+                except Exception:
+                    camera.close()
+                    raise
+                cameras.append(camera)
+                encoders[configured.resolved_image_key] = _JpegEncoderWorker(
+                    configured.resolved_image_key,
+                    cv2,
+                    self.cfg_ctrl.observation_jpeg_quality,
+                    self.cfg_ctrl.camera_encoder_queue_capacity,
+                )
             publisher = self._context.socket(zmq.PUB)
             publisher.setsockopt(zmq.LINGER, 0)
             publisher.setsockopt(zmq.SNDHWM, 2)
             publisher.bind(self.cfg_ctrl.observation_endpoint)
             self._observation_ready.set()
             logger.info(
-                "GR00T observations publishing to %s from %s camera",
+                "GR00T observations publishing to %s from cameras [%s]",
                 self.cfg_ctrl.observation_endpoint,
-                self.cfg_ctrl.camera.type,
+                ", ".join(
+                    f"{configured.resolved_image_key}={configured.type}:{configured.name}"
+                    for configured in configured_cameras
+                ),
             )
 
             minimum_period_ns = int(1_000_000_000 / self.cfg_ctrl.observation_fps)
             # Accept normal camera/scheduler jitter at the configured rate.
             minimum_interval_ns = minimum_period_ns * 9 // 10
             last_published_at = 0
-            last_camera_sequence = -1
+            last_camera_sequences = {key: -1 for key in image_keys}
             observation_sequence = 0
+            max_skew_ns = int(self.cfg_ctrl.max_camera_skew_ms * 1_000_000)
+            buffer_capacity = max(2, self.cfg_ctrl.camera_pending_capacity * 2)
+            encoded_buffers = {key: deque(maxlen=buffer_capacity) for key in image_keys}
             while not self._observation_stop.is_set():
-                frame = camera.read(self.cfg_ctrl.camera_poll_timeout_ms)
-                if frame is None:
-                    continue
-                if frame.sequence == last_camera_sequence:
-                    continue
-                last_camera_sequence = frame.sequence
-                now_ns = time.monotonic_ns()
-                if now_ns - last_published_at < minimum_interval_ns:
-                    continue
-                with self._observation_snapshot_lock:
-                    snapshot = self._observation_snapshot
-                    takeover_enabled = self._takeover_enabled
-                    control_session = self._control_session
-                if snapshot is None:
-                    continue
+                made_progress = False
+                for configured, camera in zip(configured_cameras, cameras, strict=True):
+                    image_key = configured.resolved_image_key
+                    for frame in self._read_camera_batch(camera, self.cfg_ctrl.camera_pending_capacity):
+                        if frame.sequence == last_camera_sequences[image_key]:
+                            continue
+                        last_camera_sequences[image_key] = frame.sequence
+                        encoders[image_key].submit(frame)
+                        made_progress = True
+                for image_key, encoder in encoders.items():
+                    completed = encoder.drain()
+                    self._camera_encoder_drops[image_key] = encoder.dropped_frames
+                    if completed:
+                        encoded_buffers[image_key].extend(completed)
+                        made_progress = True
 
-                joint_timestamp_ns, joint_positions = snapshot
-                joint_timeout_ns = int(self.cfg_ctrl.observation_joint_timeout_s * 1_000_000_000)
-                if now_ns - joint_timestamp_ns > joint_timeout_ns:
-                    continue
-                image_shape, jpeg_payload = self._prepare_observation_jpeg(
-                    frame,
-                    cv2,
-                    self.cfg_ctrl.observation_jpeg_quality,
-                )
+                candidate = self._camera_bundle_candidate(encoded_buffers)
+                while candidate is not None:
+                    selected, target_ns, camera_skew_ns = candidate
+                    if camera_skew_ns > max_skew_ns:
+                        oldest_timestamp = min(frame.timestamp_ns for frame in selected.values())
+                        for image_key, frame in selected.items():
+                            if frame.timestamp_ns == oldest_timestamp:
+                                self._consume_camera_bundle(
+                                    {image_key: encoded_buffers[image_key]},
+                                    {image_key: frame},
+                                )
+                        self._dropped_observations += 1
+                        candidate = self._camera_bundle_candidate(encoded_buffers)
+                        continue
 
-                observation_sequence += 1
-                header = {
-                    "protocol_version": 1,
-                    "stream_id": self._observation_stream_id,
-                    "control_session": control_session,
-                    "takeover_enabled": takeover_enabled,
-                    "sequence": observation_sequence,
-                    "camera_sequence": int(frame.sequence),
-                    "timestamp_ns": int(frame.timestamp_ns),
-                    "joint_timestamp_ns": joint_timestamp_ns,
-                    "robot_type": self.cfg_ctrl.observation_profile.split("_", 1)[0],
-                    "profile": self.cfg_ctrl.observation_profile,
-                    "task": self.cfg_ctrl.observation_task,
-                    "camera_name": self.cfg_ctrl.camera.name,
-                    "encoding": "jpeg",
-                    "shape": list(image_shape),
-                    "joint_names": list(self._policy_joint_names),
-                    "joint_positions": joint_positions.tolist(),
-                }
-                try:
-                    publisher.send_multipart(
-                        [msgpack.packb(header, use_bin_type=True), jpeg_payload],
-                        flags=zmq.NOBLOCK,
-                    )
-                    self._published_observations += 1
-                    last_published_at = now_ns
-                except zmq.Again:
-                    self._dropped_observations += 1
+                    now_ns = time.monotonic_ns()
+                    if now_ns - last_published_at < minimum_interval_ns:
+                        self._consume_camera_bundle(encoded_buffers, selected)
+                        candidate = self._camera_bundle_candidate(encoded_buffers)
+                        continue
+                    with self._observation_snapshot_lock:
+                        snapshot = self._observation_snapshot
+                        takeover_enabled = self._takeover_enabled
+                        control_session = self._control_session
+                    if snapshot is None:
+                        self._consume_camera_bundle(encoded_buffers, selected)
+                        break
+
+                    joint_timestamp_ns, joint_positions = snapshot
+                    joint_timeout_ns = int(self.cfg_ctrl.observation_joint_timeout_s * 1_000_000_000)
+                    if now_ns - joint_timestamp_ns > joint_timeout_ns:
+                        self._consume_camera_bundle(encoded_buffers, selected)
+                        break
+
+                    observation_sequence += 1
+                    header = {
+                        "protocol_version": 1 if len(image_keys) == 1 else 2,
+                        "stream_id": self._observation_stream_id,
+                        "control_session": control_session,
+                        "takeover_enabled": takeover_enabled,
+                        "sequence": observation_sequence,
+                        "timestamp_ns": int(target_ns),
+                        "joint_timestamp_ns": joint_timestamp_ns,
+                        "robot_type": self.cfg_ctrl.observation_profile.split("_", 1)[0],
+                        "profile": self.cfg_ctrl.observation_profile,
+                        "task": self.cfg_ctrl.observation_task,
+                        "encoding": "jpeg",
+                        "joint_names": list(self._policy_joint_names),
+                        "joint_positions": joint_positions.tolist(),
+                    }
+                    if len(image_keys) == 1:
+                        image_key = image_keys[0]
+                        frame = selected[image_key]
+                        configured = configured_cameras[0]
+                        header.update(
+                            camera_sequence=frame.sequence,
+                            camera_name=configured.name,
+                            shape=list(frame.shape),
+                        )
+                    else:
+                        header.update(
+                            image_keys=list(image_keys),
+                            image_shapes={key: list(selected[key].shape) for key in image_keys},
+                            image_timestamps_ns={key: selected[key].timestamp_ns for key in image_keys},
+                            image_source_timestamps_ns={
+                                key: selected[key].source_timestamp_ns for key in image_keys
+                            },
+                            image_receive_timestamps_ns={
+                                key: selected[key].receive_timestamp_ns for key in image_keys
+                            },
+                            image_sequences={key: selected[key].sequence for key in image_keys},
+                            camera_skew_ns=camera_skew_ns,
+                        )
+                    parts = [
+                        msgpack.packb(header, use_bin_type=True),
+                        *(selected[key].jpeg for key in image_keys),
+                    ]
+                    try:
+                        publisher.send_multipart(parts, flags=zmq.NOBLOCK)
+                        self._published_observations += 1
+                        last_published_at = now_ns
+                    except zmq.Again:
+                        self._dropped_observations += 1
+                    self._consume_camera_bundle(encoded_buffers, selected)
+                    candidate = self._camera_bundle_candidate(encoded_buffers)
+
+                if not made_progress:
+                    self._observation_stop.wait(self.cfg_ctrl.camera_poll_timeout_ms / 1000)
         except Exception as exc:
             self._observation_error = exc
             logger.exception("GR00T observation publisher stopped: %s", exc)
             self._observation_ready.set()
         finally:
-            if camera is not None:
+            for encoder in encoders.values():
+                encoder.close()
+            for camera in reversed(cameras):
                 camera.close()
             if publisher is not None:
                 publisher.close(linger=0)
@@ -493,6 +696,7 @@ class Gr00tZmqCtrl(ControllerHook):
             "observation_error": None if observation_error is None else str(observation_error),
             "published_observations": getattr(self, "_published_observations", 0),
             "dropped_observations": getattr(self, "_dropped_observations", 0),
+            "camera_encoder_drops": getattr(self, "_camera_encoder_drops", {}).copy(),
         }
         hand_runtime = getattr(self, "_hand_runtime", None)
         if hand_runtime is not None:

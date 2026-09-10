@@ -287,6 +287,7 @@ class Gr00tCameraCfg(Config):
 
     type: str = "realsense"
     name: str = "head_rgb"
+    image_key: str | None = None
     options: dict = {}
 
     @model_validator(mode="after")
@@ -295,7 +296,13 @@ class Gr00tCameraCfg(Config):
             raise ValueError("GR00T camera type must not be empty")
         if not self.name.strip():
             raise ValueError("GR00T camera name must not be empty")
+        if self.image_key is not None and not self.image_key.strip():
+            raise ValueError("GR00T camera image_key must not be empty")
         return self
+
+    @property
+    def resolved_image_key(self) -> str:
+        return self.name if self.image_key is None else self.image_key
 
 
 class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
@@ -312,9 +319,13 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
     observation_fps: int = Field(default=30, gt=0)
     observation_jpeg_quality: int = Field(default=90, ge=1, le=100)
     observation_joint_timeout_s: float = Field(default=0.1, gt=0.0)
-    camera_poll_timeout_ms: int = Field(default=100, gt=0)
+    camera_poll_timeout_ms: int = Field(default=2, gt=0)
     camera_startup_timeout_s: float = Field(default=5.0, gt=0.0)
+    camera_pending_capacity: int = Field(default=2, gt=0)
+    camera_encoder_queue_capacity: int = Field(default=2, gt=0)
+    max_camera_skew_ms: float = Field(default=50.0, gt=0.0)
     camera: Gr00tCameraCfg = Gr00tCameraCfg()
+    cameras: list[Gr00tCameraCfg] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_gr00t_transport(self):
@@ -325,7 +336,19 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
                 raise ValueError("GR00T observation profile must not be empty")
             if not self.observation_task.strip():
                 raise ValueError("GR00T observation task must not be empty")
+            cameras = self.observation_cameras
+            names = [camera.name for camera in cameras]
+            image_keys = [camera.resolved_image_key for camera in cameras]
+            if len(names) != len(set(names)):
+                raise ValueError("GR00T camera names must be unique")
+            if len(image_keys) != len(set(image_keys)):
+                raise ValueError("GR00T camera image_keys must be unique")
         return self
+
+    @property
+    def observation_cameras(self) -> tuple[Gr00tCameraCfg, ...]:
+        """Return explicit multi-camera config, or the legacy single camera."""
+        return tuple(self.cameras) if self.cameras else (self.camera,)
 
 
 class VelocityZmqCtrlCfg(VelocitySourceCfg):

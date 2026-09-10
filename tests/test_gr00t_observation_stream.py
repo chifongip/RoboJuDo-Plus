@@ -17,9 +17,11 @@ from robojudo.controller.gr00t_zmq_ctrl import Gr00tZmqCtrl
 
 
 class FakeCamera:
-    def __init__(self):
+    def __init__(self, color=(20, 80, 140), timestamp_offset_ns=0):
         self.sequence = 0
         self.closed = False
+        self.color = color
+        self.timestamp_offset_ns = timestamp_offset_ns
 
     def connect(self):
         return None
@@ -28,8 +30,8 @@ class FakeCamera:
         del timeout_ms
         self.sequence += 1
         return SimpleNamespace(
-            image=np.full((8, 12, 3), [20, 80, 140], dtype=np.uint8),
-            timestamp_ns=time.monotonic_ns(),
+            image=np.full((8, 12, 3), self.color, dtype=np.uint8),
+            timestamp_ns=time.monotonic_ns() + self.timestamp_offset_ns,
             sequence=self.sequence,
         )
 
@@ -136,6 +138,88 @@ class TestGr00tObservationStream(unittest.TestCase):
             subscriber.close(linger=0)
 
         self.assertTrue(camera.closed)
+
+    def test_publishes_synchronized_multi_camera_protocol_v2(self):
+        context = zmq.Context.instance()
+        observation_endpoint = f"inproc://gr00t-mulcam-observation-{uuid.uuid4()}"
+        command_endpoint = f"inproc://gr00t-mulcam-command-{uuid.uuid4()}"
+        cameras = [
+            FakeCamera((255, 0, 0), 0),
+            FakeCamera((0, 255, 0), 1_000_000),
+            FakeCamera((0, 0, 255), 2_000_000),
+        ]
+        cfg = Gr00tZmqCtrlCfg(
+            endpoint="tcp://127.0.0.1:18559",
+            joint_names=["left_arm", "right_arm"],
+            observation_enabled=True,
+            observation_endpoint="tcp://*:18561",
+            observation_profile="g1_23dof",
+            observation_task="test task",
+            observation_fps=100,
+            max_camera_skew_ms=20,
+            cameras=[
+                Gr00tCameraCfg(type="fake", name="head_rgb", image_key="ego_view"),
+                Gr00tCameraCfg(type="fake", name="left_wrist_rgb", image_key="left_wrist_view"),
+                Gr00tCameraCfg(type="fake", name="right_wrist_rgb", image_key="right_wrist_view"),
+            ],
+        )
+        cfg.endpoint = command_endpoint
+        cfg.observation_endpoint = observation_endpoint
+        env = SimpleNamespace(joint_names=["leg", "left_arm", "right_arm"])
+
+        with patch("robojudo_recorder.cameras.create_camera", side_effect=cameras):
+            controller = Gr00tZmqCtrl(cfg, env=env)
+
+        subscriber = context.socket(zmq.SUB)
+        subscriber.setsockopt(zmq.LINGER, 0)
+        subscriber.setsockopt(zmq.SUBSCRIBE, b"")
+        subscriber.connect(observation_endpoint)
+        try:
+            deadline = time.monotonic() + 2.0
+            parts = None
+            while time.monotonic() < deadline:
+                controller.get_data_with_hook({}, {"dof_pos": np.asarray([0.0, 0.25, -0.5])})
+                if subscriber.poll(20, zmq.POLLIN):
+                    parts = subscriber.recv_multipart()
+                    break
+
+            self.assertIsNotNone(parts)
+            self.assertEqual(len(parts), 4)
+            header = msgpack.unpackb(parts[0], raw=False)
+            self.assertEqual(header["protocol_version"], 2)
+            self.assertEqual(
+                header["image_keys"],
+                ["ego_view", "left_wrist_view", "right_wrist_view"],
+            )
+            self.assertEqual(
+                header["image_shapes"],
+                {
+                    "ego_view": [8, 12, 3],
+                    "left_wrist_view": [8, 12, 3],
+                    "right_wrist_view": [8, 12, 3],
+                },
+            )
+            self.assertEqual(set(header["image_timestamps_ns"]), set(header["image_keys"]))
+            self.assertLessEqual(header["camera_skew_ns"], 20_000_000)
+            for payload in parts[1:]:
+                image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+                self.assertEqual(image.shape, (8, 12, 3))
+        finally:
+            controller.close()
+            subscriber.close(linger=0)
+
+        self.assertTrue(all(camera.closed for camera in cameras))
+
+    def test_rejects_duplicate_multi_camera_image_keys(self):
+        with self.assertRaisesRegex(ValueError, "image_keys must be unique"):
+            Gr00tZmqCtrlCfg(
+                joint_names=["left_arm"],
+                observation_enabled=True,
+                cameras=[
+                    Gr00tCameraCfg(name="head", image_key="ego_view"),
+                    Gr00tCameraCfg(name="wrist", image_key="ego_view"),
+                ],
+            )
 
     def test_takeover_enable_edges_advance_control_session(self):
         controller = Gr00tZmqCtrl.__new__(Gr00tZmqCtrl)

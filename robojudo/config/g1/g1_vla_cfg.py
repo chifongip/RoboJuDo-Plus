@@ -6,7 +6,7 @@ from robojudo.controller.ctrl_cfgs import (
     UnitreeCtrlCfg,
     UpperBodyCasiaHandZmqCtrlCfg,
 )
-
+from .env.g1_real_env_cfg import G1_23RealEnvCfg, G1UnitreeCfg
 from .g1_cfg import (
     G1_23_UPPER_BODY_DEFAULT_POSE,
     _g1_23_joint_default_dof_with_upper_pose,
@@ -48,6 +48,15 @@ def _g1_casia_locomanipulation_real_ctrl(
 @cfg_registry.register
 class g1_23_casia_locomanipulation_stiff_real(g1_23_locomanipulation_stiff_real):
     """G1 23-DOF stiff-gain policy with direct dual CASIA Hand control."""
+    env: G1_23RealEnvCfg = G1_23RealEnvCfg(
+        dof=G1Locomanipulation23ObsDoF.from_preset("stiff"),
+        unitree=G1UnitreeCfg(
+            net_if="eth1",
+            command_timeout=0.1,
+            state_timeout=0.1,
+            shutdown_damping=5.0,
+        ),
+    )
 
     pipeline_type: str = "G1CasiaHandLocomanipulationPipeline"
     ctrl: list[UnitreeCtrlCfg | UpperBodyCasiaHandZmqCtrlCfg] = _g1_casia_locomanipulation_real_ctrl(
@@ -79,10 +88,41 @@ def _g1_gr00t_locomanipulation_real_ctrl(
             ema_alpha=0.0,
             observation_enabled=True,
             observation_profile="g1_23dof",
-            camera=Gr00tCameraCfg(
-                type="opencv",
-                options={"device": 0, "width": 640, "height": 480, "fps": 30},
-            ),
+            cameras=[
+                Gr00tCameraCfg(
+                    type="realsense",
+                    name="head_rgb",
+                    image_key="ego_view",
+                    options={
+                        "serial_number": "242222070519",
+                        "width": 640,
+                        "height": 480,
+                        "fps": 30,
+                    },
+                ),
+                Gr00tCameraCfg(
+                    type="realsense",
+                    name="left_wrist_rgb",
+                    image_key="left_wrist_view",
+                    options={
+                        "serial_number": "130322272857",
+                        "width": 640,
+                        "height": 480,
+                        "fps": 30,
+                    },
+                ),
+                Gr00tCameraCfg(
+                    type="realsense",
+                    name="right_wrist_rgb",
+                    image_key="right_wrist_view",
+                    options={
+                        "serial_number": "130322273712",
+                        "width": 640,
+                        "height": 480,
+                        "fps": 30,
+                    },
+                ),
+            ],
         ),
     ]
 
@@ -90,7 +130,15 @@ def _g1_gr00t_locomanipulation_real_ctrl(
 @cfg_registry.register
 class g1_23_gr00t_locomanipulation_stiff_real(g1_23_locomanipulation_stiff_real):
     """G1 23-DoF stiff-gain GR00T Locomanipulation, Sim2Real."""
-
+    env: G1_23RealEnvCfg = G1_23RealEnvCfg(
+            dof=G1Locomanipulation23ObsDoF.from_preset("stiff"),
+            unitree=G1UnitreeCfg(
+                net_if="eth1",
+                command_timeout=0.1,
+                state_timeout=0.1,
+                shutdown_damping=5.0,
+            ),
+        )
     pipeline_type: str = "G1Gr00tLocomanipulationPipeline"
     ctrl: list[UnitreeCtrlCfg | Gr00tZmqCtrlCfg] = _g1_gr00t_locomanipulation_real_ctrl(
         G1Locomanipulation23ObsDoF().joint_names[13:]
