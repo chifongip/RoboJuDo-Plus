@@ -417,7 +417,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         from robojudo.config.x2.pipeline.x2_loco_mimic_pipeline_cfg import (
             X2LocomanipulationLocoMimicPipelineCfg,
         )
-        from robojudo.controller.ctrl_cfgs import VelocityZmqCtrlCfg
+        from robojudo.controller.ctrl_cfgs import LocomanipulationPostureZmqCtrlCfg, VelocityZmqCtrlCfg
 
         sim_cfg = x2_locomimic()
         real_cfg = x2_locomimic_real()
@@ -452,6 +452,10 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertEqual(sim_cfg.ctrl[1].triggers_extra["r"], "[POLICY_RECOVERY]")
         sim_velocity_zmq = next(ctrl for ctrl in sim_cfg.ctrl if isinstance(ctrl, VelocityZmqCtrlCfg))
         self.assertEqual(sim_velocity_zmq.velocity_priority, 100)
+        self.assertEqual(sim_cfg.ctrl[0].posture_priority, 300)
+        self.assertEqual(sim_cfg.ctrl[1].posture_priority, 200)
+        sim_posture_zmq = next(ctrl for ctrl in sim_cfg.ctrl if isinstance(ctrl, LocomanipulationPostureZmqCtrlCfg))
+        self.assertEqual(sim_posture_zmq.posture_priority, 100)
         self.assertEqual(sim_cfg.recovery_policy.policy_type, "AmpRecoveryPolicy")
         self.assertEqual(sim_cfg.recovery_policy.action_dof.num_dofs, 29)
         self.assertTrue(sim_cfg.do_safety_check)
@@ -462,6 +466,7 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertTrue(real_cfg.realign_on_policy_switch)
         self.assertEqual(real_cfg.ctrl[0].ctrl_type, "RosJoystickCtrl")
         self.assertEqual(real_cfg.ctrl[0].velocity_priority, 300)
+        self.assertEqual(real_cfg.ctrl[0].posture_priority, 300)
         self.assertEqual(real_cfg.ctrl[0].profile, "ps5_bluetooth_jetson")
         self.assertEqual(real_cfg.ctrl[0].topic, "/joy")
         self.assertEqual(real_cfg.ctrl[0].triggers["Back"], "[POLICY_LOCO]")
@@ -470,6 +475,8 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertEqual(real_cfg.ctrl[0].triggers["R"], "[POLICY_RECOVERY]")
         real_velocity_zmq = next(ctrl for ctrl in real_cfg.ctrl if isinstance(ctrl, VelocityZmqCtrlCfg))
         self.assertEqual(real_velocity_zmq.velocity_priority, 100)
+        real_posture_zmq = next(ctrl for ctrl in real_cfg.ctrl if isinstance(ctrl, LocomanipulationPostureZmqCtrlCfg))
+        self.assertEqual(real_posture_zmq.posture_priority, 100)
         self.assertNotIn("LB+RB+Y", real_cfg.ctrl[0].triggers)
 
     def test_policy_manager_switches_both_directions_and_can_cancel(self):

@@ -299,6 +299,39 @@ Joystick controls:
 Keyboard controls use `w/s`, `a/d`, and `q/e` for velocity, `r/f` for height, `z/c` for waist yaw, and `x` to reset
 commands. Press `t` to toggle the upper-body stream, `o` to stop, and `i` to respawn.
 
+### Locomanipulation posture ZMQ control
+
+`x2_locomimic` and `x2_locomimic_real` enable a posture-only ZMQ stream at `tcp://127.0.0.1:8557`. Add
+`LocomanipulationPostureZmqCtrlCfg(posture_priority=100)` to a custom G1 or X2 Locomanipulation configuration to use
+it elsewhere. The publisher binds the endpoint and continuously sends one complete absolute setpoint in metres and
+radians:
+
+```json
+{"height": 0.64, "waist_yaw": 0.20}
+```
+
+This is independent from `VelocityZmqCtrl` on port `8558`: velocity ZMQ still controls only forward, lateral, and yaw
+rate. The posture stream holds the last accepted target after its `0.25 s` timeout, while a stale velocity stream
+resolves independently according to its velocity-source arbitration. Height and waist yaw are clamped to the selected
+policy's trained ranges and passed through the policy's normal smoothing.
+
+Posture sources use the same priority-and-lease behavior as velocity sources, but with their own
+`posture_priority`. When posture ZMQ is configured, assign every posture source a unique priority; larger values win.
+For example, set `LocomanipulationPostureZmqCtrlCfg(posture_priority=100)`,
+`KeyboardCtrlCfg(posture_priority=200)`, and `JoystickCtrlCfg(posture_priority=300)`. Active local movement inputs
+(the left or right stick, or keyboard `w`/`s`/`a`/`d`/`q`/`e`) and posture inputs (D-pad or
+`r`/`f`/`z`/`c`/`x`) hold their selected source for `posture_lease_timeout_s`, which defaults to `0.5 s` after the
+input returns to neutral. The highest-priority fresh posture source is then selected. Validate a custom configuration
+in simulation before using it on a real robot:
+
+```bash
+python scripts/run_pipeline.py -c x2_locomimic
+# In another terminal:
+python scripts/test_locomanipulation_posture_zmq.py --robot x2
+```
+
+Select `JOINT_DEFAULT`, wait for the interpolation, then select `RL_DEFAULT` before commanding posture.
+
 The upper-body controller subscribes to `tcp://127.0.0.1:8559` by default and accepts partial named-joint updates:
 
 ```json

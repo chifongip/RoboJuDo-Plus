@@ -1,8 +1,10 @@
 import logging
 from collections import deque
+from numbers import Real
 
 import numpy as np
 
+from robojudo.controller.posture_source import POSTURE_ZMQ_SOURCE_TYPE, get_selected_posture_source
 from robojudo.controller.velocity_source import JOYSTICK_SOURCE_TYPES, get_selected_velocity_source
 from robojudo.policy import Policy, PolicyCfg
 from robojudo.policy.onnx_runtime import create_onnx_session
@@ -63,8 +65,12 @@ class LocomanipulationPolicyBase(Policy):
         commands = self.cmd.copy()
         target_vel = np.zeros(3, dtype=np.float32)
         selected = get_selected_velocity_source(ctrl_data)
+        selected_posture = get_selected_posture_source(ctrl_data)
+        posture_zmq_configured = POSTURE_ZMQ_SOURCE_TYPE in ctrl_data
 
         for key in JOYSTICK_SOURCE_TYPES.intersection(ctrl_data.keys()):
+            if posture_zmq_configured and selected_posture != key:
+                continue
             for event in ctrl_data[key]["button_event"]:
                 if event["type"] != "button" or not event["pressed"]:
                     continue
@@ -97,29 +103,43 @@ class LocomanipulationPolicyBase(Policy):
                     else:
                         self._held_keys.discard(event["name"])
 
-            for event in events:
-                if event["type"] != "keyboard" or not event["pressed"]:
-                    continue
-                if event["name"] == "r":
-                    self._target_height = self._clip_command(
-                        self._target_height + self.cfg_policy.height_step, self.commands_map[3]
-                    )
-                elif event["name"] == "f":
-                    self._target_height = self._clip_command(
-                        self._target_height - self.cfg_policy.height_step, self.commands_map[3]
-                    )
-                elif event["name"] == "z":
-                    self._target_waist_yaw = self._clip_command(
-                        self._target_waist_yaw + self.cfg_policy.waist_yaw_step,
-                        self.commands_map[4],
-                    )
-                elif event["name"] == "c":
-                    self._target_waist_yaw = self._clip_command(
-                        self._target_waist_yaw - self.cfg_policy.waist_yaw_step,
-                        self.commands_map[4],
-                    )
-                elif event["name"] == "x":
-                    self._reset_commands()
+            if not posture_zmq_configured or selected_posture == "KeyboardCtrl":
+                for event in events:
+                    if event["type"] != "keyboard" or not event["pressed"]:
+                        continue
+                    if event["name"] == "r":
+                        self._target_height = self._clip_command(
+                            self._target_height + self.cfg_policy.height_step, self.commands_map[3]
+                        )
+                    elif event["name"] == "f":
+                        self._target_height = self._clip_command(
+                            self._target_height - self.cfg_policy.height_step, self.commands_map[3]
+                        )
+                    elif event["name"] == "z":
+                        self._target_waist_yaw = self._clip_command(
+                            self._target_waist_yaw + self.cfg_policy.waist_yaw_step,
+                            self.commands_map[4],
+                        )
+                    elif event["name"] == "c":
+                        self._target_waist_yaw = self._clip_command(
+                            self._target_waist_yaw - self.cfg_policy.waist_yaw_step,
+                            self.commands_map[4],
+                        )
+                    elif event["name"] == "x":
+                        self._reset_commands()
+
+        posture = ctrl_data.get("LocomanipulationPostureZmqCtrl")
+        if selected_posture == POSTURE_ZMQ_SOURCE_TYPE and posture is not None and posture.get("fresh", False):
+            height = posture.get("height")
+            waist_yaw = posture.get("waist_yaw")
+            values = (height, waist_yaw)
+            if all(isinstance(value, Real) and not isinstance(value, bool) and np.isfinite(value) for value in values):
+                self._target_height = self._clip_command(float(height), self.commands_map[3])
+                self._target_waist_yaw = self._clip_command(float(waist_yaw), self.commands_map[4])
+            else:
+                raise ValueError(
+                    "fresh Locomanipulation posture ZMQ command must have finite numeric height and waist_yaw"
+                )
 
         if selected == "VelocityZmqCtrl":
             velocity = get_fresh_zmq_velocity(ctrl_data[selected])

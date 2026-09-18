@@ -4,6 +4,7 @@ from robojudo.controller.ctrl_cfgs import (
     Gr00tZmqCtrlCfg,
     JoystickCtrlCfg,
     KeyboardCtrlCfg,
+    LocomanipulationPostureZmqCtrlCfg,
     RosJoystickCtrlCfg,
     UpperBodyZmqCtrlCfg,
     VelocityZmqCtrlCfg,
@@ -324,9 +325,12 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
         sim_dt=0.005,
         sim_decimation=4,
     )
-    ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg | VelocityZmqCtrlCfg] = [
+    ctrl: list[
+        JoystickCtrlCfg | KeyboardCtrlCfg | LocomanipulationPostureZmqCtrlCfg | UpperBodyZmqCtrlCfg | VelocityZmqCtrlCfg
+    ] = [
         JoystickCtrlCfg(
             velocity_priority=300,
+            posture_priority=300,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -344,6 +348,7 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
         ),
         KeyboardCtrlCfg(
             velocity_priority=200,
+            posture_priority=200,
             triggers_extra={
                 "k": "[PASSIVE_DEFAULT]",
                 "l": "[DAMPING_DEFAULT]",
@@ -361,6 +366,7 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
             }
         ),
         VelocityZmqCtrlCfg(velocity_priority=100),
+        LocomanipulationPostureZmqCtrlCfg(posture_priority=100),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
     loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg()
@@ -380,9 +386,10 @@ class x2_locomimic_real(x2_locomimic):
         odometry_type="NONE",
         aimdk=X2AimdkCfg(startup_state_timeout=10.0),
     )
-    ctrl: list[RosJoystickCtrlCfg | UpperBodyZmqCtrlCfg | VelocityZmqCtrlCfg] = [
+    ctrl: list[RosJoystickCtrlCfg | LocomanipulationPostureZmqCtrlCfg | UpperBodyZmqCtrlCfg | VelocityZmqCtrlCfg] = [
         RosJoystickCtrlCfg(
             velocity_priority=300,
+            posture_priority=300,
             profile="ps5_bluetooth_jetson",
             topic="/joy",
             timeout_s=0.5,
@@ -401,6 +408,7 @@ class x2_locomimic_real(x2_locomimic):
             },
         ),
         VelocityZmqCtrlCfg(velocity_priority=100),
+        LocomanipulationPostureZmqCtrlCfg(posture_priority=100),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
     do_safety_check: bool = True

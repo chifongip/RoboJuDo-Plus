@@ -493,6 +493,13 @@ example, use `JoystickCtrlCfg(velocity_priority=300)` with
 by Unitree, Unitree-without-gait, Smooth, AMO, ASAP Loco, and G1/X2 Locomanipulation policies; motion mimic, tracking,
 recovery, H2H, X2 deploy, and TWIST motion-stream policies do not consume velocity commands.
 
+`x2_locomimic` and `x2_locomimic_real` enable a separate posture ZMQ stream, so its height and waist-yaw publisher
+does not need to be coupled to a velocity publisher. Add `LocomanipulationPostureZmqCtrlCfg(posture_priority=...)` to
+a custom Locomanipulation configuration to subscribe on port `8557` for complete
+`{"height": <metres>, "waist_yaw": <radians>}` messages. See
+[`docs/policy.md`](docs/policy.md#locomanipulation-posture-zmq-control) for posture priority behavior and the test
+publisher.
+
 ## Safety and troubleshooting
 
 Real-robot deployment can cause violent motion, falls, hardware damage, or injury. The policies and assets are provided
