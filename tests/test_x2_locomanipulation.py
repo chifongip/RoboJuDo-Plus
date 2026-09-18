@@ -31,7 +31,7 @@ class TestX2Locomanipulation(unittest.TestCase):
         self.assertEqual(policy.commands_map[0], [-0.5, 0.0, 1.0])
         self.assertEqual(policy.commands_map[1], [0.5, 0.0, -0.5])
         self.assertEqual(policy.commands_map[2], [1.0, 0.0, -1.0])
-        self.assertEqual(policy.commands_map[3], [0.4, 0.64, 0.66])
+        self.assertEqual(policy.commands_map[3], [0.3, 0.64, 0.64])
         self.assertEqual(policy.commands_map[4], [-1.5708, 0.0, 1.5708])
 
         self.assertEqual(sim_cfg.env.sim_dt, 0.005)
@@ -200,7 +200,7 @@ class TestX2Locomanipulation(unittest.TestCase):
         commands = policy._get_commands(Box({"KeyboardCtrl": {"keyboard_event": pressed}}))
 
         np.testing.assert_allclose(commands[:3], [1.0, 0.5, 1.0])
-        self.assertGreater(commands[3], 0.64)
+        self.assertAlmostEqual(commands[3], 0.64)
         self.assertGreater(commands[4], 0.0)
 
         reset = [

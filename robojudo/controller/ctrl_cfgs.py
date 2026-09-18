@@ -21,6 +21,8 @@ class VelocitySourceCfg(CtrlCfg):
 class KeyboardCtrlCfg(VelocitySourceCfg):
     ctrl_type: str = "KeyboardCtrl"
     velocity_lease_timeout_s: float = Field(default=0.5, gt=0.0)
+    posture_priority: int | None = Field(default=None, ge=0)
+    posture_lease_timeout_s: float = Field(default=0.5, gt=0.0)
 
     combination_init_buttons: list[str] = ["Key.ctrl_l"]
     """first button in combination, need to be held down to trigger other commands;"""
@@ -42,6 +44,8 @@ class JoystickCtrlCfg(VelocitySourceCfg):
     timeout_s: float = Field(default=0.5, gt=0.0)
     velocity_lease_timeout_s: float = Field(default=0.5, gt=0.0)
     velocity_activity_deadzone: float = Field(default=0.1, ge=0.0, lt=1.0)
+    posture_priority: int | None = Field(default=None, ge=0)
+    posture_lease_timeout_s: float = Field(default=0.5, gt=0.0)
 
     combination_init_buttons: list[str] = ["LB", "RB"]
     """first button in combination, need to be held down to trigger other commands;"""
@@ -269,4 +273,19 @@ class VelocityZmqCtrlCfg(VelocitySourceCfg):
     def validate_velocity_zmq(self):
         if not self.endpoint.startswith("tcp://") or not self.endpoint.removeprefix("tcp://").strip():
             raise ValueError("Velocity ZMQ endpoint must be a non-empty tcp:// endpoint")
+        return self
+
+
+class LocomanipulationPostureZmqCtrlCfg(CtrlCfg):
+    """Absolute body-height and waist-yaw targets received from a ZMQ publisher."""
+
+    ctrl_type: str = "LocomanipulationPostureZmqCtrl"
+    endpoint: str = "tcp://127.0.0.1:8557"
+    timeout_s: float = Field(default=0.25, gt=0.0)
+    posture_priority: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_locomanipulation_posture_zmq(self):
+        if not self.endpoint.startswith("tcp://") or not self.endpoint.removeprefix("tcp://").strip():
+            raise ValueError("Locomanipulation posture ZMQ endpoint must be a non-empty tcp:// endpoint")
         return self
