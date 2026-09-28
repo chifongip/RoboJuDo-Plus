@@ -41,6 +41,8 @@ class _ControlMatch:
     state: np.ndarray
     action: np.ndarray
     age_ms: float
+    # Offline DAgger label associated with the zero-order-held action.
+    dagger: dict | None = None
 
 
 class RawDatasetFinalizer:
@@ -86,17 +88,17 @@ class RawDatasetFinalizer:
         ).astype(np.float32)
         age_ms = (target_ns - previous_timestamp) / 1_000_000
         if target_ns == previous_timestamp:
-            return _ControlMatch(state0, action, age_ms)
+            return _ControlMatch(state0, action, age_ms, previous.get("dagger"))
         if following_index >= len(controls):
             return None
         following = controls[following_index]
         following_timestamp = timestamps[following_index]
         if following_timestamp <= previous_timestamp:
-            return _ControlMatch(state0, action, age_ms)
+            return _ControlMatch(state0, action, age_ms, previous.get("dagger"))
         alpha = np.float32((target_ns - previous_timestamp) / (following_timestamp - previous_timestamp))
         state1 = np.asarray(following["joint_positions"], dtype=np.float32)
         state = state0 + alpha * (state1 - state0)
-        return _ControlMatch(state.astype(np.float32), action, age_ms)
+        return _ControlMatch(state.astype(np.float32), action, age_ms, previous.get("dagger"))
 
     def _load_episode(self, episode_path: Path):
         manifest = json.loads((episode_path / "manifest.json").read_text())
@@ -143,8 +145,9 @@ class RawDatasetFinalizer:
         report_path = episode_path / "finalize_report.json"
         if report_path.exists():
             report = json.loads(report_path.read_text())
-            output_file = self.cfg.dataset.root / report.get("data_file", "missing")
-            if report.get("status") == "finalized" and output_file.is_file():
+            data_files = report.get("data_files") or [report.get("data_file", "missing")]
+            output_files_exist = all((self.cfg.dataset.root / path).is_file() for path in data_files)
+            if report.get("status") == "finalized" and output_files_exist:
                 logger.info("Skipping already finalized raw episode %s", episode_path.name)
                 return report
 
@@ -201,10 +204,45 @@ class RawDatasetFinalizer:
             "control_age_ms": [],
             "camera_shapes": {name: list(shape) for name, shape in camera_shapes.items()},
         }
-        self._writer.start_episode(manifest["task"])
-        dataset_episode_index = self._writer.next_episode_index
         max_camera_delta_ms = self.cfg.sync.max_camera_delta_ms
         selected_frame_indices = {name: set() for name in camera_records}
+        # Offline DAgger finalization opens one LeRobot episode per contiguous
+        # intervention session; policy slots never enter the training dataset.
+        episode_open = False
+        segment_session = None
+        segment_frames = 0
+        segment_last_target_ns = None
+        segment_dataset_index = None
+        dataset_episode_indices = []
+
+        def close_segment():
+            nonlocal episode_open, segment_session, segment_frames
+            nonlocal segment_last_target_ns, segment_dataset_index
+            if not episode_open:
+                return
+            if segment_frames == 0:
+                self._writer.discard_episode()
+            elif segment_frames >= self.cfg.dataset.expert_min_frames or not self.cfg.dataset.expert_only:
+                self._writer.save_episode()
+                dataset_episode_indices.append(segment_dataset_index)
+                report["written_frames"] += segment_frames
+            else:
+                # Offline DAgger drops single-frame button/transport glitches.
+                self._writer.discard_episode()
+                report["discarded_short_expert_frames"] += segment_frames
+            episode_open = False
+            segment_session = None
+            segment_frames = 0
+            segment_last_target_ns = None
+            segment_dataset_index = None
+
+        report["expert_only"] = self.cfg.dataset.expert_only
+        report["discarded_policy_slots"] = 0
+        report["discarded_short_expert_frames"] = 0
+        if not self.cfg.dataset.expert_only:
+            self._writer.start_episode(manifest["task"])
+            episode_open = True
+            segment_dataset_index = self._writer.next_episode_index
         try:
             for target_ns in target_timestamps:
                 selected = {}
@@ -224,6 +262,28 @@ class RawDatasetFinalizer:
                 if control is None:
                     report["dropped_control_slots"] += 1
                     continue
+                if self.cfg.dataset.expert_only:
+                    dagger = control.dagger or {}
+                    is_expert = bool(
+                        dagger.get("expert_applied", False)
+                        and dagger.get("action_source") == "expert"
+                    )
+                    if not is_expert:
+                        report["discarded_policy_slots"] += 1
+                        close_segment()
+                        continue
+                    session = int(dagger.get("intervention_session", 0))
+                    discontinuous = bool(
+                        episode_open
+                        and segment_last_target_ns is not None
+                        and target_ns - segment_last_target_ns > 2 * period_ns
+                    )
+                    if not episode_open or session != segment_session or discontinuous:
+                        close_segment()
+                        self._writer.start_episode(manifest["task"])
+                        episode_open = True
+                        segment_session = session
+                        segment_dataset_index = self._writer.next_episode_index
                 for name, record in selected.items():
                     report["camera_delta_ms"][name].append(selected_deltas[name])
                     selected_frame_indices[name].add(int(record["frame_index"]))
@@ -232,18 +292,26 @@ class RawDatasetFinalizer:
                     report["over_age_frames"] += 1
                 images = {name: _decode_image(episode_path / record["path"]) for name, record in selected.items()}
                 self._writer.add_frame(control.state, control.action, images)
-                report["written_frames"] += 1
-            if report["written_frames"] == 0:
+                segment_frames += 1
+                segment_last_target_ns = target_ns
+            close_segment()
+            if not dataset_episode_indices:
                 raise ValueError(f"raw episode {episode_path.name} produced no synchronized output frames")
-            self._writer.save_episode()
         except Exception:
-            self._writer.discard_episode()
+            if episode_open:
+                self._writer.discard_episode()
             raise
 
         report["status"] = "finalized"
-        chunk_index, file_index = divmod(dataset_episode_index, 1000)
-        report["dataset_episode_index"] = dataset_episode_index
-        report["data_file"] = f"data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+        data_files = []
+        for index in dataset_episode_indices:
+            chunk_index, file_index = divmod(index, 1000)
+            data_files.append(f"data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet")
+        report["dataset_episode_indices"] = dataset_episode_indices
+        report["data_files"] = data_files
+        # Preserve legacy singular report keys for downstream tooling.
+        report["dataset_episode_index"] = dataset_episode_indices[0]
+        report["data_file"] = data_files[0]
         report["selected_unique_camera_frames"] = {
             name: len(indices) for name, indices in selected_frame_indices.items()
         }

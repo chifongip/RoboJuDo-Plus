@@ -120,6 +120,9 @@ class RawEpisodeWriter:
                 "joint_positions": sample.joint_positions.tolist(),
                 "joint_position_commands": sample.joint_position_commands.tolist(),
                 "velocity_height_command": sample.velocity_height_command.tolist(),
+                # Offline DAgger labels are kept in raw storage so expert-only
+                # conversion can split interventions without polluting policy data.
+                "dagger": sample.dagger,
             },
         )
 

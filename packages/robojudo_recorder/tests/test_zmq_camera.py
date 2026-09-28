@@ -57,6 +57,38 @@ class TestZmqCameraSource(unittest.TestCase):
         self.assertEqual(frame.encoded_image, encoded.tobytes())
         self.assertEqual(frame.shape, image.shape)
 
+    def test_selects_one_image_from_offline_dagger_multi_camera_observation(self):
+        header = {
+            "sequence": 9,
+            "timestamp_ns": 200,
+            "encoding": "jpeg",
+            "image_keys": ["ego_view", "left_wrist_view"],
+            "image_shapes": {"ego_view": [8, 12, 3], "left_wrist_view": [4, 6, 3]},
+            "image_sequences": {"ego_view": 7, "left_wrist_view": 8},
+            "image_source_timestamps_ns": {"ego_view": 101, "left_wrist_view": 102},
+        }
+        camera = ZmqCameraSource(
+            CameraConfig(
+                type="zmq",
+                name="left_wrist_rgb",
+                options={
+                    "endpoint": "tcp://127.0.0.1:8561",
+                    "image_key": "left_wrist_view",
+                    "timestamp_mode": "source",
+                },
+            )
+        )
+        camera._socket = FakeSocket(
+            [msgpack.packb(header, use_bin_type=True), b"head-jpeg", b"left-jpeg"]
+        )
+
+        frame = camera.read(timeout_ms=0)
+
+        self.assertEqual(frame.sequence, 8)
+        self.assertEqual(frame.timestamp_ns, 102)
+        self.assertEqual(frame.shape, (4, 6, 3))
+        self.assertEqual(frame.encoded_image, b"left-jpeg")
+
 
 if __name__ == "__main__":
     unittest.main()

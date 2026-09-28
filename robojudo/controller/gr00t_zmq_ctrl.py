@@ -139,6 +139,15 @@ class Gr00tZmqCtrl(ControllerHook):
         self._socket.setsockopt(zmq.RCVHWM, 100)
         self._socket.setsockopt(zmq.SUBSCRIBE, b"")
         self._socket.connect(cfg_ctrl.endpoint)
+        # Offline DAgger keeps the policy command stream above and receives
+        # takeover-anchored dex-teleop candidates on this independent stream.
+        self._expert_socket = None
+        if cfg_ctrl.offline_dagger_enabled:
+            self._expert_socket = self._context.socket(zmq.SUB)
+            self._expert_socket.setsockopt(zmq.LINGER, 0)
+            self._expert_socket.setsockopt(zmq.RCVHWM, 2)
+            self._expert_socket.setsockopt(zmq.SUBSCRIBE, b"")
+            self._expert_socket.connect(cfg_ctrl.expert_endpoint)
         self._joint_indices = (
             np.asarray(
                 [env.joint_names.index(name) for name in self._joint_names],
@@ -153,6 +162,22 @@ class Gr00tZmqCtrl(ControllerHook):
         self._latest_command_stream_id: str | None = None
         self._latest_command_session: int | None = None
         self._last_received_at: float | None = None
+        # Offline DAgger state is deliberately separate from GR00T's existing
+        # takeover/session fields.  The latter still identifies policy sessions.
+        self._latest_policy_hands: tuple[np.ndarray, np.ndarray] | None = None
+        self._latest_expert_positions: dict[str, float] = {}
+        self._latest_expert_hands: tuple[np.ndarray, np.ndarray] | None = None
+        self._latest_expert_frame_id: int | None = None
+        self._latest_expert_session: int | None = None
+        # Offline DAgger tracks VR liveness and executable expert-action age
+        # separately; invalid IK frames must not keep an old action fresh.
+        self._expert_last_received_at: float | None = None
+        self._expert_action_received_at: float | None = None
+        self._expert_stream_ready = False
+        self._expert_intervention = False
+        self._intervention_session = 0
+        self._hand_command_filtered: np.ndarray | None = None
+        self._last_hand_command_at: float | None = None
         self._last_invalid_log_at = float("-inf")
         self._observation_snapshot_lock = threading.Lock()
         self._observation_snapshot: tuple[int, np.ndarray] | None = None
@@ -168,6 +193,8 @@ class Gr00tZmqCtrl(ControllerHook):
         self._camera_encoder_drops: dict[str, int] = {}
         self._hand_runtime = None
         logger.info("Gr00tZmqCtrl subscribed to %s", cfg_ctrl.endpoint)
+        if self._expert_socket is not None:
+            logger.info("Offline DAgger expert subscribed to %s", cfg_ctrl.expert_endpoint)
         try:
             if cfg_ctrl.casia_hand is not None:
                 self._hand_runtime = CasiaHandRuntime(cfg_ctrl.casia_hand)
@@ -184,8 +211,24 @@ class Gr00tZmqCtrl(ControllerHook):
         self._latest_command_stream_id = None
         self._latest_command_session = None
         self._last_received_at = None
+        # Offline DAgger reset: discard expert actions and hand interpolation
+        # state so commands from the previous rollout cannot cross a reset.
+        self._latest_policy_hands = None
+        self._latest_expert_positions.clear()
+        self._latest_expert_hands = None
+        self._latest_expert_frame_id = None
+        self._latest_expert_session = None
+        self._expert_last_received_at = None
+        self._expert_action_received_at = None
+        self._expert_stream_ready = False
+        self._hand_command_filtered = None
+        self._last_hand_command_at = None
         with self._observation_snapshot_lock:
             self._takeover_enabled = False
+            # Offline DAgger uses its own monotonically increasing intervention
+            # session, independent of the GR00T policy control session.
+            self._expert_intervention = False
+            self._intervention_session = 0
         hand_runtime = getattr(self, "_hand_runtime", None)
         if hand_runtime is not None:
             hand_runtime.reset()
@@ -194,6 +237,15 @@ class Gr00tZmqCtrl(ControllerHook):
                 self._socket.recv(flags=zmq.NOBLOCK)
             except zmq.Again:
                 break
+        # Offline DAgger reset: drain queued teleop frames after clearing the
+        # session so a pre-reset expert target cannot be executed later.
+        expert_socket = getattr(self, "_expert_socket", None)
+        if expert_socket is not None:
+            for _ in range(100):
+                try:
+                    expert_socket.recv(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    break
 
     def close(self):
         self._observation_stop.set()
@@ -211,6 +263,11 @@ class Gr00tZmqCtrl(ControllerHook):
             hand_runtime.close()
             self._hand_runtime = None
         self._socket.close(linger=0)
+        # Offline DAgger owns a separate SUB socket from the policy stream.
+        expert_socket = getattr(self, "_expert_socket", None)
+        if expert_socket is not None:
+            expert_socket.close(linger=0)
+            self._expert_socket = None
 
     def _start_observation_worker(self):
         self._observation_thread = threading.Thread(
@@ -432,6 +489,10 @@ class Gr00tZmqCtrl(ControllerHook):
                         snapshot = self._observation_snapshot
                         takeover_enabled = self._takeover_enabled
                         control_session = self._control_session
+                        # Offline DAgger state is frozen into the same atomic
+                        # feedback header used by dex-teleop for anchoring.
+                        expert_intervention = self._expert_intervention
+                        intervention_session = self._intervention_session
                     if snapshot is None:
                         self._consume_camera_bundle(encoded_buffers, selected)
                         break
@@ -451,6 +512,13 @@ class Gr00tZmqCtrl(ControllerHook):
                         "sequence": observation_sequence,
                         "timestamp_ns": int(target_ns),
                         "joint_timestamp_ns": joint_timestamp_ns,
+                        # Offline DAgger: dex-teleop rejects stale measured
+                        # joint anchors using this sender-side age.
+                        "joint_age_ns": max(0, now_ns - joint_timestamp_ns),
+                        # Offline DAgger: Select level state and its rising-edge
+                        # session identify exactly one anchored intervention.
+                        "expert_intervention": expert_intervention,
+                        "intervention_session": intervention_session,
                         "robot_type": self.cfg_ctrl.observation_profile.split("_", 1)[0],
                         "profile": self.cfg_ctrl.observation_profile,
                         "task": self.cfg_ctrl.observation_task,
@@ -584,9 +652,182 @@ class Gr00tZmqCtrl(ControllerHook):
             raise ValueError("control_session must be a non-negative integer")
         return positions, locomotion_command, sequence, stream_id, int(control_session)
 
-    def _log_invalid_message(self, exc: Exception, now: float):
+    @staticmethod
+    def _decode_expert_joint_payload(payload, expected_names: tuple[str, ...], label: str) -> np.ndarray:
+        """Validate one named offline DAgger joint target without reordering it."""
+        if not isinstance(payload, dict) or payload.get("valid") is not True:
+            raise ValueError(f"offline DAgger {label} target is not valid")
+        names = tuple(payload.get("joint_names", ()))
+        if names != expected_names:
+            raise ValueError(
+                f"offline DAgger {label} joint names/order do not match: "
+                f"expected {expected_names}, got {names}"
+            )
+        values = np.asarray(payload.get("qpos", ()), dtype=np.float64)
+        if values.shape != (len(expected_names),) or not np.isfinite(values).all():
+            raise ValueError(f"offline DAgger {label} target has invalid values")
+        return values
+
+    def _decode_expert_message(
+        self,
+        message,
+        expected_session: int,
+    ) -> tuple[bool, dict[str, float] | None, tuple[np.ndarray, np.ndarray] | None, int, int]:
+        """Decode dex-teleop readiness and an optional executable DAgger action."""
+        if not isinstance(message, dict) or message.get("type") != "synchronized_teleop_frame":
+            raise ValueError("offline DAgger message must be a synchronized_teleop_frame")
+        if message.get("schema_version") != 1:
+            raise ValueError("offline DAgger message has an unsupported schema_version")
+        frame_id = message.get("frame_id")
+        if isinstance(frame_id, bool) or not isinstance(frame_id, Integral) or frame_id < 0:
+            raise ValueError("offline DAgger frame_id must be a non-negative integer")
+
+        dagger = message.get("dagger")
+        if not isinstance(dagger, dict):
+            raise ValueError("offline DAgger message is missing dagger metadata")
+        for field in ("feedback_fresh", "intervention_active", "expert_valid"):
+            if not isinstance(dagger.get(field), bool):
+                raise ValueError(f"offline DAgger {field} must be boolean")
+        stream_id = dagger.get("stream_id")
+        session = dagger.get("intervention_session")
+        if not isinstance(stream_id, str) or not stream_id:
+            raise ValueError("offline DAgger stream_id must be a non-empty string")
+        if isinstance(session, bool) or not isinstance(session, Integral) or session < 0:
+            raise ValueError("offline DAgger intervention_session must be non-negative")
+        session = int(session)
+
+        # Offline DAgger readiness is tied to the current RoboJuDo observation
+        # stream.  A stale dex process from a previous robot run cannot arm it.
+        ready = bool(
+            dagger["feedback_fresh"] and stream_id == self._observation_stream_id
+        )
+        executable = bool(
+            ready
+            and dagger["intervention_active"]
+            and dagger["expert_valid"]
+            and session == expected_session
+        )
+        if not executable:
+            return ready, None, None, int(frame_id), session
+
+        arm_values = self._decode_expert_joint_payload(
+            message.get("arm"), self._joint_names, "arm"
+        )
+        arm_positions = dict(zip(self._joint_names, arm_values, strict=True))
+        hands = None
+        if getattr(self, "_hand_runtime", None) is not None:
+            left = self._decode_expert_joint_payload(
+                message.get("left_hand"), CASIA_LEFT_JOINT_NAMES, "left hand"
+            )
+            right = self._decode_expert_joint_payload(
+                message.get("right_hand"), CASIA_RIGHT_JOINT_NAMES, "right hand"
+            )
+            hands = (left, right)
+        return ready, arm_positions, hands, int(frame_id), session
+
+    def _receive_expert_available(self, now: float) -> None:
+        """Drain offline DAgger frames, retaining only the newest valid action."""
+        expert_socket = getattr(self, "_expert_socket", None)
+        if expert_socket is None:
+            return
+        with self._observation_snapshot_lock:
+            expected_session = self._intervention_session
+        for _ in range(100):
+            try:
+                message = expert_socket.recv_json(flags=zmq.NOBLOCK)
+            except zmq.Again:
+                return
+            except (TypeError, ValueError, zmq.ZMQError) as exc:
+                self._log_invalid_message(exc, now, source="offline DAgger")
+                continue
+            try:
+                ready, positions, hands, frame_id, session = self._decode_expert_message(
+                    message, expected_session
+                )
+            except (TypeError, ValueError) as exc:
+                self._log_invalid_message(exc, now, source="offline DAgger")
+                continue
+            if not ready:
+                continue
+
+            # Offline DAgger stream readiness is refreshed even while Select is
+            # released; policy start is therefore gated on a live VR stream.
+            self._expert_stream_ready = True
+            self._expert_last_received_at = now
+            if positions is None:
+                continue
+            frame_is_fresh = (
+                self._latest_expert_frame_id is None
+                or self._latest_expert_session != session
+                or frame_id > self._latest_expert_frame_id
+            )
+            if not frame_is_fresh:
+                self._log_invalid_message(
+                    ValueError(
+                        f"offline DAgger frame {frame_id} is not newer than "
+                        f"{self._latest_expert_frame_id}"
+                    ),
+                    now,
+                    source="offline DAgger",
+                )
+                continue
+            self._latest_expert_positions = positions
+            self._latest_expert_hands = hands
+            self._latest_expert_frame_id = frame_id
+            self._latest_expert_session = session
+            # Offline DAgger action freshness advances only after full schema,
+            # session, IK-validity and monotonic-frame validation succeeds.
+            self._expert_action_received_at = now
+
+    def _update_expert_intervention(self, prior_ctrl_data: dict) -> None:
+        """Convert the configured held joystick button into a DAgger session."""
+        if not getattr(self.cfg_ctrl, "offline_dagger_enabled", False):
+            return
+        joystick = next(
+            (
+                data
+                for data in prior_ctrl_data.values()
+                if isinstance(data, dict) and "pressed_buttons" in data
+            ),
+            {},
+        )
+        # Offline DAgger fails closed when joystick packets become stale, so a
+        # lost Select-release packet cannot leave expert intervention latched.
+        pressed = set(joystick.get("pressed_buttons", ())) if joystick.get("fresh", False) else set()
+        # Offline DAgger ignores Select while a recorder shoulder chord is held,
+        # allowing L1+R1+Select to keep its pause/resume meaning.
+        blocked = bool(pressed.intersection(self.cfg_ctrl.intervention_blocking_buttons))
+        active = self.cfg_ctrl.intervention_button in pressed and not blocked
+        with self._observation_snapshot_lock:
+            changed = active != self._expert_intervention
+            if active and not self._expert_intervention:
+                self._intervention_session += 1
+            self._expert_intervention = active
+        if changed:
+            # Offline DAgger requires a frame from the new intervention session;
+            # policy and hand state remain available while that frame arrives.
+            self._latest_expert_positions.clear()
+            self._latest_expert_hands = None
+            self._latest_expert_frame_id = None
+            self._latest_expert_session = None
+            self._expert_action_received_at = None
+            self._hand_command_filtered = None
+            self._last_hand_command_at = None
+
+    def expert_stream_ready(self, now: float | None = None) -> bool:
+        """Return whether the offline DAgger VR stream is currently live."""
+        if not self.cfg_ctrl.offline_dagger_enabled:
+            return True
+        now = time.monotonic() if now is None else now
+        return bool(
+            self._expert_stream_ready
+            and self._expert_last_received_at is not None
+            and now - self._expert_last_received_at <= self.cfg_ctrl.expert_timeout_s
+        )
+
+    def _log_invalid_message(self, exc: Exception, now: float, source: str = "GR00T ZMQ"):
         if now - self._last_invalid_log_at >= 1.0:
-            logger.warning("Rejected GR00T ZMQ message: %s", exc)
+            logger.warning("Rejected %s message: %s", source, exc)
             self._last_invalid_log_at = now
 
     def _receive_available(self, now: float):
@@ -640,7 +881,7 @@ class Gr00tZmqCtrl(ControllerHook):
             try:
                 arm_positions, left_hand, right_hand = self._split_policy_positions(positions)
                 hand_runtime = getattr(self, "_hand_runtime", None)
-                if hand_runtime is not None:
+                if hand_runtime is not None and not self.cfg_ctrl.offline_dagger_enabled:
                     hand_runtime.set_joint_commands(
                         left_hand,
                         right_hand,
@@ -651,39 +892,131 @@ class Gr00tZmqCtrl(ControllerHook):
                 self._log_invalid_message(exc, now)
                 continue
             self._latest_positions = arm_positions
+            # Offline DAgger defers policy hand execution until get_data(),
+            # where the policy/expert source is selected atomically.
+            self._latest_policy_hands = (
+                None
+                if left_hand is None or right_hand is None
+                else (left_hand.copy(), right_hand.copy())
+            )
             self._latest_locomotion_command = locomotion_command
             self._latest_sequence = sequence
             self._latest_command_stream_id = stream_id
             self._latest_command_session = control_session
             self._last_received_at = now
 
+    def _apply_dagger_hand_targets(
+        self,
+        hands: tuple[np.ndarray, np.ndarray] | None,
+        frame_id: int | None,
+        now: float,
+    ) -> None:
+        """Rate-limit the selected offline DAgger hand source at takeover edges."""
+        hand_runtime = getattr(self, "_hand_runtime", None)
+        if hand_runtime is None or hands is None:
+            return
+        target = np.concatenate(hands).astype(np.float64, copy=False)
+        if self._hand_command_filtered is None:
+            # Offline DAgger hand takeover starts from measured finger state;
+            # unlike the arms it needs no TCP anchor, only a bounded transition.
+            hand_data = hand_runtime.get_data()
+            measured = np.asarray(hand_data.get("joint_positions", ()), dtype=np.float64)
+            if hand_data.get("joint_state_fresh", False) and measured.shape == target.shape:
+                self._hand_command_filtered = measured.copy()
+            else:
+                self._hand_command_filtered = target.copy()
+            dt = 1.0 / max(1, self.cfg_ctrl.observation_fps)
+        else:
+            dt = max(0.0, min(0.1, now - (self._last_hand_command_at or now)))
+        max_delta = self.cfg_ctrl.hand_max_joint_velocity_rad_s * dt
+        self._hand_command_filtered = np.clip(
+            target,
+            self._hand_command_filtered - max_delta,
+            self._hand_command_filtered + max_delta,
+        )
+        split = len(CASIA_LEFT_JOINT_NAMES)
+        hand_runtime.set_joint_commands(
+            self._hand_command_filtered[:split],
+            self._hand_command_filtered[split:],
+            time.monotonic_ns(),
+            frame_id,
+        )
+        self._last_hand_command_at = now
+
     def get_data(self):
         now = time.monotonic()
         self._receive_available(now)
+        # Offline DAgger expert input is drained in the same control-thread
+        # snapshot as policy input, keeping arm/hand source selection atomic.
+        self._receive_expert_available(now)
         has_received = self._last_received_at is not None
         age_s = None if self._last_received_at is None else now - self._last_received_at
         with self._observation_snapshot_lock:
             takeover_enabled = self._takeover_enabled
             control_session = self._control_session
-        fresh = bool(
+            expert_intervention = getattr(self, "_expert_intervention", False)
+            intervention_session = getattr(self, "_intervention_session", 0)
+        policy_fresh = bool(
             takeover_enabled
             and age_s is not None
             and age_s <= self.cfg_ctrl.timeout_s
             and self._latest_command_stream_id == self._observation_stream_id
             and self._latest_command_session == control_session
         )
+        # Offline DAgger overrides only upper-body targets. GR00T locomotion
+        # remains the policy command and retains its own freshness flag.
+        expert_age_s = (
+            None
+            if getattr(self, "_expert_action_received_at", None) is None
+            else now - self._expert_action_received_at
+        )
+        expert_fresh = bool(
+            self.cfg_ctrl.offline_dagger_enabled
+            and takeover_enabled
+            and expert_intervention
+            and expert_age_s is not None
+            and expert_age_s <= self.cfg_ctrl.expert_timeout_s
+            and getattr(self, "_latest_expert_session", None) == intervention_session
+            and bool(getattr(self, "_latest_expert_positions", {}))
+        )
+        expert_applied = expert_fresh
+        selected_positions = (
+            self._latest_expert_positions if expert_applied else self._latest_positions
+        )
+        selected_hands = (
+            self._latest_expert_hands
+            if expert_applied
+            else getattr(self, "_latest_policy_hands", None)
+        )
+        selected_frame_id = (
+            self._latest_expert_frame_id
+            if expert_applied
+            else self._latest_sequence
+        )
+        fresh = expert_fresh if expert_applied else policy_fresh
+        if self.cfg_ctrl.offline_dagger_enabled and fresh:
+            self._apply_dagger_hand_targets(selected_hands, selected_frame_id, now)
         observation_error = getattr(self, "_observation_error", None)
         observation_ready = getattr(self, "_observation_ready", None)
         result = {
-            "joint_positions": self._latest_positions.copy(),
+            "joint_positions": selected_positions.copy(),
             "locomotion_command": (
                 None if self._latest_locomotion_command is None else self._latest_locomotion_command.copy()
             ),
-            "sequence": self._latest_sequence,
+            "sequence": selected_frame_id,
             "stream_id": self._observation_stream_id,
             "control_session": control_session,
             "has_received": has_received,
             "fresh": fresh,
+            # Offline DAgger diagnostics are recorded separately so downstream
+            # dataset conversion can select only expert-labelled chunks.
+            "policy_fresh": policy_fresh,
+            "expert_stream_ready": self.expert_stream_ready(now),
+            "expert_intervention": expert_intervention,
+            "intervention_session": intervention_session,
+            "expert_applied": expert_applied,
+            "action_source": "expert" if expert_applied else "policy",
+            "expert_age_s": expert_age_s,
             "age_s": age_s,
             "observation_ready": bool(
                 not self.cfg_ctrl.observation_enabled
@@ -705,7 +1038,9 @@ class Gr00tZmqCtrl(ControllerHook):
 
     def get_data_with_hook(self, prior_ctrl_data: dict, env_data: dict):
         # Control flow: env joints -> shared snapshot; latest GR00T command -> pipeline.
-        del prior_ctrl_data
+        # Offline DAgger reads the persistent Select level produced by the
+        # preceding joystick controller before publishing the next observation.
+        self._update_expert_intervention(prior_ctrl_data)
         if self.cfg_ctrl.observation_enabled:
             joint_positions = np.asarray(env_data["dof_pos"], dtype=np.float32)[self._joint_indices]
             hand_runtime = getattr(self, "_hand_runtime", None)

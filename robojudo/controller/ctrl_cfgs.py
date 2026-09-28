@@ -319,6 +319,17 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
     observation_fps: int = Field(default=30, gt=0)
     observation_jpeg_quality: int = Field(default=90, ge=1, le=100)
     observation_joint_timeout_s: float = Field(default=0.1, gt=0.0)
+    # Offline DAgger: receive dex-teleop expert candidates on a second stream
+    # and use a held joystick button as the human-intervention gate.
+    offline_dagger_enabled: bool = False
+    expert_endpoint: str = "tcp://127.0.0.1:8560"
+    expert_timeout_s: float = Field(default=0.25, gt=0.0)
+    intervention_button: str = "Select"
+    # Offline DAgger: Select used inside a recorder button chord must not start
+    # an expert session; Unitree and Xbox shoulder names are covered by default.
+    intervention_blocking_buttons: list[str] = ["L1", "R1", "LB", "RB"]
+    # Offline DAgger: rate-limit policy/expert hand-source transitions.
+    hand_max_joint_velocity_rad_s: float = Field(default=5.0, gt=0.0)
     camera_poll_timeout_ms: int = Field(default=2, gt=0)
     camera_startup_timeout_s: float = Field(default=5.0, gt=0.0)
     camera_pending_capacity: int = Field(default=2, gt=0)
@@ -329,6 +340,15 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
 
     @model_validator(mode="after")
     def validate_gr00t_transport(self):
+        # These fields are inactive for the existing GR00T pipeline unless the
+        # offline DAgger mode is explicitly enabled.
+        if self.offline_dagger_enabled:
+            if not self.expert_endpoint.startswith("tcp://"):
+                raise ValueError("offline DAgger expert endpoint must use tcp://")
+            if not self.intervention_button.strip():
+                raise ValueError("offline DAgger intervention_button must not be empty")
+            if any(not button.strip() for button in self.intervention_blocking_buttons):
+                raise ValueError("offline DAgger intervention_blocking_buttons must not be empty")
         if self.observation_enabled:
             if not self.observation_endpoint.startswith("tcp://"):
                 raise ValueError("GR00T observation endpoint must use tcp://")

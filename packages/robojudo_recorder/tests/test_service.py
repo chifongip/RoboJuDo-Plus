@@ -69,7 +69,7 @@ class TestRecorderService(unittest.TestCase):
         }
 
     @staticmethod
-    def _config(temporary_dir, *, cameras=None, clock="source", fps=10):
+    def _config(temporary_dir, *, cameras=None, clock="source", fps=10, expert_only=False):
         root = Path(temporary_dir) / "dataset"
         return RecorderConfig(
             control_endpoint=f"inproc://recorder-{uuid.uuid4()}",
@@ -78,6 +78,7 @@ class TestRecorderService(unittest.TestCase):
                 raw_root=Path(temporary_dir) / "raw",
                 repo_id="local/service",
                 fps=fps,
+                expert_only=expert_only,
             ),
             cameras=cameras or (CameraConfig(type="fake", name="head_rgb"),),
             sync=SyncConfig(clock=clock, max_control_age_ms=60, max_camera_delta_ms=60),
@@ -117,6 +118,58 @@ class TestRecorderService(unittest.TestCase):
             self.assertEqual(report["selected_unique_camera_frames"], {"head_rgb": 2})
             self.assertIn("camera_delta_summary_ms", report)
             self.assertIn("control_age_summary_ms", report)
+
+    def test_offline_dagger_finalizer_keeps_contiguous_expert_sessions_only(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            cfg = self._config(temporary_dir, expert_only=True)
+            camera = FakeCamera()
+            service = RecorderService(cfg, camera=camera)
+            labels = (
+                (0, True, 1),
+                (100_000_000, True, 1),
+                (200_000_000, False, 1),
+                (300_000_000, True, 2),
+                (400_000_000, True, 2),
+                (500_000_000, False, 2),
+            )
+            for index, (timestamp_ns, expert, session) in enumerate(labels):
+                message = self._sample_message(
+                    timestamp_ns,
+                    positions=(float(index), float(index)),
+                    commands=(float(index + 1), float(index + 1)),
+                )
+                message["dagger"] = {
+                    "expert_intervention": expert,
+                    "expert_applied": expert,
+                    "intervention_session": session,
+                    "action_source": "expert" if expert else "policy",
+                }
+                service._handle_message(message, timestamp_ns)
+            for sequence, timestamp_ns in enumerate(
+                (50_000_000, 150_000_000, 250_000_000, 350_000_000, 450_000_000),
+                start=1,
+            ):
+                service._record_frame(
+                    "head_rgb",
+                    CameraFrame(
+                        image=np.full(camera.shape, sequence * 20, dtype=np.uint8),
+                        timestamp_ns=timestamp_ns,
+                        sequence=sequence,
+                    ),
+                )
+            service._finish_episode(save=True)
+            service.close()
+
+            raw_episode = next((cfg.dataset.raw_root / "episodes").iterdir())
+            report = RawDatasetFinalizer(cfg).run()[0]
+
+            self.assertEqual(report["written_frames"], 4)
+            self.assertEqual(report["discarded_policy_slots"], 1)
+            self.assertEqual(len(report["dataset_episode_indices"]), 2)
+            for data_file in report["data_files"]:
+                self.assertEqual(pq.read_table(cfg.dataset.root / data_file).num_rows, 2)
+            persisted = json.loads((raw_episode / "finalize_report.json").read_text())
+            self.assertTrue(persisted["expert_only"])
 
     def test_review_stops_camera_reads_and_discard_removes_pending_raw(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

@@ -25,6 +25,9 @@ class JoystickCtrl(Controller):
         self.combination_init_buttons = self.cfg_ctrl.combination_init_buttons
         self.onhold_buttons = set()
         self.used_combination_buttons = set()
+        # Offline DAgger needs button level state (Select held), not only
+        # one-shot trigger commands generated from button edges.
+        self.pressed_buttons = set()
         self._last_received_at: float | None = None
         while not self.state_queue.empty():
             try:
@@ -59,6 +62,13 @@ class JoystickCtrl(Controller):
         while not self.event_queue.empty():
             try:
                 event = self.event_queue.get_nowait()
+                # Offline DAgger consumes this persistent state to keep VR
+                # intervention active from Select press through release.
+                if event.get("type") == "button":
+                    if event.get("pressed", False):
+                        self.pressed_buttons.add(event.get("name"))
+                    else:
+                        self.pressed_buttons.discard(event.get("name"))
                 events.append(event)
             except Empty:
                 break
@@ -74,6 +84,8 @@ class JoystickCtrl(Controller):
         return {
             "axes": state["axes"] if fresh else {name: 0.0 for name in self.axes_names},
             "button_event": events,
+            # Exposed for the offline DAgger intervention gate.
+            "pressed_buttons": sorted(self.pressed_buttons),
             "fresh": fresh,
             "age_s": age_s,
         }

@@ -8,8 +8,8 @@ import numpy as np
 PACKAGE_SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(PACKAGE_SRC))
 
-from robojudo_recorder.protocol import ControlSample  # noqa: E402
 from robojudo_recorder.profiles import NamedJointProfile  # noqa: E402
+from robojudo_recorder.protocol import ControlSample  # noqa: E402
 
 
 class TestControlSample(unittest.TestCase):
@@ -44,6 +44,21 @@ class TestControlSample(unittest.TestCase):
         message = self.make_message()
         message["velocity_height_command"] = [0.0, 0.0, 0.0]
         with self.assertRaisesRegex(ValueError, "shape"):
+            ControlSample.from_message(message, receive_timestamp_ns=123)
+
+    def test_preserves_and_validates_offline_dagger_label(self):
+        message = self.make_message()
+        message["dagger"] = {
+            "expert_intervention": True,
+            "expert_applied": True,
+            "intervention_session": 4,
+            "action_source": "expert",
+        }
+        sample = ControlSample.from_message(message, receive_timestamp_ns=123)
+        self.assertEqual(sample.dagger["intervention_session"], 4)
+
+        message["dagger"]["action_source"] = "policy"
+        with self.assertRaisesRegex(ValueError, "disagree"):
             ControlSample.from_message(message, receive_timestamp_ns=123)
 
     def test_profile_rejects_robot_schema_changes(self):

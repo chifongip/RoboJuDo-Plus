@@ -1,0 +1,45 @@
+# Offline DAgger recorder: RoboJuDo binds control samples on 8562 because
+# dex-teleop uses 8560 for expert joint targets.
+control_endpoint: tcp://127.0.0.1:8562
+
+dataset:
+  # Resume appends expert intervention episodes to the existing base dataset.
+  root: record_data/g1_23dof_upper_body_pickup_mulcam
+  raw_root: record_data/g1_23dof_upper_body_raw_pickup_mulcam
+  repo_id: local/g1_23dof_upper_body_pickup_mulcam
+  fps: 30
+  codec: libx264
+  jpeg_quality: 90
+  resume: true
+  # Offline DAgger finalization drops policy actions and splits each valid
+  # intervention_session into a separate contiguous training episode.
+  expert_only: true
+  expert_min_frames: 2
+
+# Offline DAgger recorder reuses the already encoded GR00T observation PUB;
+# it must not open the three RealSense devices a second time.
+cameras:
+  - type: zmq
+    name: head_rgb
+    endpoint: tcp://127.0.0.1:8561
+    image_key: ego_view
+    encoding: auto
+    timestamp_mode: receive
+  - type: zmq
+    name: left_wrist_rgb
+    endpoint: tcp://127.0.0.1:8561
+    image_key: left_wrist_view
+    encoding: auto
+    timestamp_mode: receive
+  - type: zmq
+    name: right_wrist_rgb
+    endpoint: tcp://127.0.0.1:8561
+    image_key: right_wrist_view
+    encoding: auto
+    timestamp_mode: receive
+
+sync:
+  clock: receive
+  max_control_age_ms: 50
+  max_camera_delta_ms: 50
+  poll_timeout_ms: 10

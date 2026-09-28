@@ -34,7 +34,9 @@ class Gr00tLocomanipulationPolicyMixin:
         self._gr00t_takeover_was_enabled = True
         commands = self.cmd.copy()
         command = stream.get("locomotion_command")
-        external_active = bool(stream.get("fresh", False))
+        # Offline DAgger can keep expert upper-body targets fresh while the
+        # GR00T policy stream is stale. Locomotion must still stop in that case.
+        external_active = bool(stream.get("policy_fresh", stream.get("fresh", False)))
 
         if external_active:
             command = np.asarray(command, dtype=np.float32)

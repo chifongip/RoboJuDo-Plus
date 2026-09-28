@@ -43,6 +43,10 @@ class DatasetConfig:
     resume: bool = False
     raw_root: Path | None = None
     jpeg_quality: int = 90
+    # Offline DAgger: keep only expert-applied control slots and split each
+    # intervention into a separate LeRobot episode during finalization.
+    expert_only: bool = False
+    expert_min_frames: int = 2
 
     def __post_init__(self):
         if self.fps <= 0:
@@ -51,6 +55,8 @@ class DatasetConfig:
             raise ValueError("dataset.repo_id must not be empty")
         if not 1 <= self.jpeg_quality <= 100:
             raise ValueError("dataset.jpeg_quality must be between 1 and 100")
+        if self.expert_min_frames <= 0:
+            raise ValueError("dataset.expert_min_frames must be positive")
         if self.raw_root is None:
             object.__setattr__(self, "raw_root", self.root.with_name(f"{self.root.name}_raw"))
         if self.raw_root == self.root:

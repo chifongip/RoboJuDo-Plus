@@ -17,6 +17,9 @@ class ZmqCameraSource(CameraSource):
 
     def __init__(self, cfg: CameraConfig):
         self.endpoint = str(cfg.options["endpoint"])
+        # Offline DAgger reuses GR00T's multi-camera observation multipart;
+        # image_key selects one JPEG so multiple recorder sources can fan out it.
+        self.image_key = str(cfg.options.get("image_key", cfg.name))
         self.encoding = str(cfg.options.get("encoding", "auto"))
         if self.encoding not in {"auto", "raw_rgb", "jpeg"}:
             raise ValueError("ZMQ camera encoding must be 'auto', 'raw_rgb', or 'jpeg'")
@@ -47,9 +50,40 @@ class ZmqCameraSource(CameraSource):
     def read(self, timeout_ms: int) -> CameraFrame | None:
         if self._socket.poll(timeout_ms, zmq.POLLIN) == 0:
             return None
-        header_bytes, payload = self._socket.recv_multipart()
+        parts = self._socket.recv_multipart()
+        if len(parts) < 2:
+            raise ValueError("ZMQ camera message must contain a header and image payload")
+        header_bytes = parts[0]
         header = self._decode_header(header_bytes)
-        frame_shape = tuple(header.get("shape", ()))
+        image_keys = tuple(header.get("image_keys", ()))
+        if image_keys:
+            # Offline DAgger observation protocol v2 carries one payload per
+            # image_key after the shared msgpack header.
+            if len(parts) != len(image_keys) + 1:
+                raise ValueError("ZMQ multi-camera payload count does not match image_keys")
+            if self.image_key not in image_keys:
+                raise ValueError(f"ZMQ observation does not contain image_key {self.image_key!r}")
+            image_index = image_keys.index(self.image_key)
+            payload = parts[image_index + 1]
+            frame_shape = tuple(header.get("image_shapes", {}).get(self.image_key, ()))
+            sequence = int(header.get("image_sequences", {}).get(self.image_key, header["sequence"]))
+            source_timestamp_ns = int(
+                header.get("image_source_timestamps_ns", {}).get(
+                    self.image_key,
+                    header.get("image_timestamps_ns", {}).get(
+                        self.image_key, header.get("timestamp_ns", time.monotonic_ns())
+                    ),
+                )
+            )
+        else:
+            if len(parts) != 2:
+                raise ValueError("legacy ZMQ camera message must contain exactly one image")
+            payload = parts[1]
+            frame_shape = tuple(header.get("shape", ()))
+            sequence = int(header["sequence"])
+            source_timestamp_ns = int(
+                header.get("source_timestamp_ns", header.get("timestamp_ns", time.monotonic_ns()))
+            )
         if frame_shape:
             if len(frame_shape) != 3 or frame_shape[2] != 3:
                 raise ValueError(f"invalid ZMQ camera shape {frame_shape}")
@@ -81,12 +115,11 @@ class ZmqCameraSource(CameraSource):
         elif image is not None and image.shape != self.shape:
             raise ValueError(f"ZMQ camera returned shape {image.shape}, expected {self.shape}")
         receive_timestamp_ns = time.monotonic_ns()
-        source_timestamp_ns = int(header.get("source_timestamp_ns", header.get("timestamp_ns", receive_timestamp_ns)))
         timestamp_ns = source_timestamp_ns if self.timestamp_mode == "source" else receive_timestamp_ns
         return CameraFrame(
             image=image,
             timestamp_ns=timestamp_ns,
-            sequence=int(header["sequence"]),
+            sequence=sequence,
             encoded_image=payload if encoding == "jpeg" else None,
             encoding=encoding,
             source_timestamp_ns=source_timestamp_ns,

@@ -192,6 +192,49 @@ both hands to their zero/default pose before leaving the hardware command gate c
 remains enabled does not fall back to the joystick; it keeps zero velocity until the operator explicitly disables
 takeover.
 
+## Offline DAgger with dex-teleop
+
+The dedicated configuration keeps normal GR00T deployment unchanged and enables the offline DAgger transport:
+
+```text
+GR00T policy commands       :8559 -> RoboJuDo
+RoboJuDo measured feedback :8561 -> GR00T deploy, dex-teleop, recorder
+dex-teleop expert targets  :8560 -> RoboJuDo
+RoboJuDo recording samples :8562 -> recorder
+```
+
+Start the recorder and dex-teleop in separate terminals, then run the dedicated RoboJuDo configuration:
+
+```bash
+# Recorder: reuses the JPEGs already published on 8561.
+robojudo-recorder \
+  --config packages/robojudo_recorder/recorder.g1_offline_dagger.yaml
+
+# dex-teleop (run in its own repository/environment).
+conda activate dex
+python teleop/robot_control/vr_arm_hand_teleop.py \
+  --robot g1_23 --backend real --hand casia --offline-dagger --start-immediately
+
+# RoboJuDo-Plus.
+conda activate robop
+python scripts/run_pipeline.py -c g1_23_gr00t_offline_dagger_stiff_real
+```
+
+RoboJuDo will not enable the GR00T upper-body takeover until dex-teleop has echoed fresh feedback from the current
+observation stream. A bare held `Select` starts VR intervention; releasing it returns to policy targets. The
+`L1+R1+Select` recorder chord is excluded from intervention. Each Select rising edge creates a new intervention session,
+freezes the current Quest `world_T_body`, and anchors both TCP targets at measured robot forward kinematics. The expert
+action remains named arm/hand joint-position targets; waist is not part of the teleoperation action.
+
+Recording stores the full rollout with policy/expert source labels. Finalization with the supplied config keeps only
+valid expert-applied slots and writes every contiguous intervention session as a separate episode, appending to the
+configured LeRobot dataset:
+
+```bash
+robojudo-finalize \
+  --config packages/robojudo_recorder/recorder.g1_offline_dagger.yaml
+```
+
 ## Action-horizon scheduling
 
 Run the double-buffered deploy client from Isaac-GR00T:
