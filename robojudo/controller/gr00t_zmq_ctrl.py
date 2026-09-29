@@ -868,11 +868,13 @@ class Gr00tZmqCtrl(ControllerHook):
             with self._observation_snapshot_lock:
                 takeover_enabled = self._takeover_enabled
                 expected_session = self._control_session
-            if (
-                not takeover_enabled
-                or stream_id != self._observation_stream_id
-                or control_session != expected_session
-            ):
+            if not takeover_enabled:
+                self._log_invalid_message(
+                    ValueError("upper-body takeover is disabled"),
+                    now,
+                )
+                continue
+            if stream_id != self._observation_stream_id or control_session != expected_session:
                 self._log_invalid_message(
                     ValueError(
                         f"command session {stream_id}:{control_session} does not match "

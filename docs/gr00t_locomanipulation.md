@@ -219,7 +219,8 @@ python teleop/robot_control/vr_arm_hand_teleop.py \
 # RoboJuDo-Plus.
 conda activate robop
 python scripts/run_pipeline.py \
-  -c g1_23_gr00t_offline_dagger_stiff_real
+  -c g1_23_gr00t_offline_dagger_stiff_real \
+  --gr00t-task "pick up the the bag and put it into the tray"
 ```
 
 The dedicated DAgger configuration assumes RoboJuDo and the recorder run on

@@ -137,6 +137,20 @@ class TestGr00tZmqCtrl(unittest.TestCase):
         self.assertTrue(data["fresh"])
         self.assertEqual(data["control_session"], 2)
 
+    def test_disabled_takeover_is_not_reported_as_a_session_mismatch(self):
+        controller = self.make_controller([self.message()])
+        controller.set_takeover_enabled(False)
+
+        with (
+            self.assertLogs("robojudo.controller.gr00t_zmq_ctrl", level="WARNING") as logs,
+            patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=10.0),
+        ):
+            self.assertFalse(controller.get_data()["fresh"])
+
+        message = "\n".join(logs.output)
+        self.assertIn("upper-body takeover is disabled", message)
+        self.assertNotIn("does not match active session", message)
+
     def test_requires_complete_positions(self):
         controller = self.make_controller()
         with self.assertRaisesRegex(ValueError, "missing joints"):
