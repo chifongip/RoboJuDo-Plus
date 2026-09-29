@@ -750,14 +750,18 @@ class Gr00tZmqCtrl(ControllerHook):
             if not ready:
                 continue
 
-            # Offline DAgger stream readiness is refreshed even while Select is
-            # released; policy start is therefore gated on a live VR stream.
-            self._expert_stream_ready = True
-            self._expert_last_received_at = now
+            stream_is_fresh = (
+                self._expert_last_received_at is not None
+                and now - self._expert_last_received_at <= self.cfg_ctrl.expert_timeout_s
+            )
+            # Offline DAgger follows the regular teleop restart behavior:
+            # enforce monotonic frame IDs while the accepted stream is fresh,
+            # then allow a restarted dex-teleop publisher to begin at zero.
             frame_is_fresh = (
                 self._latest_expert_frame_id is None
                 or self._latest_expert_session != session
                 or frame_id > self._latest_expert_frame_id
+                or not stream_is_fresh
             )
             if not frame_is_fresh:
                 self._log_invalid_message(
@@ -769,6 +773,10 @@ class Gr00tZmqCtrl(ControllerHook):
                     source="offline DAgger",
                 )
                 continue
+            # Refresh VR readiness only after accepting the frame ordering.
+            # Rejected rollback frames must not keep the old sequence fresh.
+            self._expert_stream_ready = True
+            self._expert_last_received_at = now
             if positions is None:
                 # Offline DAgger: a newer frame from the active intervention
                 # session supersedes the previous candidate even when IK is

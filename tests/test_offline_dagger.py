@@ -182,6 +182,24 @@ class TestOfflineDaggerController(unittest.TestCase):
         self.assertEqual(data["expert_frame_id"], 13)
         self.assertEqual(data["joint_positions"], {"left_arm": 0.1, "right_arm": -0.1})
 
+    def test_restarted_expert_frame_sequence_is_accepted_after_timeout(self):
+        controller = self.make_controller()
+        controller._expert_socket = _MessageSocket(self.expert_message(frame_id=0))
+
+        # A rollback while the accepted stream is fresh is still rejected.
+        controller._receive_expert_available(10.1)
+        self.assertEqual(controller._latest_expert_frame_id, 12)
+        self.assertEqual(controller._expert_last_received_at, 10.0)
+
+        # Rejected rollback frames do not refresh liveness, so the same
+        # restarted publisher is accepted once the previous stream times out.
+        controller._expert_socket = _MessageSocket(self.expert_message(frame_id=0))
+        controller._receive_expert_available(10.3)
+        self.assertEqual(controller._latest_expert_frame_id, 0)
+        self.assertEqual(controller._latest_expert_session, 1)
+        self.assertEqual(controller._expert_last_received_at, 10.3)
+        self.assertEqual(controller._expert_action_received_at, 10.3)
+
     def test_expert_applied_uses_all_four_manual_locomotion_dimensions(self):
         policy = _DaggerLocomotionPolicy()
         policy._gr00t_takeover_was_enabled = False
