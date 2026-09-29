@@ -973,8 +973,9 @@ class Gr00tZmqCtrl(ControllerHook):
             and self._latest_command_stream_id == self._observation_stream_id
             and self._latest_command_session == control_session
         )
-        # Offline DAgger overrides only upper-body targets. GR00T locomotion
-        # remains the policy command and retains its own freshness flag.
+        # Offline DAgger arm/hand freshness is selected here. The policy mixin
+        # uses the same expert_applied bit to switch all four locomotion command
+        # dimensions from GR00T to the local human joystick atomically.
         expert_age_s = (
             None
             if getattr(self, "_expert_action_received_at", None) is None

@@ -224,7 +224,8 @@ RoboJuDo will not enable the GR00T upper-body takeover until dex-teleop has echo
 observation stream. A bare held `Select` starts VR intervention; releasing it returns to policy targets. The
 `L1+R1+Select` recorder chord is excluded from intervention. Each Select rising edge creates a new intervention session,
 freezes the current Quest `world_T_body`, and anchors both TCP targets at measured robot forward kinematics. The expert
-action remains named arm/hand joint-position targets; waist is not part of the teleoperation action.
+action atomically covers named targets for both arms and both hands plus the joystick-derived four-dimensional
+`[vx, vy, yaw_rate, height]` locomotion command. Waist remains at the trained default and is not part of the expert action.
 
 Recording and finalization both keep the complete physical rollout as one LeRobot episode. The finalized Parquet rows
 retain `expert_intervention`, `expert_applied`, `action_source`, `intervention_session`, and `expert_frame_id`; training

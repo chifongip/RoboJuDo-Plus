@@ -100,32 +100,16 @@
 
   对于 offline DAgger，可以不强制只留成功，但必须记录 outcome，训练时再选择策略。
 
-  ### 6. action_source=expert 实际是混合来源
+  ### 6. 已修复：action_source=expert 覆盖完整训练 action
 
-  当前 expert 只覆盖：
+  expert 接管现在原子覆盖：
 
   - 双臂关节目标；
-  - 手部目标。
+  - 双手关节目标；
+  - 本机 joystick 生成的四维 `[vx, vy, yaw_rate, height]`。
 
-  但 locomotion command 仍来自 policy，最终 action 又把四维 locomotion command 一起写入：
-
-  [arm joints, hand joints, policy locomotion]
-
-  因此整帧标为 action_source=expert 不等于所有 action 维度都是 expert。
-
-  RLInf 双臂也允许部分接管：只接管左臂时，右臂仍保留 policy action，但其文档明确把它定义为组合 action。RLInf 双臂 DAgger
-
-  建议将来源细化为：
-
-  arm_source
-  hand_source
-  locomotion_source
-
-  或者：
-
-  expert_action_mask[action_dim]
-
-  当前阶段如果明确只学习 upper-body，可以暂时接受混合 action，但不能把全维度都解释成 expert label。
+  dex-teleop 的 arm/hand payload 与 joystick intervention gate 任一无效时，`expert_applied=false`，所有维度一起
+  回到 policy/hold。腰部 command 固定为训练默认值，不进入 recorder 的四维 locomotion action。
 
   ### 7. 无法验证 policy action horizon 的 handback 是否新鲜
 

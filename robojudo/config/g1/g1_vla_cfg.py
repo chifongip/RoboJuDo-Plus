@@ -214,7 +214,7 @@ class g1_23_gr00t_locomanipulation_stiff_real(g1_23_locomanipulation_stiff_real)
 
 @cfg_registry.register
 class g1_23_gr00t_offline_dagger_stiff_real(g1_23_gr00t_locomanipulation_stiff_real):
-    """G1 GR00T rollout with Select-held VR intervention for offline DAgger."""
+    """G1 GR00T rollout with Select-held full-action intervention for offline DAgger."""
 
     # Offline DAgger uses a dedicated config so the existing GR00T deployment
     # keeps its original policy-only transport and joystick behavior.
@@ -227,5 +227,5 @@ class g1_23_gr00t_offline_dagger_stiff_real(g1_23_gr00t_locomanipulation_stiff_r
     record: RecordCfg = RecordCfg(
         enabled=True,
         endpoint="tcp://*:8562",
-        task="offline DAgger upper-body intervention",
+        task="offline DAgger arm hand locomotion intervention",
     )

@@ -11,6 +11,8 @@ class Gr00tLocomanipulationPolicyMixin:
     Command modes:
     - Takeover disabled: delegate to the base policy's joystick/keyboard path.
     - Takeover enabled and stream fresh: use GR00T ``[vx, vy, yaw, height]``.
+    - Offline DAgger expert applied: use joystick ``[vx, vy, yaw, height]``
+      together with the expert arm/hand targets selected by the controller.
     - Takeover enabled and stream stale: zero velocity and hold last height.
 
     Upper-body targets are handled by the pipeline mixin, not by this class.
@@ -32,10 +34,27 @@ class Gr00tLocomanipulationPolicyMixin:
             return super()._get_commands(ctrl_data)
 
         self._gr00t_takeover_was_enabled = True
+        if bool(stream.get("expert_applied", False)):
+            # Offline DAgger treats the human correction as one composite
+            # action: dex-teleop supplies both arms and both hands, while the
+            # local joystick supplies all four locomotion command dimensions.
+            # Calling the base path preserves its deadzone, velocity decay and
+            # D-pad height smoothing instead of duplicating that mapping here.
+            commands = np.asarray(super()._get_commands(ctrl_data), dtype=np.float32).copy()
+            if commands.shape != (5,) or not np.isfinite(commands).all():
+                raise ValueError("expert locomotion path must produce a finite five-element command")
+            # Waist remains at the trained default and is not part of DAgger.
+            commands[4] = self._command_defaults[4]
+            self._target_waist_yaw = float(commands[4])
+            self.cmd[:] = commands
+            stream["locomotion_command"] = commands[:4].copy()
+            stream["locomotion_source"] = "expert"
+            return commands
+
         commands = self.cmd.copy()
         command = stream.get("locomotion_command")
-        # Offline DAgger can keep expert upper-body targets fresh while the
-        # GR00T policy stream is stale. Locomotion must still stop in that case.
+        # Outside an applied expert correction, locomotion remains tied to the
+        # GR00T policy stream and stops when that stream becomes stale.
         external_active = bool(stream.get("policy_fresh", stream.get("fresh", False)))
 
         if external_active:
@@ -46,11 +65,13 @@ class Gr00tLocomanipulationPolicyMixin:
                 commands[index] = self._clip_command(command[index], self.commands_map[index])
             self.current_vel_cmd[:] = commands[:3]
             self._target_height = float(commands[3])
+            stream["locomotion_source"] = "policy"
         else:
             # Do not fall back to joystick on a timeout while takeover remains enabled.
             self.current_vel_cmd[:] = 0.0
             commands[:3] = 0.0
             commands[3] = self.cmd[3]
+            stream["locomotion_source"] = "hold"
 
         # GR00T does not output waist yaw; keep the trained default command.
         commands[4] = self._command_defaults[4]

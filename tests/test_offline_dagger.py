@@ -9,6 +9,7 @@ import zmq
 from robojudo.controller.ctrl_cfgs import Gr00tZmqCtrlCfg
 from robojudo.controller.gr00t_zmq_ctrl import Gr00tZmqCtrl
 from robojudo.pipeline.gr00t_locomanipulation_pipeline import Gr00tLocomanipulationPipelineMixin
+from robojudo.policy.gr00t_locomanipulation_policy import Gr00tLocomanipulationPolicyMixin
 
 
 class _Recorder:
@@ -33,6 +34,16 @@ class _MessageSocket:
         if not self.messages:
             raise zmq.Again()
         return self.messages.pop(0)
+
+
+class _ManualLocomotionBase:
+    def _get_commands(self, ctrl_data):
+        self.manual_ctrl_data = ctrl_data
+        return np.asarray([0.35, -0.2, 0.15, 0.73, 0.4], dtype=np.float32)
+
+
+class _DaggerLocomotionPolicy(Gr00tLocomanipulationPolicyMixin, _ManualLocomotionBase):
+    pass
 
 
 class TestOfflineDaggerController(unittest.TestCase):
@@ -135,7 +146,7 @@ class TestOfflineDaggerController(unittest.TestCase):
         )
         self.assertFalse(controller._expert_intervention)
 
-    def test_expert_overrides_upper_body_without_refreshing_policy_locomotion(self):
+    def test_expert_arm_hand_candidate_does_not_require_fresh_policy_chunk(self):
         controller = self.make_controller()
         with patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=10.0):
             data = controller.get_data()
@@ -170,6 +181,26 @@ class TestOfflineDaggerController(unittest.TestCase):
         self.assertEqual(data["action_source"], "policy")
         self.assertEqual(data["expert_frame_id"], 13)
         self.assertEqual(data["joint_positions"], {"left_arm": 0.1, "right_arm": -0.1})
+
+    def test_expert_applied_uses_all_four_manual_locomotion_dimensions(self):
+        policy = _DaggerLocomotionPolicy()
+        policy._gr00t_takeover_was_enabled = False
+        policy._command_defaults = np.asarray([0.0, 0.0, 0.0, 0.75, 0.0], dtype=np.float32)
+        policy._target_waist_yaw = 0.0
+        policy.cmd = policy._command_defaults.copy()
+        stream = {
+            "takeover_enabled": True,
+            "expert_applied": True,
+            "locomotion_command": np.asarray([9.0, 9.0, 9.0, 9.0]),
+        }
+        ctrl_data = {"Gr00tZmqCtrl": stream, "UnitreeCtrl": {"fresh": True}}
+
+        commands = policy._get_commands(ctrl_data)
+
+        np.testing.assert_allclose(commands, [0.35, -0.2, 0.15, 0.73, 0.0])
+        np.testing.assert_allclose(stream["locomotion_command"], [0.35, -0.2, 0.15, 0.73])
+        self.assertEqual(stream["locomotion_source"], "expert")
+        self.assertIs(policy.manual_ctrl_data, ctrl_data)
 
     def test_g1_offline_dagger_config_is_isolated_and_uses_distinct_record_port(self):
         from robojudo.config.g1.g1_vla_cfg import (
