@@ -3,18 +3,17 @@
 control_endpoint: tcp://127.0.0.1:8562
 
 dataset:
-  # Resume appends expert intervention episodes to the existing base dataset.
-  root: record_data/g1_23dof_upper_body_pickup_mulcam
-  raw_root: record_data/g1_23dof_upper_body_raw_pickup_mulcam
-  repo_id: local/g1_23dof_upper_body_pickup_mulcam
+  # Offline DAgger uses a label-aware dataset schema. Keep it separate from an
+  # existing unlabeled base dataset and aggregate both datasets during training.
+  root: record_data/g1_23dof_upper_body_pickup_mulcam_dagger
+  raw_root: record_data/g1_23dof_upper_body_pickup_mulcam_dagger_raw
+  repo_id: local/g1_23dof_upper_body_pickup_mulcam_dagger
   fps: 30
   codec: libx264
   jpeg_quality: 90
   resume: true
-  # Offline DAgger finalization drops policy actions and splits each valid
-  # intervention_session into a separate contiguous training episode.
-  expert_only: true
-  expert_min_frames: 2
+  # Offline DAgger keeps the complete rollout and writes per-frame labels.
+  dagger_labels: true
 
 # Offline DAgger recorder reuses the already encoded GR00T observation PUB;
 # it must not open the three RealSense devices a second time.

@@ -55,6 +55,15 @@ class ControlSample:
                 raise ValueError("dagger action_source must be policy or expert")
             if dagger["expert_applied"] != (source == "expert"):
                 raise ValueError("dagger expert_applied and action_source disagree")
+            expert_frame_id = dagger.get("expert_frame_id")
+            if expert_frame_id is not None and (
+                isinstance(expert_frame_id, bool)
+                or not isinstance(expert_frame_id, int)
+                or expert_frame_id < 0
+            ):
+                raise ValueError("dagger expert_frame_id must be null or non-negative")
+            if dagger["expert_applied"] and expert_frame_id is None:
+                raise ValueError("dagger expert_frame_id is required when expert_applied is true")
             dagger = dict(dagger)
         return cls(
             episode_id=int(message["episode_id"]),

@@ -754,8 +754,6 @@ class Gr00tZmqCtrl(ControllerHook):
             # released; policy start is therefore gated on a live VR stream.
             self._expert_stream_ready = True
             self._expert_last_received_at = now
-            if positions is None:
-                continue
             frame_is_fresh = (
                 self._latest_expert_frame_id is None
                 or self._latest_expert_session != session
@@ -770,6 +768,18 @@ class Gr00tZmqCtrl(ControllerHook):
                     now,
                     source="offline DAgger",
                 )
+                continue
+            if positions is None:
+                # Offline DAgger: a newer frame from the active intervention
+                # session supersedes the previous candidate even when IK is
+                # invalid.  Keeping the old candidate here would incorrectly
+                # continue applying and recording it as fresh expert data.
+                if session == expected_session:
+                    self._latest_expert_positions.clear()
+                    self._latest_expert_hands = None
+                    self._latest_expert_frame_id = frame_id
+                    self._latest_expert_session = session
+                    self._expert_action_received_at = None
                 continue
             self._latest_expert_positions = positions
             self._latest_expert_hands = hands
@@ -1016,6 +1026,9 @@ class Gr00tZmqCtrl(ControllerHook):
             "intervention_session": intervention_session,
             "expert_applied": expert_applied,
             "action_source": "expert" if expert_applied else "policy",
+            # Offline DAgger keeps the most recently received expert frame ID
+            # even when that frame invalidated the executable candidate.
+            "expert_frame_id": getattr(self, "_latest_expert_frame_id", None),
             "expert_age_s": expert_age_s,
             "age_s": age_s,
             "observation_ready": bool(

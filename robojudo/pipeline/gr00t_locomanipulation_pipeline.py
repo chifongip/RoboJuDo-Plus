@@ -134,6 +134,9 @@ class Gr00tLocomanipulationPipelineMixin:
             "expert_applied": bool(stream.get("expert_applied", False)),
             "intervention_session": int(stream.get("intervention_session", 0)),
             "action_source": str(stream.get("action_source", "policy")),
+            # Offline DAgger provenance remains in the finalized full rollout;
+            # -1 is used only after finalization for frames without a candidate.
+            "expert_frame_id": stream.get("expert_frame_id"),
         }
         recorder_client.submit(
             joint_names=[*cfg.joint_names, *hand_names],

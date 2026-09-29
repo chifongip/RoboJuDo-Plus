@@ -69,7 +69,7 @@ class TestRecorderService(unittest.TestCase):
         }
 
     @staticmethod
-    def _config(temporary_dir, *, cameras=None, clock="source", fps=10, expert_only=False):
+    def _config(temporary_dir, *, cameras=None, clock="source", fps=10, dagger_labels=False):
         root = Path(temporary_dir) / "dataset"
         return RecorderConfig(
             control_endpoint=f"inproc://recorder-{uuid.uuid4()}",
@@ -78,7 +78,7 @@ class TestRecorderService(unittest.TestCase):
                 raw_root=Path(temporary_dir) / "raw",
                 repo_id="local/service",
                 fps=fps,
-                expert_only=expert_only,
+                dagger_labels=dagger_labels,
             ),
             cameras=cameras or (CameraConfig(type="fake", name="head_rgb"),),
             sync=SyncConfig(clock=clock, max_control_age_ms=60, max_camera_delta_ms=60),
@@ -119,9 +119,9 @@ class TestRecorderService(unittest.TestCase):
             self.assertIn("camera_delta_summary_ms", report)
             self.assertIn("control_age_summary_ms", report)
 
-    def test_offline_dagger_finalizer_keeps_contiguous_expert_sessions_only(self):
+    def test_offline_dagger_finalizer_keeps_full_rollout_and_labels(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
-            cfg = self._config(temporary_dir, expert_only=True)
+            cfg = self._config(temporary_dir, dagger_labels=True)
             camera = FakeCamera()
             service = RecorderService(cfg, camera=camera)
             labels = (
@@ -143,6 +143,7 @@ class TestRecorderService(unittest.TestCase):
                     "expert_applied": expert,
                     "intervention_session": session,
                     "action_source": "expert" if expert else "policy",
+                    "expert_frame_id": index if expert else None,
                 }
                 service._handle_message(message, timestamp_ns)
             for sequence, timestamp_ns in enumerate(
@@ -163,13 +164,19 @@ class TestRecorderService(unittest.TestCase):
             raw_episode = next((cfg.dataset.raw_root / "episodes").iterdir())
             report = RawDatasetFinalizer(cfg).run()[0]
 
-            self.assertEqual(report["written_frames"], 4)
-            self.assertEqual(report["discarded_policy_slots"], 1)
-            self.assertEqual(len(report["dataset_episode_indices"]), 2)
-            for data_file in report["data_files"]:
-                self.assertEqual(pq.read_table(cfg.dataset.root / data_file).num_rows, 2)
+            self.assertEqual(report["written_frames"], 5)
+            self.assertEqual(report["expert_frames"], 4)
+            self.assertEqual(report["policy_frames"], 1)
+            self.assertEqual(report["dataset_episode_indices"], [0])
+            data = pq.read_table(cfg.dataset.root / report["data_file"])
+            self.assertEqual(data.num_rows, 5)
+            self.assertEqual(data["expert_applied"].to_pylist(), [True, True, False, True, True])
+            self.assertEqual(data["action_source"].to_pylist(), ["expert", "expert", "policy", "expert", "expert"])
+            self.assertEqual(data["intervention_session"].to_pylist(), [1, 1, 1, 2, 2])
+            self.assertEqual(data["expert_frame_id"].to_pylist(), [0, 1, -1, 3, 4])
             persisted = json.loads((raw_episode / "finalize_report.json").read_text())
-            self.assertTrue(persisted["expert_only"])
+            self.assertTrue(persisted["dagger_labels"])
+            self.assertTrue(persisted["preserve_full_rollout"])
 
     def test_review_stops_camera_reads_and_discard_removes_pending_raw(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

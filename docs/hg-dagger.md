@@ -1,6 +1,6 @@
-## P0：建议 offline DAgger 使用前修复
+## Offline DAgger 数据与接管审计
 
-  ### 1. 当前 expert segment 会制造“假的 episode 结束”
+  ### 1. 已修复：expert segment 不再制造“假的 episode 结束”
 
   RLInf 保存完整成功 episode，然后只把满足以下条件的 action chunk 起点暴露给训练器：
 
@@ -13,7 +13,7 @@
 
   其中 H 是模型 action horizon。RLInf 明确按 chunk 过滤，而不是仅过滤单帧。RLInf HG-DAgger 文档
 
-  当前 finalizer 则把每个 expert intervention 切成一个新的 LeRobot episode：
+  旧 finalizer 会把每个 expert intervention 切成一个新的 LeRobot episode：
 
   policy | expert expert expert | policy
            └── synthetic episode ──┘
@@ -25,22 +25,27 @@
 
   这是目前最大的 action-horizon 问题。expert_min_frames=2 也与真实 H 无关。
 
-  建议：
+  当前实现：
 
   - raw 层继续保存完整 rollout；
-  - finalized 层也保留完整 episode 和 expert_applied；
-  - 为每种模型/action horizon 生成 valid chunk-start index；
-  - 或者如果必须导出 expert-only synthetic episode，至少裁掉 intervention 末尾 H-1 个训练起点，而不能把释放 Select 当自然终止。
+  - finalized 层同样保留完整真实 episode；
+  - 每帧保留 `expert_applied` 等 DAgger 标签；
+  - Select 释放不再触发 `save_episode()`，因此不会产生伪 terminal。
+
+  训练侧仍需要针对模型的 action horizon 生成 `valid(t)`；这是后续训练采样器的职责，不由 finalizer
+  通过裁切 episode 代替。
 
   相关当前代码：/home/breeze/Desktop/workplace/Humanoid/RoboJuDo-Plus/packages/robojudo_recorder/src/robojudo_recorder/finalize.py:209
 
-  ### 2. 最新 expert frame 无效时，旧 action 仍可能继续生效
+  ### 2. 已修复：最新 expert frame 无效时立即撤销旧 action
 
   当前收到：
 
   expert_valid = false
 
-  时不会立即清除上一个有效 expert target。旧目标会继续保持 expert_applied=true，直到 expert_timeout_s 到期。
+  时，controller 现在会在确认 frame ID 属于当前 session 且更新后，立即清除上一个 expert target，保留新的
+  `expert_frame_id` 用于诊断，并在下一控制 tick 将 `expert_applied=false`。随后按现有安全逻辑回到 policy；如果
+  policy 也不 fresh，则保持现有 fail-closed 行为。
 
   因此可能出现：
 
@@ -48,37 +53,15 @@
   frame 101: IK invalid -> 仍执行并记录 q100
   frame 102: IK invalid -> 仍可能执行 q100
 
-  注释写的是“invalid IK frames must not keep an old action fresh”，但实现只是“不刷新时间”，没有立即撤销旧 action。
+  ### 3. observation/action 时间对齐策略
 
-  建议在收到当前 session、更新 frame ID、但 expert_valid=false 的消息时：
-
-  - 更新 latest_expert_frame_id；
-  - 立即将当前 candidate 标记无效；
-  - expert_applied=false；
-  - 根据安全策略选择 hold 或 policy，而不是继续把旧目标标成新 expert 数据。
-
-  相关代码：/home/breeze/Desktop/workplace/Humanoid/RoboJuDo-Plus/robojudo/controller/gr00t_zmq_ctrl.py:728
-
-  ### 3. observation/action 还没有严格的因果配对
-
-  RLInf 的环境接口天然保存：
-
-  obs_t -> 实际执行 action_t -> next_obs
-  RLInf 的保证主要来自“同一个 env.step 调用内记录实际执行动作”，而不是事后靠时间戳同步。记录的是同一次 step 中实际选择执行的动作，不需要事后在两个异步 ZMQ 流之间猜测 action 来源。
-
-  当前 recorder 是：
-
-  读取 state
-  -> 选择并发送 action
-  -> post-step 生成一个 timestamp
-  -> finalizer 用 nearest camera 配对
+  Offline DAgger 不强制引入严格 observation ID join。它与普通数据使用相同的固定 FPS 重采样语义：相机按
+  阈值选择，state 插值，action 使用当时生效的零阶保持关节目标。raw 层仍保留时间戳和来源信息用于诊断。
 
 
-  ### 4. 当前最终数据没有保留 DAgger 标签
+  ### 4. 已修复：最终数据保留 DAgger 标签
 
-  四个字段只存在 raw 数据中。finalizer 用它们过滤后，写入 LeRobot 的只有 state/action/image。
-
-  结果是最终数据无法审计：
+  label-aware LeRobot schema 现在逐帧写入：
 
   - 哪个 intervention session；
   - 对应哪个 expert frame；
@@ -86,13 +69,14 @@
   - 是否重复使用同一 expert action；
   - 数据来自第几轮 DAgger、哪个 policy checkpoint。
 
-  RLInf 保留完整 episode 和 intervene_flag，训练阶段再建立逻辑样本索引。当前也应至少在最终 archive 中保留：
-
   expert_intervention
   expert_applied
   action_source
   intervention_session
   expert_frame_id
+
+  为避免破坏已有无标签 LeRobot dataset 的固定 schema，offline DAgger YAML 默认写入独立的 `_dagger`
+  dataset；训练时再与基础 dataset 聚合。
 
   ## P1：影响数据质量和后续扩展
 

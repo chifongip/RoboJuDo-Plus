@@ -53,9 +53,11 @@ class TestControlSample(unittest.TestCase):
             "expert_applied": True,
             "intervention_session": 4,
             "action_source": "expert",
+            "expert_frame_id": 27,
         }
         sample = ControlSample.from_message(message, receive_timestamp_ns=123)
         self.assertEqual(sample.dagger["intervention_session"], 4)
+        self.assertEqual(sample.dagger["expert_frame_id"], 27)
 
         message["dagger"]["action_source"] = "policy"
         with self.assertRaisesRegex(ValueError, "disagree"):

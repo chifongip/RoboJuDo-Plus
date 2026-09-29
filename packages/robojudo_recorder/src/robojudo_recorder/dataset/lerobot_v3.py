@@ -25,6 +25,16 @@ DEFAULT_FEATURES = {
     "task_index": {"dtype": "int64", "shape": [1], "names": None},
 }
 
+# Offline DAgger labels are regular frame features so a finalized rollout can
+# be audited and filtered without inventing synthetic expert-only episodes.
+DAGGER_FEATURES = {
+    "expert_intervention": {"dtype": "bool", "shape": [1], "names": None},
+    "expert_applied": {"dtype": "bool", "shape": [1], "names": None},
+    "action_source": {"dtype": "string", "shape": [1], "names": None},
+    "intervention_session": {"dtype": "int64", "shape": [1], "names": None},
+    "expert_frame_id": {"dtype": "int64", "shape": [1], "names": None},
+}
+
 
 def _write_json(path: Path, value: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,6 +144,7 @@ class LeRobotV3Writer:
         camera_shape: tuple[int, int, int] | None = None,
         codec: str = "libx264",
         resume: bool = False,
+        dagger_features: bool = False,
     ):
         self.root = Path(root)
         has_existing_data = self.root.exists() and any(self.root.iterdir())
@@ -158,6 +169,7 @@ class LeRobotV3Writer:
         self.camera_shapes = {name: tuple(shape) for name, shape in camera_shapes.items()}
         self.camera_keys = {name: f"observation.images.{name}" for name in self.camera_shapes}
         self.codec = codec
+        self.dagger_features = dagger_features
         self._episode_index = 0
         self._total_frames = 0
         self._episode_rows: list[dict] = []
@@ -165,6 +177,7 @@ class LeRobotV3Writer:
         self._global_stats: dict[str, _VectorStats] = {}
         self._state_frames: list[np.ndarray] = []
         self._action_frames: list[np.ndarray] = []
+        self._dagger_frames: list[dict] = []
         self._task: str | None = None
         self._videos: dict[str, _EpisodeVideoWriter] = {}
         if has_existing_data:
@@ -216,6 +229,7 @@ class LeRobotV3Writer:
                 "shape": [len(self.action_names)],
                 "names": self.action_names,
             },
+            **(DAGGER_FEATURES if self.dagger_features else {}),
             **DEFAULT_FEATURES,
         }
 
@@ -253,6 +267,10 @@ class LeRobotV3Writer:
             "camera_shapes": (
                 {key: tuple(feature["shape"]) for key, feature in existing_camera_features.items()},
                 {self.camera_keys[name]: shape for name, shape in self.camera_shapes.items()},
+            ),
+            "dagger_features": (
+                all(name in info["features"] for name in DAGGER_FEATURES),
+                self.dagger_features,
             ),
         }
         mismatches = {key: values for key, values in expected.items() if values[0] != values[1]}
@@ -302,6 +320,7 @@ class LeRobotV3Writer:
         images: dict[str, np.ndarray] | np.ndarray | None = None,
         *,
         image: np.ndarray | None = None,
+        dagger: dict | None = None,
     ):
         if not self._videos or self._task is None:
             raise RuntimeError("start_episode() must be called before add_frame()")
@@ -329,24 +348,88 @@ class LeRobotV3Writer:
                 raise ValueError(f"camera {name!r} image shape {image.shape} does not match {self.camera_shapes[name]}")
         self._state_frames.append(state.copy())
         self._action_frames.append(action.copy())
+        if self.dagger_features:
+            self._dagger_frames.append(self._normalize_dagger(dagger))
+        elif dagger is not None:
+            raise ValueError("dagger labels require dagger_features=True")
         for name, image in normalized_images.items():
             self._videos[name].add(image)
 
-    def _write_data(self, states: np.ndarray, actions: np.ndarray, task_index: int):
+    @staticmethod
+    def _normalize_dagger(dagger: dict | None) -> dict:
+        # Offline DAgger defaults describe an ordinary policy frame.  This also
+        # keeps full-rollout finalization robust to a missing label on startup.
+        value = {
+            "expert_intervention": False,
+            "expert_applied": False,
+            "action_source": "policy",
+            "intervention_session": 0,
+            "expert_frame_id": -1,
+        }
+        if dagger is not None:
+            value.update(dagger)
+        for name in ("expert_intervention", "expert_applied"):
+            if not isinstance(value[name], bool):
+                raise ValueError(f"dagger {name} must be boolean")
+        if value["action_source"] not in {"policy", "expert"}:
+            raise ValueError("dagger action_source must be policy or expert")
+        if value["expert_applied"] != (value["action_source"] == "expert"):
+            raise ValueError("dagger expert_applied and action_source disagree")
+        session = value["intervention_session"]
+        if isinstance(session, bool) or not isinstance(session, int) or session < 0:
+            raise ValueError("dagger intervention_session must be non-negative")
+        frame_id = value["expert_frame_id"]
+        if frame_id is None:
+            frame_id = -1
+        if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < -1:
+            raise ValueError("dagger expert_frame_id must be null or at least -1")
+        # -1 keeps raw episodes recorded before expert_frame_id was introduced
+        # finalizable; the live protocol requires the ID for all new expert data.
+        value["expert_frame_id"] = frame_id
+        return value
+
+    def _write_data(
+        self,
+        states: np.ndarray,
+        actions: np.ndarray,
+        task_index: int,
+        dagger_frames: list[dict],
+    ):
         length = len(states)
         chunk_index, file_index = self._episode_location()
         frame_indices = np.arange(length, dtype=np.int64)
-        table = pa.table(
-            {
-                "observation.state": pa.array(states.tolist(), type=pa.list_(pa.float32(), len(self.state_names))),
-                "action": pa.array(actions.tolist(), type=pa.list_(pa.float32(), len(self.action_names))),
-                "timestamp": pa.array(frame_indices.astype(np.float32) / self.fps, type=pa.float32()),
-                "frame_index": pa.array(frame_indices, type=pa.int64()),
-                "episode_index": pa.array(np.full(length, self._episode_index), type=pa.int64()),
-                "index": pa.array(np.arange(self._total_frames, self._total_frames + length), type=pa.int64()),
-                "task_index": pa.array(np.full(length, task_index), type=pa.int64()),
-            }
-        )
+        columns = {
+            "observation.state": pa.array(states.tolist(), type=pa.list_(pa.float32(), len(self.state_names))),
+            "action": pa.array(actions.tolist(), type=pa.list_(pa.float32(), len(self.action_names))),
+            "timestamp": pa.array(frame_indices.astype(np.float32) / self.fps, type=pa.float32()),
+            "frame_index": pa.array(frame_indices, type=pa.int64()),
+            "episode_index": pa.array(np.full(length, self._episode_index), type=pa.int64()),
+            "index": pa.array(np.arange(self._total_frames, self._total_frames + length), type=pa.int64()),
+            "task_index": pa.array(np.full(length, task_index), type=pa.int64()),
+        }
+        if self.dagger_features:
+            if len(dagger_frames) != length:
+                raise RuntimeError("DAgger label count does not match episode frame count")
+            columns.update(
+                {
+                    "expert_intervention": pa.array(
+                        [frame["expert_intervention"] for frame in dagger_frames], type=pa.bool_()
+                    ),
+                    "expert_applied": pa.array(
+                        [frame["expert_applied"] for frame in dagger_frames], type=pa.bool_()
+                    ),
+                    "action_source": pa.array(
+                        [frame["action_source"] for frame in dagger_frames], type=pa.string()
+                    ),
+                    "intervention_session": pa.array(
+                        [frame["intervention_session"] for frame in dagger_frames], type=pa.int64()
+                    ),
+                    "expert_frame_id": pa.array(
+                        [frame["expert_frame_id"] for frame in dagger_frames], type=pa.int64()
+                    ),
+                }
+            )
+        table = pa.table(columns)
         path = self.root / "data" / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, path, compression="snappy", use_dictionary=True)
@@ -395,7 +478,7 @@ class LeRobotV3Writer:
         if task not in self._tasks:
             self._tasks.append(task)
         task_index = self._tasks.index(task)
-        self._write_data(states, actions, task_index)
+        self._write_data(states, actions, task_index, self._dagger_frames)
         episode_stats = self._episode_stats(states, actions)
         chunk_index, file_index = self._episode_location()
         length = len(states)
@@ -437,6 +520,7 @@ class LeRobotV3Writer:
     def _clear_buffer(self):
         self._state_frames.clear()
         self._action_frames.clear()
+        self._dagger_frames.clear()
         self._task = None
         self._videos = {}
 

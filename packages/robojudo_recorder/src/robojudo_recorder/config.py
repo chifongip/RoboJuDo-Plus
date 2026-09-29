@@ -43,9 +43,14 @@ class DatasetConfig:
     resume: bool = False
     raw_root: Path | None = None
     jpeg_quality: int = 90
-    # Offline DAgger: keep only expert-applied control slots and split each
-    # intervention into a separate LeRobot episode during finalization.
+    # Offline DAgger: persist per-frame intervention labels while keeping the
+    # complete rollout as one real LeRobot episode.
+    dagger_labels: bool = False
+    # Deprecated compatibility alias.  It no longer drops policy frames or
+    # creates synthetic expert-only episodes; use dagger_labels instead.
     expert_only: bool = False
+    # Retained only so older YAML files still parse.  Full-rollout DAgger
+    # finalization does not discard short interventions.
     expert_min_frames: int = 2
 
     def __post_init__(self):
@@ -61,6 +66,10 @@ class DatasetConfig:
             object.__setattr__(self, "raw_root", self.root.with_name(f"{self.root.name}_raw"))
         if self.raw_root == self.root:
             raise ValueError("dataset.raw_root must differ from dataset.root")
+
+    @property
+    def preserve_dagger_labels(self) -> bool:
+        return self.dagger_labels or self.expert_only
 
 
 @dataclass(frozen=True)

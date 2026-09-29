@@ -226,9 +226,11 @@ observation stream. A bare held `Select` starts VR intervention; releasing it re
 freezes the current Quest `world_T_body`, and anchors both TCP targets at measured robot forward kinematics. The expert
 action remains named arm/hand joint-position targets; waist is not part of the teleoperation action.
 
-Recording stores the full rollout with policy/expert source labels. Finalization with the supplied config keeps only
-valid expert-applied slots and writes every contiguous intervention session as a separate episode, appending to the
-configured LeRobot dataset:
+Recording and finalization both keep the complete physical rollout as one LeRobot episode. The finalized Parquet rows
+retain `expert_intervention`, `expert_applied`, `action_source`, `intervention_session`, and `expert_frame_id`; training
+can therefore build action-horizon-valid expert views without treating Select release as a terminal state. The supplied
+config writes a label-aware DAgger dataset separately from an existing unlabeled base dataset; combine them in the
+training dataset configuration rather than appending incompatible schemas:
 
 ```bash
 robojudo-finalize \

@@ -24,6 +24,17 @@ class _EmptySocket:
         raise zmq.Again()
 
 
+class _MessageSocket:
+    def __init__(self, *messages):
+        self.messages = list(messages)
+
+    def recv_json(self, flags=0):
+        del flags
+        if not self.messages:
+            raise zmq.Again()
+        return self.messages.pop(0)
+
+
 class TestOfflineDaggerController(unittest.TestCase):
     """Protect the offline DAgger session and policy/expert arbitration contract."""
 
@@ -67,11 +78,11 @@ class TestOfflineDaggerController(unittest.TestCase):
         return controller
 
     @staticmethod
-    def expert_message(*, session=1, active=True, valid=True):
+    def expert_message(*, frame_id=12, session=1, active=True, valid=True):
         return {
             "schema_version": 1,
             "type": "synchronized_teleop_frame",
-            "frame_id": 12,
+            "frame_id": frame_id,
             "arm": {
                 "valid": True,
                 "joint_names": ["left_arm", "right_arm"],
@@ -141,6 +152,25 @@ class TestOfflineDaggerController(unittest.TestCase):
         self.assertFalse(data["policy_fresh"])
         self.assertTrue(data["expert_applied"])
 
+    def test_new_invalid_expert_frame_revokes_previous_candidate_immediately(self):
+        controller = self.make_controller()
+        controller._expert_socket = _MessageSocket(
+            self.expert_message(frame_id=13, valid=False)
+        )
+
+        controller._receive_expert_available(10.01)
+
+        self.assertEqual(controller._latest_expert_frame_id, 13)
+        self.assertEqual(controller._latest_expert_session, 1)
+        self.assertEqual(controller._latest_expert_positions, {})
+        self.assertIsNone(controller._expert_action_received_at)
+        with patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=10.01):
+            data = controller.get_data()
+        self.assertFalse(data["expert_applied"])
+        self.assertEqual(data["action_source"], "policy")
+        self.assertEqual(data["expert_frame_id"], 13)
+        self.assertEqual(data["joint_positions"], {"left_arm": 0.1, "right_arm": -0.1})
+
     def test_g1_offline_dagger_config_is_isolated_and_uses_distinct_record_port(self):
         from robojudo.config.g1.g1_vla_cfg import (
             g1_23_gr00t_locomanipulation_stiff_real,
@@ -175,6 +205,7 @@ class TestOfflineDaggerController(unittest.TestCase):
             "expert_applied": True,
             "intervention_session": 7,
             "action_source": "expert",
+            "expert_frame_id": 41,
             "casia_hand": {
                 "fresh": True,
                 "joint_names": ["left_thumb", "right_thumb"],
@@ -194,6 +225,7 @@ class TestOfflineDaggerController(unittest.TestCase):
         sample = pipeline._recorder_client.samples[0]
         self.assertEqual(sample["dagger"]["intervention_session"], 7)
         self.assertEqual(sample["dagger"]["action_source"], "expert")
+        self.assertEqual(sample["dagger"]["expert_frame_id"], 41)
         self.assertEqual(len(sample["joint_names"]), 4)
 
 
