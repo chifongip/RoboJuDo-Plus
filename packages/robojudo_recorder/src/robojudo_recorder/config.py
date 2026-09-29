@@ -16,7 +16,7 @@ class CameraConfig:
 class SyncConfig:
     clock: str = "receive"
     max_control_age_ms: float = 50.0
-    poll_timeout_ms: int = 10
+    poll_timeout_ms: int = 1
     pending_frame_capacity: int = 32
     throughput_log_interval_s: float = 5.0
     max_camera_delta_ms: float = 50.0

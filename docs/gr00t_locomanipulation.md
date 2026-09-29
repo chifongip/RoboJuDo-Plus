@@ -213,12 +213,21 @@ robojudo-recorder \
 # dex-teleop (run in its own repository/environment).
 conda activate dex
 python teleop/robot_control/vr_arm_hand_teleop.py \
-  --robot g1_23 --backend real --hand casia --offline-dagger --start-immediately
+  --robot g1_23 --backend real --hand casia --offline-dagger \
+  --dagger-feedback-endpoint tcp://192.168.123.164:8561
 
 # RoboJuDo-Plus.
 conda activate robop
-python scripts/run_pipeline.py -c g1_23_gr00t_offline_dagger_stiff_real
+python scripts/run_pipeline.py \
+  -c g1_23_gr00t_offline_dagger_stiff_real
 ```
+
+The dedicated DAgger configuration assumes RoboJuDo and the recorder run on
+`192.168.123.164`, while dex-teleop and GR00T deploy run on `192.168.123.222`.
+It therefore subscribes to GR00T policy commands at `192.168.123.222:8559`
+and expert targets at `192.168.123.222:8560`. The recorder remains local to
+RoboJuDo on loopback ports 8561 and 8562. After dex-teleop starts, wait for
+Quest hand tracking and press Enter manually to start publishing expert frames.
 
 RoboJuDo will not enable the GR00T upper-body takeover until dex-teleop has echoed fresh feedback from the current
 observation stream. A bare held `Select` starts VR intervention; releasing it returns to policy targets. The

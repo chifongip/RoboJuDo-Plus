@@ -37,7 +37,7 @@ class RealSenseCameraSource(ThreadedCameraSource):
 
     def _capture(self):
         try:
-            frames = self._pipeline.wait_for_frames(timeout_ms=1000)
+            frames = self._pipeline.wait_for_frames(timeout_ms=5000)
         except RuntimeError as exc:
             if "Frame didn't arrive within" not in str(exc):
                 raise

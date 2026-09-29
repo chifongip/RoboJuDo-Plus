@@ -53,7 +53,7 @@ class g1_23_casia_locomanipulation_stiff_real(g1_23_locomanipulation_stiff_real)
     env: G1_23RealEnvCfg = G1_23RealEnvCfg(
         dof=G1Locomanipulation23ObsDoF.from_preset("stiff"),
         unitree=G1UnitreeCfg(
-            net_if="eth1",
+            net_if="eth0",
             command_timeout=0.1,
             state_timeout=0.1,
             shutdown_damping=5.0,
@@ -98,6 +98,10 @@ def _g1_gr00t_locomanipulation_real_ctrl(
         ),
         Gr00tZmqCtrlCfg(
             joint_names=joint_names,
+            # GR00T deployment endpoint
+            endpoint=(
+                "tcp://192.168.123.222:8559"
+            ),
             # RL_DEFAULT fallback only; B/DAMPING_DEFAULT remains pure damping.
             upper_body_default_pose=G1_23_UPPER_BODY_DEFAULT_POSE,
             casia_hand=CasiaHandCfg(),
@@ -107,7 +111,11 @@ def _g1_gr00t_locomanipulation_real_ctrl(
             # Offline DAgger is opt-in: dex-teleop expert frames arrive on
             # 8560 while measured robot/camera feedback is published on 8561.
             offline_dagger_enabled=offline_dagger,
-            expert_endpoint="tcp://127.0.0.1:8560",
+            # Offline DAgger: dex-teleop publishes expert arm/hand targets from
+            # the same remote workstation as GR00T deploy.
+            expert_endpoint=(
+                "tcp://192.168.123.222:8560"
+            ),
             intervention_button="Select",
             cameras=[
                 Gr00tCameraCfg(
@@ -192,7 +200,7 @@ class g1_23_gr00t_locomanipulation_stiff_real(g1_23_locomanipulation_stiff_real)
     env: G1_23RealEnvCfg = G1_23RealEnvCfg(
             dof=G1Locomanipulation23ObsDoF.from_preset("stiff"),
             unitree=G1UnitreeCfg(
-                net_if="eth1",
+                net_if="eth0",
                 command_timeout=0.1,
                 state_timeout=0.1,
                 shutdown_damping=5.0,
