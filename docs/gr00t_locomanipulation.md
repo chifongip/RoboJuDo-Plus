@@ -198,7 +198,8 @@ The dedicated configuration keeps normal GR00T deployment unchanged and enables 
 
 ```text
 GR00T policy commands       :8559 -> RoboJuDo
-RoboJuDo measured feedback :8561 -> GR00T deploy, dex-teleop, recorder
+recorder RealSense JPEGs    :8571-8573 -> RoboJuDo GR00T observation worker
+RoboJuDo measured feedback :8561 -> GR00T deploy, dex-teleop
 dex-teleop expert targets  :8560 -> RoboJuDo
 RoboJuDo recording samples :8562 -> recorder
 ```
@@ -206,7 +207,7 @@ RoboJuDo recording samples :8562 -> recorder
 Start the recorder and dex-teleop in separate terminals, then run the dedicated RoboJuDo configuration:
 
 ```bash
-# Recorder: reuses the JPEGs already published on 8561.
+# Recorder: owns all three RealSense devices and forwards JPEGs on loopback.
 robojudo-recorder \
   --config packages/robojudo_recorder/recorder.g1_offline_dagger.yaml
 
@@ -223,11 +224,19 @@ python scripts/run_pipeline.py \
   --gr00t-task "pick up the the bag and put it into the tray"
 ```
 
+Start the recorder before RoboJuDo: it owns the three RealSense devices and
+publishes each camera independently on loopback ports 8571–8573, even when no
+episode is being recorded. The GR00T observation worker subscribes to these
+streams, synchronizes them, and keeps its existing 8561 feedback protocol.
+Raw recording writes each camera independently, so observation bundle drops do
+not remove frames from the dataset.
+
 The dedicated DAgger configuration assumes RoboJuDo and the recorder run on
 `192.168.123.164`, while dex-teleop and GR00T deploy run on `192.168.123.222`.
 It therefore subscribes to GR00T policy commands at `192.168.123.222:8559`
 and expert targets at `192.168.123.222:8560`. The recorder remains local to
-RoboJuDo on loopback ports 8561 and 8562. After dex-teleop starts, wait for
+RoboJuDo on loopback ports 8561 and 8562, with recorder camera feeds on
+8571–8573. After dex-teleop starts, wait for
 Quest hand tracking and press Enter manually to start publishing expert frames.
 
 RoboJuDo will not enable the GR00T upper-body takeover until dex-teleop has echoed fresh feedback from the current

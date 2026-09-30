@@ -14,14 +14,14 @@ from .cameras import CameraFrame, CameraSource, create_camera
 from .config import RecorderConfig
 from .profiles import NamedJointProfile
 from .protocol import ControlSample
-from .raw import RawEpisodeWriter
+from .raw import RawEpisodeWriter, encode_jpeg
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class _FrameWriteTask:
-    writer: RawEpisodeWriter
+    writer: RawEpisodeWriter | None
     camera_name: str
     frame: CameraFrame
 
@@ -29,14 +29,24 @@ class _FrameWriteTask:
 class _CameraWriterWorker:
     """Serialize one camera's JPEG encoding and writes outside the service loop."""
 
-    def __init__(self, camera_name: str, capacity: int):
+    def __init__(self, camera_name: str, capacity: int, *, publish_endpoint: str | None = None, jpeg_quality: int = 90):
         self.camera_name = camera_name
+        self.publish_endpoint = publish_endpoint
+        self.jpeg_quality = jpeg_quality
         self._tasks: queue.Queue[_FrameWriteTask | None] = queue.Queue(maxsize=capacity)
         self._completed: queue.SimpleQueue[tuple[_FrameWriteTask, Exception | None]] = queue.SimpleQueue()
+        self._ready = threading.Event()
+        self._startup_error: Exception | None = None
+        self.publisher_drops = 0
         self._thread = threading.Thread(target=self._run, name=f"camera-writer-{camera_name}", daemon=True)
         self._thread.start()
+        if publish_endpoint:
+            if not self._ready.wait(timeout=5):
+                raise RuntimeError(f"camera publisher did not start: {camera_name}")
+            if self._startup_error is not None:
+                raise RuntimeError(f"camera publisher could not bind: {camera_name}") from self._startup_error
 
-    def submit(self, writer: RawEpisodeWriter, frame: CameraFrame) -> bool:
+    def submit(self, writer: RawEpisodeWriter | None, frame: CameraFrame) -> bool:
         try:
             self._tasks.put_nowait(_FrameWriteTask(writer, self.camera_name, frame))
         except queue.Full:
@@ -44,19 +54,68 @@ class _CameraWriterWorker:
         return True
 
     def _run(self):
-        while True:
-            task = self._tasks.get()
-            try:
-                if task is None:
-                    return
-                error = None
+        publisher = None
+        try:
+            if self.publish_endpoint:
+                publisher = zmq.Context.instance().socket(zmq.PUB)
+                publisher.setsockopt(zmq.LINGER, 0)
+                publisher.setsockopt(zmq.SNDHWM, 2)
+                publisher.bind(self.publish_endpoint)
+            self._ready.set()
+            while True:
+                task = self._tasks.get()
                 try:
-                    task.writer.add_frame(task.camera_name, task.frame)
-                except Exception as exc:  # Propagate worker failures on the service thread.
-                    error = exc
-                self._completed.put((task, error))
-            finally:
-                self._tasks.task_done()
+                    if task is None:
+                        return
+                    error = None
+                    try:
+                        frame = task.frame
+                        if publisher is not None:
+                            payload = (
+                                frame.encoded_image
+                                if (frame.encoding or "").lower() in {"jpeg", "jpg"}
+                                else None
+                            )
+                            if payload is None:
+                                if frame.image is None:
+                                    raise ValueError("camera frame has no image to publish")
+                                payload = encode_jpeg(frame.image, self.jpeg_quality)
+                            frame = CameraFrame(
+                                image=None,
+                                timestamp_ns=frame.timestamp_ns,
+                                sequence=frame.sequence,
+                                encoded_image=payload,
+                                encoding="jpeg",
+                                source_timestamp_ns=frame.source_timestamp_ns,
+                                receive_timestamp_ns=frame.receive_timestamp_ns,
+                                image_shape=frame.shape,
+                            )
+                            header = {
+                                "sequence": frame.sequence,
+                                "timestamp_ns": frame.timestamp_ns,
+                                "source_timestamp_ns": frame.source_timestamp_ns,
+                                "shape": list(frame.shape),
+                                "encoding": "jpeg",
+                            }
+                            try:
+                                publisher.send_multipart(
+                                    [msgpack.packb(header, use_bin_type=True), payload], flags=zmq.NOBLOCK
+                                )
+                            except zmq.Again:
+                                self.publisher_drops += 1
+                        if task.writer is not None:
+                            task.writer.add_frame(task.camera_name, frame)
+                    except Exception as exc:  # Propagate worker failures on the service thread.
+                        error = exc
+                    self._completed.put((task, error))
+                finally:
+                    self._tasks.task_done()
+        except Exception as exc:
+            self._startup_error = exc
+            self._ready.set()
+        finally:
+            if publisher is not None:
+                publisher.close(linger=0)
 
     def drain_completed(self) -> list[tuple[_FrameWriteTask, Exception | None]]:
         completed = []
@@ -127,9 +186,20 @@ class RecorderService:
         self._throughput_last_sequences: dict[str, int | None] = {item.name: None for item in cfg.cameras}
         for camera in self.cameras:
             camera.set_pending_capacity(cfg.sync.pending_frame_capacity)
-        self._writer_workers = {
-            item.name: _CameraWriterWorker(item.name, cfg.sync.pending_frame_capacity) for item in cfg.cameras
-        }
+        self._writer_workers = {}
+        try:
+            for item in cfg.cameras:
+                self._writer_workers[item.name] = _CameraWriterWorker(
+                    item.name,
+                    cfg.sync.pending_frame_capacity,
+                    publish_endpoint=cfg.camera_publish_endpoints.get(item.name),
+                    jpeg_quality=cfg.dataset.jpeg_quality,
+                )
+        except Exception:
+            for worker in self._writer_workers.values():
+                worker.close()
+            self._socket.close(linger=0)
+            raise
         self._writer_workers_closed = False
         self.dropped_stale_frames = 0
 
@@ -166,8 +236,9 @@ class RecorderService:
         )
         self._active_task = task
         self._episode_frame_counts = {item.name: 0 for item in self.cfg.cameras}
-        for camera in self.cameras:
-            camera.clear_pending()
+        if not self.cfg.camera_publish_endpoints:
+            for camera in self.cameras:
+                camera.clear_pending()
         self._reset_throughput_metrics()
         logger.info("Episode %d raw capture armed: %s", episode_id, task)
 
@@ -250,6 +321,8 @@ class RecorderService:
         self._last_camera_sequences[camera_name] = frame.sequence
         timestamp_ns = frame.source_timestamp_ns if self.cfg.sync.clock == "source" else frame.receive_timestamp_ns
         if self._active_episode_started_at_ns is not None and timestamp_ns < self._active_episode_started_at_ns:
+            if camera_name in self.cfg.camera_publish_endpoints:
+                self._writer_workers[camera_name].submit(None, frame)
             return
         if not self._writer_workers[camera_name].submit(self._raw_writer, frame):
             self._throughput_writer_drops[camera_name] += 1
@@ -260,6 +333,8 @@ class RecorderService:
             for task, error in worker.drain_completed():
                 if error is not None:
                     raise RuntimeError(f"camera writer failed: {camera_name}") from error
+                if task.writer is None:
+                    continue
                 if task.writer is not self._raw_writer:
                     continue
                 self._episode_frame_counts[camera_name] += 1
@@ -373,7 +448,8 @@ class RecorderService:
     def step(self):
         self._receive_messages()
         self._drain_write_results()
-        if self._active_episode_id is None or self._review_episode_id is not None:
+        recording = self._active_episode_id is not None and self._review_episode_id is None
+        if not recording and not self.cfg.camera_publish_endpoints:
             return
         frame_batches = {
             item.name: camera.read_batch(self.cfg.sync.pending_frame_capacity)
@@ -383,12 +459,16 @@ class RecorderService:
         self._update_camera_status(latest_frames)
         for name, frames in frame_batches.items():
             for frame in frames:
-                self._observe_camera_throughput(name, frame)
-                self._record_frame(name, frame)
+                if recording:
+                    self._observe_camera_throughput(name, frame)
+                    self._record_frame(name, frame)
+                elif name in self.cfg.camera_publish_endpoints:
+                    self._writer_workers[name].submit(None, frame)
         if not any(frame_batches.values()):
             time.sleep(self.cfg.sync.poll_timeout_ms / 1000)
         self._drain_write_results()
-        self._log_throughput()
+        if recording:
+            self._log_throughput()
 
     def run(self):
         connected = []

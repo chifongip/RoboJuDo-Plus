@@ -79,6 +79,7 @@ class RecorderConfig:
     camera: CameraConfig | None = None
     sync: SyncConfig = SyncConfig()
     cameras: tuple[CameraConfig, ...] = ()
+    camera_publish_endpoints: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         # ``camera`` remains an alias for the first entry so existing Python callers keep working.
@@ -92,6 +93,16 @@ class RecorderConfig:
             raise ValueError("camera names must not be empty")
         if len(set(names)) != len(names):
             raise ValueError(f"camera names must be unique: {names}")
+        unknown = set(self.camera_publish_endpoints) - set(names)
+        if unknown:
+            raise ValueError(f"camera publish endpoints reference unknown cameras: {sorted(unknown)}")
+        if len(set(self.camera_publish_endpoints.values())) != len(self.camera_publish_endpoints):
+            raise ValueError("camera publish endpoints must be unique")
+        if any(
+            not (endpoint.startswith("tcp://127.0.0.1:") or endpoint.startswith("inproc://"))
+            for endpoint in self.camera_publish_endpoints.values()
+        ):
+            raise ValueError("camera publish endpoints must bind to local TCP or inproc")
         object.__setattr__(self, "cameras", tuple(cameras))
         object.__setattr__(self, "camera", cameras[0])
 
@@ -127,4 +138,5 @@ def load_config(path: str | Path) -> RecorderConfig:
         dataset=dataset,
         cameras=cameras,
         sync=SyncConfig(**raw.get("sync", {})),
+        camera_publish_endpoints=raw.get("camera_publish_endpoints", {}),
     )

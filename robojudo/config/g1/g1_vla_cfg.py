@@ -72,6 +72,11 @@ def _g1_gr00t_locomanipulation_real_ctrl(
     *,
     offline_dagger: bool = False,
 ) -> list[UnitreeCtrlCfg | Gr00tZmqCtrlCfg]:
+    camera_specs = (
+        ("head_rgb", "ego_view", "242222070519", 8571),
+        ("left_wrist_rgb", "left_wrist_view", "130322272857", 8572),
+        ("right_wrist_rgb", "right_wrist_view", "130322273712", 8573),
+    )
     return [
         UnitreeCtrlCfg(
             combination_init_buttons=["L1", "R1"],
@@ -119,38 +124,17 @@ def _g1_gr00t_locomanipulation_real_ctrl(
             intervention_button="Select",
             cameras=[
                 Gr00tCameraCfg(
-                    type="realsense",
-                    name="head_rgb",
-                    image_key="ego_view",
-                    options={
-                        "serial_number": "242222070519",
-                        "width": 640,
-                        "height": 480,
-                        "fps": 30,
-                    },
-                ),
-                Gr00tCameraCfg(
-                    type="realsense",
-                    name="left_wrist_rgb",
-                    image_key="left_wrist_view",
-                    options={
-                        "serial_number": "130322272857",
-                        "width": 640,
-                        "height": 480,
-                        "fps": 30,
-                    },
-                ),
-                Gr00tCameraCfg(
-                    type="realsense",
-                    name="right_wrist_rgb",
-                    image_key="right_wrist_view",
-                    options={
-                        "serial_number": "130322273712",
-                        "width": 640,
-                        "height": 480,
-                        "fps": 30,
-                    },
-                ),
+                    type="zmq" if offline_dagger else "realsense",
+                    name=name,
+                    image_key=image_key,
+                    options=(
+                        # Both processes share the same host monotonic clock.
+                        {"endpoint": f"tcp://127.0.0.1:{port}", "encoding": "jpeg", "timestamp_mode": "source"}
+                        if offline_dagger
+                        else {"serial_number": serial, "width": 640, "height": 480, "fps": 30}
+                    ),
+                )
+                for name, image_key, serial, port in camera_specs
             ],
         ),
     ]

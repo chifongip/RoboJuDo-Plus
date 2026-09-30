@@ -268,6 +268,10 @@ recorder camera SUB:          tcp://127.0.0.1:8561
 作为 dataset state。dataset 的实测 joints 和最终执行 action 仍来自启用 `--record` 后的 8560 control
 sample，并按 timestamp 与 RGB 配对。没有 `--record` 和有效录制 episode 时，recorder 不会写入数据。
 
+Offline DAgger 使用不同的相机所有权：`recorder.g1_offline_dagger.yaml` 由 recorder
+直接打开三台 RealSense，分别写 raw，并在本机 8571–8573 持续发布 JPEG；RoboJuDo
+从这三个端口取得图像，再向 GR00T deploy 和 dex-teleop 发布同步观察流。必须先启动 recorder。
+
 ## 手柄录制控制
 
 开始录制前必须：

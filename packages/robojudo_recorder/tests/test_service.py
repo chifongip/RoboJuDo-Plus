@@ -5,6 +5,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -13,7 +14,8 @@ PACKAGE_SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(PACKAGE_SRC))
 
 from robojudo_recorder.cameras.base import CameraFrame, CameraSource  # noqa: E402
-from robojudo_recorder.config import CameraConfig, DatasetConfig, RecorderConfig, SyncConfig  # noqa: E402
+from robojudo_recorder.cameras.zmq_camera import ZmqCameraSource  # noqa: E402
+from robojudo_recorder.config import CameraConfig, DatasetConfig, RecorderConfig, SyncConfig, load_config  # noqa: E402
 from robojudo_recorder.finalize import RawDatasetFinalizer  # noqa: E402
 from robojudo_recorder.service import RecorderService  # noqa: E402
 
@@ -54,6 +56,19 @@ class MissingCamera(FakeCamera):
 
 
 class TestRecorderService(unittest.TestCase):
+    def test_offline_dagger_config_owns_realsense_and_publishes_each_camera(self):
+        config_path = PACKAGE_SRC.parent / "recorder.g1_offline_dagger.yaml"
+        cfg = load_config(config_path)
+        self.assertEqual([camera.type for camera in cfg.cameras], ["realsense"] * 3)
+        self.assertEqual(
+            cfg.camera_publish_endpoints,
+            {
+                "head_rgb": "tcp://127.0.0.1:8571",
+                "left_wrist_rgb": "tcp://127.0.0.1:8572",
+                "right_wrist_rgb": "tcp://127.0.0.1:8573",
+            },
+        )
+
     @staticmethod
     def _sample_message(timestamp_ns, positions=(0.0, 0.0), commands=(1.0, 1.0)):
         return {
@@ -215,6 +230,92 @@ class TestRecorderService(unittest.TestCase):
             self.assertEqual(manifest["frame_counts"], {"head_rgb": 1, "wrist_rgb": 1})
             self.assertTrue((episode / "cameras/head_rgb/frame_000000.jpg").exists())
             self.assertTrue((episode / "cameras/wrist_rgb/frame_000000.jpg").exists())
+
+    def test_publishes_before_recording_and_reuses_jpeg_for_raw(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            endpoint = f"inproc://recorder-camera-{uuid.uuid4()}"
+            base_cfg = self._config(temporary_dir, clock="receive")
+            cfg = RecorderConfig(
+                control_endpoint=base_cfg.control_endpoint,
+                dataset=base_cfg.dataset,
+                cameras=base_cfg.cameras,
+                sync=base_cfg.sync,
+                camera_publish_endpoints={"head_rgb": endpoint},
+            )
+            service = RecorderService(cfg, camera=FakeCamera())
+            subscriber = ZmqCameraSource(
+                CameraConfig(type="zmq", name="head_rgb", options={"endpoint": endpoint, "timestamp_mode": "source"})
+            )
+            subscriber.connect()
+            try:
+                pre_record_frame = None
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and pre_record_frame is None:
+                    service.step()
+                    pre_record_frame = subscriber.read(timeout_ms=10)
+                self.assertIsNotNone(pre_record_frame)
+                self.assertFalse(cfg.dataset.raw_root.exists())
+
+                now = time.monotonic_ns()
+                service._handle_message(self._sample_message(now), now)
+                from robojudo_recorder.raw import encode_jpeg
+
+                with patch("robojudo_recorder.service.encode_jpeg", wraps=encode_jpeg) as encoder:
+                    service.step()
+                    service._writer_workers["head_rgb"].flush()
+                    self.assertEqual(encoder.call_count, 1)
+                active_sequence = service.camera.sequence
+                service._finish_episode(save=True)
+                recorded = next((cfg.dataset.raw_root / "episodes").iterdir())
+                self.assertEqual(len(list((recorded / "cameras/head_rgb").glob("frame_*.jpg"))), 1)
+                raw_jpeg = (recorded / "cameras/head_rgb/frame_000000.jpg").read_bytes()
+                published = None
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    candidate = subscriber.read(timeout_ms=10)
+                    if candidate is not None and candidate.sequence == active_sequence:
+                        published = candidate
+                        break
+                self.assertIsNotNone(published)
+                self.assertEqual(published.encoded_image, raw_jpeg)
+                manifest = json.loads((recorded / "manifest.json").read_text())
+                self.assertEqual(manifest["frame_counts"]["head_rgb"], 1)
+
+                while subscriber.read(timeout_ms=0) is not None:
+                    pass
+                service.step()
+                self.assertIsNotNone(subscriber.read(timeout_ms=100))
+            finally:
+                subscriber.close()
+                service.close()
+
+    def test_streaming_does_not_make_raw_cameras_wait_for_each_other(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            cameras = (
+                CameraConfig(type="fake", name="head_rgb"),
+                CameraConfig(type="fake", name="left_wrist_rgb"),
+            )
+            base_cfg = self._config(temporary_dir, cameras=cameras, clock="receive")
+            cfg = RecorderConfig(
+                control_endpoint=base_cfg.control_endpoint,
+                dataset=base_cfg.dataset,
+                cameras=cameras,
+                sync=base_cfg.sync,
+                camera_publish_endpoints={
+                    name: f"inproc://recorder-{name}-{uuid.uuid4()}" for name in ("head_rgb", "left_wrist_rgb")
+                },
+            )
+            service = RecorderService(cfg, cameras=(MissingCamera(), FakeCamera()))
+            try:
+                now = time.monotonic_ns()
+                service._handle_message(self._sample_message(now), now)
+                service.step()
+                service._finish_episode(save=True)
+                recorded = next((cfg.dataset.raw_root / "episodes").iterdir())
+                manifest = json.loads((recorded / "manifest.json").read_text())
+                self.assertEqual(manifest["frame_counts"], {"head_rgb": 0, "left_wrist_rgb": 1})
+            finally:
+                service.close()
 
     def test_does_not_spool_frames_from_before_episode_start(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

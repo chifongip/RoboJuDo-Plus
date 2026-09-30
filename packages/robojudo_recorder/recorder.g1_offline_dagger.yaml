@@ -15,27 +15,32 @@ dataset:
   # Offline DAgger keeps the complete rollout and writes per-frame labels.
   dagger_labels: true
 
-# Offline DAgger recorder reuses the already encoded GR00T observation PUB;
-# it must not open the three RealSense devices a second time.
+# The recorder owns the RealSense devices and forwards each camera independently
+# to GR00T over loopback. Raw recording does not wait for synchronized bundles.
 cameras:
-  - type: zmq
+  - type: realsense
     name: head_rgb
-    endpoint: tcp://127.0.0.1:8561
-    image_key: ego_view
-    encoding: auto
-    timestamp_mode: receive
-  - type: zmq
+    serial_number: "242222070519"
+    width: 640
+    height: 480
+    fps: 30
+  - type: realsense
     name: left_wrist_rgb
-    endpoint: tcp://127.0.0.1:8561
-    image_key: left_wrist_view
-    encoding: auto
-    timestamp_mode: receive
-  - type: zmq
+    serial_number: "130322272857"
+    width: 640
+    height: 480
+    fps: 30
+  - type: realsense
     name: right_wrist_rgb
-    endpoint: tcp://127.0.0.1:8561
-    image_key: right_wrist_view
-    encoding: auto
-    timestamp_mode: receive
+    serial_number: "130322273712"
+    width: 640
+    height: 480
+    fps: 30
+
+camera_publish_endpoints:
+  head_rgb: tcp://127.0.0.1:8571
+  left_wrist_rgb: tcp://127.0.0.1:8572
+  right_wrist_rgb: tcp://127.0.0.1:8573
 
 sync:
   clock: receive

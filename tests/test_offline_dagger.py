@@ -229,13 +229,19 @@ class TestOfflineDaggerController(unittest.TestCase):
         normal = g1_23_gr00t_locomanipulation_stiff_real()
         dagger = g1_23_gr00t_offline_dagger_stiff_real()
         self.assertFalse(normal.ctrl[-1].offline_dagger_enabled)
-        self.assertEqual(normal.ctrl[-1].endpoint, "tcp://127.0.0.1:8559")
-        self.assertEqual(normal.ctrl[-1].expert_endpoint, "tcp://127.0.0.1:8560")
+        self.assertEqual(normal.ctrl[-1].endpoint, "tcp://192.168.123.222:8559")
+        self.assertEqual(normal.ctrl[-1].expert_endpoint, "tcp://192.168.123.222:8560")
         self.assertTrue(dagger.ctrl[-1].offline_dagger_enabled)
         self.assertEqual(dagger.ctrl[-1].endpoint, "tcp://192.168.123.222:8559")
         self.assertEqual(dagger.ctrl[-1].expert_endpoint, "tcp://192.168.123.222:8560")
         self.assertEqual(dagger.record.endpoint, "tcp://*:8562")
         self.assertTrue(dagger.record.enabled)
+        self.assertEqual([camera.type for camera in normal.ctrl[-1].cameras], ["realsense"] * 3)
+        self.assertEqual([camera.type for camera in dagger.ctrl[-1].cameras], ["zmq"] * 3)
+        self.assertEqual(
+            [camera.options["endpoint"] for camera in dagger.ctrl[-1].cameras],
+            [f"tcp://127.0.0.1:{port}" for port in (8571, 8572, 8573)],
+        )
 
     def test_recording_keeps_full_rollout_with_expert_source_label(self):
         pipeline = Gr00tLocomanipulationPipelineMixin.__new__(

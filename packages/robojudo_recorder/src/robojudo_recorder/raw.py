@@ -19,7 +19,7 @@ def _append_json_line(handle, value: dict):
     handle.flush()
 
 
-def _encode_jpeg(image: np.ndarray, quality: int) -> bytes:
+def encode_jpeg(image: np.ndarray, quality: int) -> bytes:
     try:
         import cv2
     except ImportError as exc:
@@ -142,7 +142,7 @@ class RawEpisodeWriter:
             extension = extensions[encoding]
             encoding = "jpeg" if encoding == "jpg" else encoding
         elif frame.image is not None:
-            payload = _encode_jpeg(frame.image, self.jpeg_quality)
+            payload = encode_jpeg(frame.image, self.jpeg_quality)
             encoding = "jpeg"
             extension = "jpg"
         else:
