@@ -1,11 +1,43 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from box import Box
 
 
 class TestX2Locomanipulation(unittest.TestCase):
+    def test_status_throttling_preserves_commands_and_can_be_disabled(self):
+        from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import X2LocomanipulationPolicyCfg
+        from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
+
+        displayed = X2LocomanipulationPolicy(X2LocomanipulationPolicyCfg(), "cpu")
+        silent = X2LocomanipulationPolicy(X2LocomanipulationPolicyCfg(command_status_interval_s=0.0), "cpu")
+        commands = Box({"KeyboardCtrl": {"keyboard_event": [], "pressed_keys": ["w", "u"]}})
+        # Every step still updates commands, even when terminal output is suppressed.
+        with (
+            patch("robojudo.policy.locomanipulation_policy.time.monotonic") as clock,
+            patch("builtins.print") as output,
+        ):
+            for now in (10.0, 10.02, 10.04, 10.21):
+                clock.return_value = now
+                np.testing.assert_array_equal(displayed._get_commands(commands), silent._get_commands(commands))
+            self.assertEqual(output.call_count, 2)
+            displayed.reset()
+            clock.return_value = 10.22
+            displayed._get_commands(commands)
+            self.assertEqual(output.call_count, 3)
+            self.assertTrue(output.call_args.kwargs["flush"])
+
+    def test_status_interval_rejects_invalid_values(self):
+        from robojudo.config.g1.policy.g1_locomanipulation_policy_cfg import G1Locomanipulation23PolicyCfg
+        from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import X2LocomanipulationPolicyCfg
+
+        for cfg_type in (X2LocomanipulationPolicyCfg, G1Locomanipulation23PolicyCfg):
+            for value in (-0.1, float("nan"), float("inf")):
+                with self.subTest(config=cfg_type.__name__, value=value), self.assertRaises(ValueError):
+                    cfg_type(command_status_interval_s=value)
+
     def test_configs_use_recorded_training_parameters(self):
         from robojudo.config.x2 import x2_locomanipulation, x2_locomanipulation_real
         from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import (
@@ -193,10 +225,7 @@ class TestX2Locomanipulation(unittest.TestCase):
         from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
 
         policy = X2LocomanipulationPolicy(X2LocomanipulationPolicyCfg(), "cpu")
-        pressed = [
-            {"type": "keyboard", "name": name, "pressed": True}
-            for name in ("w", "a", "q", "r", "z")
-        ]
+        pressed = [{"type": "keyboard", "name": name, "pressed": True} for name in ("w", "a", "q", "r", "z")]
         commands = policy._get_commands(Box({"KeyboardCtrl": {"keyboard_event": pressed}}))
 
         np.testing.assert_allclose(commands[:3], [1.0, 0.5, 1.0])
@@ -204,10 +233,7 @@ class TestX2Locomanipulation(unittest.TestCase):
         self.assertGreater(commands[4], 0.0)
 
         reset = [
-            *[
-                {"type": "keyboard", "name": name, "pressed": False}
-                for name in ("w", "a", "q", "r", "z")
-            ],
+            *[{"type": "keyboard", "name": name, "pressed": False} for name in ("w", "a", "q", "r", "z")],
             {"type": "keyboard", "name": "x", "pressed": True},
         ]
         policy._get_commands(Box({"KeyboardCtrl": {"keyboard_event": reset}}))
@@ -227,6 +253,7 @@ class TestX2Locomanipulation(unittest.TestCase):
         self.assertEqual({value.name: value.shape for value in policy.session.get_outputs()}, {"actions": [1, 15]})
         self.assertEqual(action.shape, (15,))
         self.assertTrue(np.isfinite(action).all())
+
 
 if __name__ == "__main__":
     unittest.main()

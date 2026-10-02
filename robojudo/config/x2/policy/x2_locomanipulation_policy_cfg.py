@@ -1,9 +1,10 @@
+from pydantic import Field
+
 from robojudo.config import ASSETS_DIR
 from robojudo.policy.policy_cfgs import PolicyCfg
 from robojudo.tools.tool_cfgs import DoFConfig
 
 from ..env.x2_env_cfg import X2_HEAD_JOINT_NAMES, X2_POSITION_LIMITS_BY_NAME
-
 
 # Deployment constants captured in the training run's params/env.yaml. Keep the
 # full-precision YAML values here; the ONNX metadata rounds several entries.
@@ -223,6 +224,9 @@ class X2LocomanipulationPolicyCfg(PolicyCfg):
     policy_name: str = "policy"
     disable_autoload: bool = True
     freq: int = 50
+    # Terminal status only; command calculation and policy cadence are unaffected.
+    # Set to zero to disable, or 0.02 to retain the former 50 Hz display.
+    command_status_interval_s: float = Field(default=0.2, ge=0.0, allow_inf_nan=False)
 
     obs_dof: DoFConfig = X2LocomanipulationObsDoF()
     action_dof: DoFConfig = X2LocomanipulationActionDoF()

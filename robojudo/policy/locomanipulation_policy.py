@@ -1,4 +1,5 @@
 import logging
+import time
 from collections import deque
 from numbers import Real
 
@@ -46,6 +47,7 @@ class LocomanipulationPolicyBase(Policy):
         raise ValueError(f"Unknown device: {device}")
 
     def reset(self):
+        self._last_command_status_at = float("-inf")
         self.timestep = 0
         self.cmd = self._command_defaults.copy()
         self.last_action = np.zeros(self.num_actions, dtype=np.float32)
@@ -147,10 +149,7 @@ class LocomanipulationPolicyBase(Policy):
                 target_vel = clip_velocity(velocity, self.commands_map[:3])
         elif selected in JOYSTICK_SOURCE_TYPES:
             axes = ctrl_data[selected]["axes"]
-            lx, ly, rx = (
-                axis if abs(axis) >= 0.1 else 0.0
-                for axis in (axes["LeftX"], axes["LeftY"], axes["RightX"])
-            )
+            lx, ly, rx = (axis if abs(axis) >= 0.1 else 0.0 for axis in (axes["LeftX"], axes["LeftY"], axes["RightX"]))
             target_vel[0] = command_remap(ly, self.commands_map[0])
             target_vel[1] = command_remap(lx, self.commands_map[1])
             target_vel[2] = command_remap(rx, self.commands_map[2])
@@ -182,13 +181,23 @@ class LocomanipulationPolicyBase(Policy):
         commands[4] = self._smooth_command(self.cmd[4], self._target_waist_yaw)
         self.cmd[3:5] = commands[3:5]
 
+        self._print_command_status(commands)
+        return commands
+
+    def _print_command_status(self, commands):
+        interval = self.cfg_policy.command_status_interval_s
+        if interval == 0.0:
+            return
+        now = time.monotonic()
+        if now - self._last_command_status_at < interval:
+            return
+        self._last_command_status_at = now
         print(
             f"\rvel=({commands[0]:+.1f}, {commands[1]:+.1f}, "
             f"{commands[2]:+.1f}) h={commands[3]:.3f} wy={commands[4]:+.2f}",
             end="",
             flush=True,
         )
-        return commands
 
     @staticmethod
     def _clip_command(value: float, command_map: list[float]) -> float:
@@ -236,8 +245,7 @@ class LocomanipulationPolicyBase(Policy):
             term = obs_terms[key]
             if term.shape != (expected_dim,):
                 raise ValueError(
-                    f"{self._model_label} observation term {key} has shape {term.shape}, "
-                    f"expected {(expected_dim,)}"
+                    f"{self._model_label} observation term {key} has shape {term.shape}, expected {(expected_dim,)}"
                 )
             history = self.history_term_bufs[key]
             if not history:
@@ -248,9 +256,7 @@ class LocomanipulationPolicyBase(Policy):
 
         obs = np.concatenate(parts).astype(np.float32)
         if obs.shape != (self.cfg_policy.num_obs,):
-            raise ValueError(
-                f"{type(self).__name__} observation shape {obs.shape} != ({self.cfg_policy.num_obs},)"
-            )
+            raise ValueError(f"{type(self).__name__} observation shape {obs.shape} != ({self.cfg_policy.num_obs},)")
         if not np.isfinite(obs).all():
             raise FloatingPointError(f"{self._model_label} observation contains non-finite values")
         return obs, {"locomotion_command": commands.copy()}
@@ -259,14 +265,11 @@ class LocomanipulationPolicyBase(Policy):
         model_obs = np.asarray(obs, dtype=np.float32).reshape(1, -1)
         if model_obs.shape != (1, self.cfg_policy.num_obs):
             raise ValueError(
-                f"{self._model_label} ONNX observation shape {model_obs.shape} "
-                f"!= (1, {self.cfg_policy.num_obs})"
+                f"{self._model_label} ONNX observation shape {model_obs.shape} != (1, {self.cfg_policy.num_obs})"
             )
         raw_action = self.session.run(["actions"], {"obs": model_obs})[0].reshape(-1).astype(np.float32)
         if raw_action.shape != (self.num_actions,):
-            raise ValueError(
-                f"{self._model_label} action shape {raw_action.shape} != ({self.num_actions},)"
-            )
+            raise ValueError(f"{self._model_label} action shape {raw_action.shape} != ({self.num_actions},)")
         if not np.isfinite(raw_action).all():
             raise FloatingPointError(f"{self._model_label} policy produced a non-finite action")
         if self.action_clip is not None:
@@ -288,9 +291,7 @@ class LocomanipulationPolicyBase(Policy):
             raise ValueError(f"{self._model_label} ONNX joint_names do not match the policy configuration")
         observation_names = metadata.get("observation_names", "").split(",")
         if observation_names != list(self.cfg_policy.history_obs_dims):
-            raise ValueError(
-                f"{self._model_label} ONNX observation_names do not match the policy configuration"
-            )
+            raise ValueError(f"{self._model_label} ONNX observation_names do not match the policy configuration")
         command_names = metadata.get("command_names", "").split(",")
         if command_names != ["twist", "base_height", "waist_yaw"]:
             raise ValueError(f"Unexpected {self._model_label} command metadata: {command_names}")
@@ -304,9 +305,5 @@ class LocomanipulationPolicyBase(Policy):
         actual = np.asarray([float(value) for value in metadata.get(key, "").split(",")], dtype=np.float64)
         expected_array = np.asarray(expected, dtype=np.float64)
         tolerance = 5e-4 + np.finfo(np.float64).eps
-        if actual.shape != expected_array.shape or not np.allclose(
-            actual, expected_array, rtol=0.0, atol=tolerance
-        ):
-            raise ValueError(
-                f"{self._model_label} ONNX {key} metadata does not match the policy configuration"
-            )
+        if actual.shape != expected_array.shape or not np.allclose(actual, expected_array, rtol=0.0, atol=tolerance):
+            raise ValueError(f"{self._model_label} ONNX {key} metadata does not match the policy configuration")

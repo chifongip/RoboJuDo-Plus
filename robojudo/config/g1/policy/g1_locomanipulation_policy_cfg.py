@@ -1,6 +1,6 @@
 from typing import ClassVar, Literal, TypeVar
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from robojudo.config import ASSETS_DIR
 from robojudo.policy.policy_cfgs import PolicyCfg
@@ -120,9 +120,7 @@ class G1Locomanipulation23ObsDoF(DoFConfig):
     torque_limits: list[float] | None = G1_LOCOMANIPULATION_23_TORQUE_LIMITS
     position_limits: list[list[float]] | None = [_G1_POSITION_LIMITS[name] for name in joint_names]
 
-    PD_GAIN_PRESETS: ClassVar[dict[str, tuple[list[float], list[float]]]] = (
-        G1_LOCOMANIPULATION_PD_GAIN_PRESETS_23
-    )
+    PD_GAIN_PRESETS: ClassVar[dict[str, tuple[list[float], list[float]]]] = G1_LOCOMANIPULATION_PD_GAIN_PRESETS_23
 
     @classmethod
     def from_preset(cls, preset: str) -> "G1Locomanipulation23ObsDoF":
@@ -138,9 +136,7 @@ class G1Locomanipulation29ObsDoF(DoFConfig):
     torque_limits: list[float] | None = G1_LOCOMANIPULATION_29_TORQUE_LIMITS
     position_limits: list[list[float]] | None = [_G1_POSITION_LIMITS[name] for name in joint_names]
 
-    PD_GAIN_PRESETS: ClassVar[dict[str, tuple[list[float], list[float]]]] = (
-        G1_LOCOMANIPULATION_PD_GAIN_PRESETS_29
-    )
+    PD_GAIN_PRESETS: ClassVar[dict[str, tuple[list[float], list[float]]]] = G1_LOCOMANIPULATION_PD_GAIN_PRESETS_29
 
     @classmethod
     def from_preset(cls, preset: str) -> "G1Locomanipulation29ObsDoF":
@@ -165,6 +161,8 @@ class G1LocomanipulationPolicyCfg(PolicyCfg):
     pd_gain_preset: str
     disable_autoload: bool = True
     freq: int = 50
+    # Preserve G1's existing display rate; zero disables terminal status.
+    command_status_interval_s: float = Field(default=0.02, ge=0.0, allow_inf_nan=False)
 
     action_scale: float = 1.0
     action_clip: float | None = 100.0

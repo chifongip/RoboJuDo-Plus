@@ -15,6 +15,19 @@ The `x2`, `x2_real`, and locomanipulation presets use `X2LocomanipulationPipelin
 modes. The `x2_locomimic` presets use `X2LocomanipulationLocoMimicPipeline`, which adds locomotion/mimic policy
 interpolation to the same mode state machine.
 
+## Deployment CPU Overhead
+
+The locomanipulation command display updates at 5 Hz by default, independently of
+the 50 Hz policy and 500 Hz AimDK publication rates. Set the policy's
+`command_status_interval_s` to `0.0` to disable the display or `0.02` to restore the
+former display rate. For `x2_locomimic_real`, this setting belongs to `loco_policy`.
+Command message buffers and state telemetry storage are reused by the native
+backend; rebuild `packages/aimdk_cpp` after updating it to use these optimizations.
+Joint selection, validation, freshness deadlines, and watchdog behavior remain
+unchanged. Native regression test instructions are in
+[`packages/aimdk_cpp/README.md`](../packages/aimdk_cpp/README.md#development-checks);
+unset `FASTRTPS_DEFAULT_PROFILES_FILE` before running ROS-related tests.
+
 ## Prerequisites
 
 Initialize and build the pinned AimDK SDK, then install the ROS 2 extension with the managed installer:
