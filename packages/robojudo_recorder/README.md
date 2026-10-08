@@ -510,6 +510,25 @@ finalize 输出符合 LeRobot v3 的主要结构：
 `finalize_report.json` 记录 raw FPS、source sequence gaps、writer queue drops、target slots、camera/control drop、
 重复/未使用图像帧、相机时间差和 control age。已经成功 finalize 且输出 parquet 仍存在的 episode 会被幂等跳过。
 
+需要并行加速时，可按 episode 使用多个进程：
+
+```bash
+taskset -c 0-7,10-31 robojudo-finalize \
+  --config packages/robojudo_recorder/recorder.g1_pickup.yaml \
+  --workers 4
+```
+
+`--workers` 默认为 `1`，保持串行行为。并行模式下，各 worker 在数据集父目录的独立临时目录中执行
+时间对齐、图像解码和视频编码，主进程按 raw 目录名称排序依次合并，重新分配 episode、全局帧和 task 索引，
+更新统计和 metadata；视频直接移动，不重复编码。临时结果最多保留 `workers` 个 episode，需要额外磁盘空间。
+只有成功合并后才写入原始 episode 的 `finalize_report.json`，已完成的 episode 仍会跳过。
+worker 失败时命令报错，已合并结果保留，未合并结果不写报告；修复输入后可重新运行。
+
+并行模式默认每路视频编码器使用 `1` 个线程，避免多进程叠加 FFmpeg 自动线程数。可通过
+`--encoder-threads 2` 调整，`0` 表示 FFmpeg 自动分配；串行模式默认使用自动线程数。
+建议先比较 `--workers 2` 和 `--workers 4` 的实际耗时，磁盘读取速度可能限制加速效果。
+不要同时运行多个 finalize 命令写同一数据集目录。删除 raw episode 仍不会自动删除已生成的数据。
+
 ### 继续已有 dataset
 
 ```yaml

@@ -95,7 +95,7 @@ class _VectorStats:
 
 
 class _EpisodeVideoWriter:
-    def __init__(self, path: Path, fps: int, shape: tuple[int, int, int], codec: str):
+    def __init__(self, path: Path, fps: int, shape: tuple[int, int, int], codec: str, threads: int = 0):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         height, width, channels = shape
@@ -110,6 +110,7 @@ class _EpisodeVideoWriter:
         self.stream.width = width
         self.stream.height = height
         self.stream.pix_fmt = "yuv420p"
+        self.stream.codec_context.thread_count = threads
         self.frame_count = 0
 
     def add(self, image: np.ndarray):
@@ -145,6 +146,7 @@ class LeRobotV3Writer:
         codec: str = "libx264",
         resume: bool = False,
         dagger_features: bool = False,
+        encoder_threads: int = 0,
     ):
         self.root = Path(root)
         has_existing_data = self.root.exists() and any(self.root.iterdir())
@@ -169,6 +171,7 @@ class LeRobotV3Writer:
         self.camera_shapes = {name: tuple(shape) for name, shape in camera_shapes.items()}
         self.camera_keys = {name: f"observation.images.{name}" for name in self.camera_shapes}
         self.codec = codec
+        self.encoder_threads = encoder_threads
         self.dagger_features = dagger_features
         self._episode_index = 0
         self._total_frames = 0
@@ -308,7 +311,7 @@ class LeRobotV3Writer:
                     / f"chunk-{chunk_index:03d}"
                     / f"file-{file_index:03d}.mp4"
                 )
-                self._videos[name] = _EpisodeVideoWriter(video_path, self.fps, shape, self.codec)
+                self._videos[name] = _EpisodeVideoWriter(video_path, self.fps, shape, self.codec, self.encoder_threads)
         except Exception:
             self.discard_episode()
             raise
@@ -415,18 +418,12 @@ class LeRobotV3Writer:
                     "expert_intervention": pa.array(
                         [frame["expert_intervention"] for frame in dagger_frames], type=pa.bool_()
                     ),
-                    "expert_applied": pa.array(
-                        [frame["expert_applied"] for frame in dagger_frames], type=pa.bool_()
-                    ),
-                    "action_source": pa.array(
-                        [frame["action_source"] for frame in dagger_frames], type=pa.string()
-                    ),
+                    "expert_applied": pa.array([frame["expert_applied"] for frame in dagger_frames], type=pa.bool_()),
+                    "action_source": pa.array([frame["action_source"] for frame in dagger_frames], type=pa.string()),
                     "intervention_session": pa.array(
                         [frame["intervention_session"] for frame in dagger_frames], type=pa.int64()
                     ),
-                    "expert_frame_id": pa.array(
-                        [frame["expert_frame_id"] for frame in dagger_frames], type=pa.int64()
-                    ),
+                    "expert_frame_id": pa.array([frame["expert_frame_id"] for frame in dagger_frames], type=pa.int64()),
                 }
             )
         table = pa.table(columns)
@@ -509,6 +506,75 @@ class LeRobotV3Writer:
         self._episode_index += 1
         self._write_info()
         self._clear_buffer()
+
+    def append_preencoded_episode(self, source_root: Path):
+        """Consume a single-episode staging dataset without re-encoding its videos.
+
+        Only the parent finalizer calls this method. Workers never write shared
+        metadata, and frame/task indices are assigned at append time.
+        """
+        if self.episode_open or self.has_pending_frames:
+            raise RuntimeError("cannot append while an episode is open")
+        info = json.loads((source_root / "meta/info.json").read_text())
+        if (
+            info["total_episodes"] != 1
+            or info["features"] != self._features()
+            or info["robot_type"] != self.robot_type
+            or info["fps"] != self.fps
+        ):
+            raise ValueError("staged episode schema differs from the destination dataset")
+        table = pq.read_table(source_root / "data/chunk-000/file-000.parquet")
+        length = table.num_rows
+        if not length or length != info["total_frames"]:
+            raise ValueError("staged episode has an invalid frame count")
+        rows = pd.read_parquet(source_root / "meta/episodes/chunk-000/file-000.parquet")
+        if len(rows) != 1:
+            raise ValueError("staging dataset must contain exactly one episode")
+        row = rows.to_dict("records")[0]
+        task = row["tasks"][0]
+        task_index = self._tasks.index(task) if task in self._tasks else len(self._tasks)
+        for name, values in {
+            "episode_index": np.full(length, self._episode_index, dtype=np.int64),
+            "index": np.arange(self._total_frames, self._total_frames + length, dtype=np.int64),
+            "task_index": np.full(length, task_index, dtype=np.int64),
+        }.items():
+            table = table.set_column(table.schema.get_field_index(name), name, pa.array(values))
+        states = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
+        actions = np.asarray(table["action"].to_pylist(), dtype=np.float32)
+        episode_stats = self._episode_stats(states, actions)
+        chunk_index, file_index = self._episode_location()
+        row.update(
+            {
+                "episode_index": self._episode_index,
+                "data/chunk_index": chunk_index,
+                "data/file_index": file_index,
+                "dataset_from_index": self._total_frames,
+                "dataset_to_index": self._total_frames + length,
+            }
+        )
+        for camera_key in self.camera_keys.values():
+            source = source_root / "videos" / camera_key / "chunk-000/file-000.mp4"
+            if not source.is_file():
+                raise ValueError(f"staged episode video is missing: {source}")
+        for camera_key in self.camera_keys.values():
+            source = source_root / "videos" / camera_key / "chunk-000/file-000.mp4"
+            destination = self.root / "videos" / camera_key / f"chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+            row[f"videos/{camera_key}/chunk_index"] = chunk_index
+            row[f"videos/{camera_key}/file_index"] = file_index
+        path = self.root / "data" / f"chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, path, compression="snappy", use_dictionary=True)
+        if task not in self._tasks:
+            self._tasks.append(task)
+        self._episode_rows.append(row)
+        self._write_tasks()
+        self._write_episodes()
+        self._update_stats(episode_stats)
+        self._total_frames += length
+        self._episode_index += 1
+        self._write_info()
 
     def discard_episode(self):
         for video in self._videos.values():
