@@ -27,7 +27,9 @@ The verification commands below use this same CPU mask; adjust it for other host
 
 - The pipeline may start while the hands are unpowered or USB is absent. Hardware
   discovery, initialization and retries run in the CasiaHand worker, outside the
-  robot control loop.
+  robot control loop. Construction waits up to `startup_timeout_s` for the first
+  connection or failed attempt, allowing present hands to qualify before camera
+  startup. Missing hardware still falls back to background retries.
 - When dual-hand feedback is older than `joint_state_timeout_s` (default 0.25 s),
   GR00T actions become unavailable immediately. In X/RL mode, the arms return to
   `upper_body_default_pose` using the existing joint velocity limit. The pipeline
@@ -36,10 +38,11 @@ The verification commands below use this same CPU mask; adjust it for other host
   the worker closes the old SDK and serial port. Native worker failures trigger
   the same recovery. Failed attempts are retried after `reconnect_interval_s`
   (default 1 s); there is no retry limit.
-- Each attempt has a `startup_timeout_s` budget (default 5 s) for serial
-  initialization and qualification by three distinct recent dual-hand samples.
-  OS scheduling and serial cleanup can add time to that budget. One working hand
-  alone cannot qualify the connection.
+- Each attempt gives serial initialization and subsequent feedback qualification
+  separate `startup_timeout_s` budgets (default 5 s each). Three distinct recent
+  dual-hand samples qualify the connection. OS scheduling and serial cleanup can
+  add time to those budgets. One working hand alone cannot qualify the connection.
+  Startup timeouts report valid/rejected sample counts and the latest sample age.
 - On recovery, a new GR00T control session invalidates old arm, hand and locomotion
   actions. If X and Start takeover are still enabled, control resumes only after
   a command matching the new session arrives. Hands initially approach new targets
