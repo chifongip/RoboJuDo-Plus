@@ -113,6 +113,9 @@ def _g1_gr00t_locomanipulation_real_ctrl(
             ema_alpha=0.0,
             observation_enabled=True,
             observation_profile="g1_23dof",
+            # Three cameras now verify their first color frame and may reopen
+            # once during startup, before the robot control loop begins.
+            camera_startup_timeout_s=60.0,
             # Offline DAgger is opt-in: dex-teleop expert frames arrive on
             # 8560 while measured robot/camera feedback is published on 8561.
             offline_dagger_enabled=offline_dagger,

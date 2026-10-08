@@ -28,12 +28,36 @@ class RealSenseCameraSource(ThreadedCameraSource):
                 "from the RoboJuDo repository (required on Jetson), or install robojudo-recorder[realsense]."
             ) from exc
         self._rs = rs
-        self._pipeline = rs.pipeline()
-        config = rs.config()
-        if self.serial_number:
-            config.enable_device(self.serial_number)
-        config.enable_stream(rs.stream.color, self.width, self.height, rs.format.rgb8, self.fps)
-        self._pipeline.start(config)
+        for attempt in range(2):
+            self._pipeline = rs.pipeline()
+            config = rs.config()
+            if self.serial_number:
+                config.enable_device(self.serial_number)
+            config.enable_stream(rs.stream.color, self.width, self.height, rs.format.rgb8, self.fps)
+            self._pipeline.start(config)
+            try:
+                frames = self._pipeline.wait_for_frames(timeout_ms=5000)
+                if not frames.get_color_frame():
+                    raise RuntimeError("RealSense startup returned no color frame")
+            except RuntimeError as exc:
+                self._close()
+                if attempt or (
+                    "Frame didn't arrive within" not in str(exc)
+                    and "RealSense startup returned no color frame" not in str(exc)
+                ):
+                    raise RuntimeError(f"RealSense {self.serial_number or 'auto-selected'} failed startup") from exc
+                logger.warning(
+                    "RealSense startup received no color frame; reopening pipeline once: serial=%s",
+                    self.serial_number or "auto-selected",
+                )
+                continue
+            self._consecutive_timeouts = 0
+            logger.warning(
+                "RealSense startup color frame received: serial=%s attempt=%d",
+                self.serial_number or "auto-selected",
+                attempt + 1,
+            )
+            return
 
     def _capture(self):
         try:
