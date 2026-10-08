@@ -109,7 +109,7 @@ def _g1_gr00t_locomanipulation_real_ctrl(
             ),
             # RL_DEFAULT fallback only; B/DAMPING_DEFAULT remains pure damping.
             upper_body_default_pose=G1_23_UPPER_BODY_DEFAULT_POSE,
-            casia_hand=CasiaHandCfg(),
+            casia_hand=CasiaHandCfg(auto_reconnect=True),
             ema_alpha=0.0,
             observation_enabled=True,
             observation_profile="g1_23dof",

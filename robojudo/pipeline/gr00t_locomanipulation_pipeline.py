@@ -68,7 +68,7 @@ class Gr00tLocomanipulationPipelineMixin:
         takeover_enabled = bool(
             self.mode == ControlMode.RL_DEFAULT and self._upper_body_enabled and self._upper_body_control_available()
         )
-        stream["takeover_enabled"] = takeover_enabled
+        stream["takeover_enabled"] = takeover_enabled and stream.get("hand_connection_ready", True)
         session_changed = self._set_gr00t_takeover_state(takeover_enabled)
         if takeover_enabled and session_changed:
             # ctrl_data was read before this enable edge and belongs to the old session.

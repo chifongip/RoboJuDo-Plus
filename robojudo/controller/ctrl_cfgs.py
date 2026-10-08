@@ -228,6 +228,9 @@ class CasiaHandCfg(Config):
     joint_state_fps: float = Field(default=100.0, gt=0.0)
     joint_state_timeout_s: float = Field(default=0.25, gt=0.0)
     startup_timeout_s: float = Field(default=5.0, gt=0.0)
+    auto_reconnect: bool = False
+    reconnect_timeout_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    reconnect_interval_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_casia_hand(self):
@@ -235,6 +238,8 @@ class CasiaHandCfg(Config):
             raise ValueError("CASIA serial port_name must not be empty")
         if self.left_hand_id == self.right_hand_id:
             raise ValueError("CASIA left and right hand IDs must differ")
+        if self.reconnect_timeout_s < self.joint_state_timeout_s:
+            raise ValueError("CASIA reconnect timeout must not be shorter than joint state timeout")
         return self
 
 

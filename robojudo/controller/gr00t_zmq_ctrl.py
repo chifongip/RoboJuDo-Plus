@@ -183,6 +183,9 @@ class Gr00tZmqCtrl(ControllerHook):
         self._observation_snapshot: tuple[int, np.ndarray] | None = None
         self._observation_stream_id = uuid.uuid4().hex
         self._takeover_enabled = False
+        self._takeover_requested = False
+        self._hand_connection_ready = not (cfg_ctrl.casia_hand is not None and cfg_ctrl.casia_hand.auto_reconnect)
+        self._hand_connection_generation = None
         self._control_session = 0
         self._observation_stop = threading.Event()
         self._observation_ready = threading.Event()
@@ -225,6 +228,7 @@ class Gr00tZmqCtrl(ControllerHook):
         self._last_hand_command_at = None
         with self._observation_snapshot_lock:
             self._takeover_enabled = False
+            self._takeover_requested = False
             # Offline DAgger uses its own monotonically increasing intervention
             # session, independent of the GR00T policy control session.
             self._expert_intervention = False
@@ -284,24 +288,65 @@ class Gr00tZmqCtrl(ControllerHook):
         if self._observation_error is not None:
             raise RuntimeError("failed to start GR00T observation publisher") from self._observation_error
 
-    def set_takeover_enabled(self, enabled: bool, *, return_hand_to_default: bool = False) -> bool:
-        """Publish takeover state and advance the session on each enable edge."""
-        enabled = bool(enabled)
+    def _casia_auto_reconnect_enabled(self) -> bool:
+        cfg = getattr(getattr(self, "cfg_ctrl", None), "casia_hand", None)
+        return bool(cfg is not None and getattr(cfg, "auto_reconnect", False))
+
+    def _clear_takeover_commands(self):
+        self._latest_positions.clear()
+        self._latest_locomotion_command = None
+        self._latest_sequence = None
+        self._latest_command_stream_id = None
+        self._latest_command_session = None
+        self._last_received_at = None
+        self._latest_policy_hands = None
+        self._latest_expert_positions = {}
+        self._latest_expert_hands = None
+        self._expert_action_received_at = None
+        self._hand_command_filtered = None
+        self._last_hand_command_at = None
+
+    def _refresh_hand_connection(self, hand_data):
+        if not self._casia_auto_reconnect_enabled():
+            return
+        ready = bool(hand_data.get("connected", False) and hand_data.get("joint_state_fresh", False))
+        generation = hand_data.get("connection_generation")
+        previous_ready = getattr(self, "_hand_connection_ready", False)
+        previous_generation = getattr(self, "_hand_connection_generation", None)
+        if ready == previous_ready and generation == previous_generation:
+            return
+        # Every outage (including a brief stale-feedback edge) invalidates observations and actions.
         with self._observation_snapshot_lock:
-            changed = enabled != self._takeover_enabled
-            if enabled and not self._takeover_enabled:
+            self._observation_snapshot = None
+            if self.cfg_ctrl.offline_dagger_enabled:
+                self._expert_intervention = False
+                self._intervention_session += 1
+        self._expert_stream_ready = False
+        self._expert_last_received_at = None
+        self._clear_takeover_commands()
+        if generation != previous_generation and previous_ready:
+            # A reconnect can finish between two control ticks; still start a new session.
+            self._hand_connection_ready = False
+            self.set_takeover_enabled(getattr(self, "_takeover_requested", False))
+        self._hand_connection_ready = ready
+        self._hand_connection_generation = generation
+        self.set_takeover_enabled(getattr(self, "_takeover_requested", False))
+
+    def set_takeover_enabled(self, enabled: bool, *, return_hand_to_default: bool = False) -> bool:
+        """Preserve user intent while gating actions on current hardware feedback."""
+        self._takeover_requested = bool(enabled)
+        effective = bool(enabled and getattr(self, "_hand_connection_ready", True))
+        with self._observation_snapshot_lock:
+            changed = effective != self._takeover_enabled
+            if effective and not self._takeover_enabled:
                 self._control_session += 1
-            self._takeover_enabled = enabled
+            self._takeover_enabled = effective
         if changed:
-            self._latest_positions.clear()
-            self._latest_locomotion_command = None
-            self._latest_command_stream_id = None
-            self._latest_command_session = None
-            self._last_received_at = None
+            self._clear_takeover_commands()
         hand_runtime = getattr(self, "_hand_runtime", None)
-        if changed and hand_runtime is not None:
+        if hand_runtime is not None and (changed or return_hand_to_default):
             hand_runtime.set_takeover_enabled(
-                enabled,
+                effective,
                 return_to_default=bool(not enabled and return_hand_to_default),
             )
         return changed
@@ -964,6 +1009,10 @@ class Gr00tZmqCtrl(ControllerHook):
         self._last_hand_command_at = now
 
     def get_data(self):
+        hand_runtime = getattr(self, "_hand_runtime", None)
+        hand_data = None if hand_runtime is None else hand_runtime.get_data()
+        if hand_data is not None:
+            self._refresh_hand_connection(hand_data)
         now = time.monotonic()
         self._receive_available(now)
         # Offline DAgger expert input is drained in the same control-thread
@@ -987,9 +1036,7 @@ class Gr00tZmqCtrl(ControllerHook):
         # uses the same expert_applied bit to switch all four locomotion command
         # dimensions from GR00T to the local human joystick atomically.
         expert_age_s = (
-            None
-            if getattr(self, "_expert_action_received_at", None) is None
-            else now - self._expert_action_received_at
+            None if getattr(self, "_expert_action_received_at", None) is None else now - self._expert_action_received_at
         )
         expert_fresh = bool(
             self.cfg_ctrl.offline_dagger_enabled
@@ -1001,19 +1048,9 @@ class Gr00tZmqCtrl(ControllerHook):
             and bool(getattr(self, "_latest_expert_positions", {}))
         )
         expert_applied = expert_fresh
-        selected_positions = (
-            self._latest_expert_positions if expert_applied else self._latest_positions
-        )
-        selected_hands = (
-            self._latest_expert_hands
-            if expert_applied
-            else getattr(self, "_latest_policy_hands", None)
-        )
-        selected_frame_id = (
-            self._latest_expert_frame_id
-            if expert_applied
-            else self._latest_sequence
-        )
+        selected_positions = self._latest_expert_positions if expert_applied else self._latest_positions
+        selected_hands = self._latest_expert_hands if expert_applied else getattr(self, "_latest_policy_hands", None)
+        selected_frame_id = self._latest_expert_frame_id if expert_applied else self._latest_sequence
         fresh = expert_fresh if expert_applied else policy_fresh
         if self.cfg_ctrl.offline_dagger_enabled and fresh:
             self._apply_dagger_hand_targets(selected_hands, selected_frame_id, now)
@@ -1027,6 +1064,7 @@ class Gr00tZmqCtrl(ControllerHook):
             "sequence": selected_frame_id,
             "stream_id": self._observation_stream_id,
             "control_session": control_session,
+            "takeover_enabled": takeover_enabled,
             "has_received": has_received,
             "fresh": fresh,
             # Offline DAgger diagnostics are recorded separately so downstream
@@ -1044,20 +1082,16 @@ class Gr00tZmqCtrl(ControllerHook):
             "age_s": age_s,
             "observation_ready": bool(
                 not self.cfg_ctrl.observation_enabled
-                or (
-                    observation_ready is not None
-                    and observation_ready.is_set()
-                    and observation_error is None
-                )
+                or (observation_ready is not None and observation_ready.is_set() and observation_error is None)
             ),
             "observation_error": None if observation_error is None else str(observation_error),
             "published_observations": getattr(self, "_published_observations", 0),
             "dropped_observations": getattr(self, "_dropped_observations", 0),
             "camera_encoder_drops": getattr(self, "_camera_encoder_drops", {}).copy(),
         }
-        hand_runtime = getattr(self, "_hand_runtime", None)
-        if hand_runtime is not None:
-            result["casia_hand"] = hand_runtime.get_data()
+        if hand_data is not None:
+            result["casia_hand"] = hand_data
+        result["hand_connection_ready"] = getattr(self, "_hand_connection_ready", True)
         return result
 
     def get_data_with_hook(self, prior_ctrl_data: dict, env_data: dict):
@@ -1070,7 +1104,12 @@ class Gr00tZmqCtrl(ControllerHook):
             hand_runtime = getattr(self, "_hand_runtime", None)
             if hand_runtime is not None:
                 hand_data = hand_runtime.get_data()
+                self._refresh_hand_connection(hand_data)
                 if not hand_data.get("joint_state_fresh", False):
+                    with self._observation_snapshot_lock:
+                        self._observation_snapshot = None
+                    return self.get_data()
+                if self._casia_auto_reconnect_enabled() and not self._hand_connection_ready:
                     return self.get_data()
                 if tuple(hand_data.get("joint_names", ())) != self._hand_joint_names:
                     raise ValueError("CASIA hand joint names or order do not match the GR00T profile")
@@ -1078,8 +1117,7 @@ class Gr00tZmqCtrl(ControllerHook):
                 expected_shape = (len(self._hand_joint_names),)
                 if hand_positions.shape != expected_shape:
                     raise ValueError(
-                        f"CASIA hand joint positions have shape {hand_positions.shape}, "
-                        f"expected {expected_shape}"
+                        f"CASIA hand joint positions have shape {hand_positions.shape}, expected {expected_shape}"
                     )
                 joint_positions = np.concatenate((joint_positions, hand_positions))
             if not np.isfinite(joint_positions).all():
