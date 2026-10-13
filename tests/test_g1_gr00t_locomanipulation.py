@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from box import Box
@@ -34,11 +35,15 @@ class TestG1Gr00tLocomanipulation(unittest.TestCase):
                 self.assertTrue(cfg.ctrl[-1].observation_enabled)
                 self.assertEqual(cfg.ctrl[-1].observation_profile, "g1_23dof")
                 self.assertEqual(cfg.ctrl[-1].camera.type, "realsense")
-                expected_controls = ["UnitreeCtrl", "Gr00tZmqCtrl"] if is_real else [
-                    "JoystickCtrl",
-                    "KeyboardCtrl",
-                    "Gr00tZmqCtrl",
-                ]
+                expected_controls = (
+                    ["UnitreeCtrl", "Gr00tZmqCtrl"]
+                    if is_real
+                    else [
+                        "JoystickCtrl",
+                        "KeyboardCtrl",
+                        "Gr00tZmqCtrl",
+                    ]
+                )
                 self.assertEqual([controller.ctrl_type for controller in cfg.ctrl], expected_controls)
 
     def test_existing_23_dof_configs_keep_manual_command_path(self):
@@ -84,7 +89,10 @@ class TestG1Gr00tLocomanipulation(unittest.TestCase):
                     }
                 )
 
-                observation, extras = policy.get_observation(env_data, ctrl_data)
+                with patch("robojudo.policy.locomanipulation_policy.time.monotonic", return_value=10.0) as clock:
+                    policy.get_observation(env_data, ctrl_data)  # Establish the height clock.
+                    clock.return_value = 11.0
+                    observation, extras = policy.get_observation(env_data, ctrl_data)
                 action = policy.get_action(observation)
 
                 self.assertEqual(observation.shape, (360,))

@@ -47,9 +47,14 @@ class LocomanipulationPolicyBase(Policy):
         raise ValueError(f"Unknown device: {device}")
 
     def reset(self):
+        # Keep the emitted height continuous across policy reactivation/reset.
+        height = float(self.cmd[3])
+        self._height_command = height
         self._last_command_status_at = float("-inf")
+        self._last_height_command_at = None
         self.timestep = 0
         self.cmd = self._command_defaults.copy()
+        self.cmd[3] = height
         self.last_action = np.zeros(self.num_actions, dtype=np.float32)
         self.current_vel_cmd = np.zeros(3, dtype=np.float32)
         self._target_height = self.base_height_default
@@ -177,7 +182,7 @@ class LocomanipulationPolicyBase(Policy):
                 self.current_vel_cmd[index] = self._clip_command(target_vel[index], self.commands_map[index])
 
         commands[:3] = self.current_vel_cmd
-        commands[3] = self._smooth_command(self.cmd[3], self._target_height)
+        commands[3] = self._get_height_command()
         commands[4] = self._smooth_command(self.cmd[4], self._target_waist_yaw)
         self.cmd[3:5] = commands[3:5]
 
@@ -206,6 +211,21 @@ class LocomanipulationPolicyBase(Policy):
     def _smooth_command(self, current: float, target: float) -> float:
         value = self.cfg_policy.command_decay * current + (1.0 - self.cfg_policy.command_decay) * target
         return float(target if abs(value - target) < 0.001 else value)
+
+    def _get_height_command(self) -> float:
+        """Slew the policy height command in metres using elapsed monotonic time."""
+        now = time.monotonic()
+        previous = self._last_height_command_at
+        self._last_height_command_at = now
+        # Retain sub-float32 progress between updates; feeding back cmd[3]
+        # would round every step and can stall or bias small configured rates.
+        current = self._height_command
+        if previous is None:
+            return current
+        max_delta = self.cfg_policy.max_height_command_rate_m_s * max(0.0, now - previous)
+        target = self._clip_command(self._target_height, self.commands_map[3])
+        self._height_command = current + float(np.clip(target - current, -max_delta, max_delta))
+        return self._height_command
 
     def _reset_commands(self):
         self.current_vel_cmd[:] = 0.0

@@ -40,6 +40,8 @@ def policy_with_posture_controls():
     policy.cmd = np.asarray([0.0, 0.0, 0.0, 0.64, 0.0], dtype=np.float32)
     policy.current_vel_cmd = np.zeros(3, dtype=np.float32)
     policy._target_height = 0.64
+    policy._last_height_command_at = 0.0
+    policy._height_command = float(policy.cmd[3])
     policy._target_waist_yaw = 0.0
     policy._held_keys = set()
     policy.base_height_default = 0.64
@@ -48,11 +50,18 @@ def policy_with_posture_controls():
         standing_command_threshold=0.1,
         height_step=0.02,
         waist_yaw_step=0.1,
+        max_height_command_rate_m_s=0.10,
+        command_status_interval_s=0.0,
     )
     return policy
 
 
 class TestLocomanipulationPostureZmq(unittest.TestCase):
+    def setUp(self):
+        clock = patch("robojudo.policy.locomanipulation_policy.time.monotonic", return_value=10.0)
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
+
     @staticmethod
     def make_controller(messages=None):
         controller = LocomanipulationPostureZmqCtrl.__new__(LocomanipulationPostureZmqCtrl)
@@ -167,6 +176,7 @@ class TestLocomanipulationPostureZmq(unittest.TestCase):
                 "POSTURE_SOURCE": "KeyboardCtrl",
             }
         )
+        self.clock.return_value = 20.0
         resumed_commands = policy._get_commands(
             {
                 "LocomanipulationPostureZmqCtrl": posture_entry(height=0.3, waist_yaw=-1.0),

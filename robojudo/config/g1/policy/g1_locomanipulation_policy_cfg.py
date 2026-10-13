@@ -174,6 +174,8 @@ class G1LocomanipulationPolicyCfg(PolicyCfg):
     standing_command_threshold: float = 0.1
     command_decay: float = 0.95
     height_step: float = 0.02
+    # Commanded height slew rate in m/s; this does not bound physical body speed.
+    max_height_command_rate_m_s: float = Field(default=0.20, gt=0.0, allow_inf_nan=False)
     waist_yaw_step: float = 0.1
     commands_map: list[list[float]] = [
         [-0.5, 0.0, 1.0],

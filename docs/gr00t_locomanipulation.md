@@ -14,7 +14,16 @@ RoboJuDo keeps this autonomous path separate from the existing teleoperation con
 - `Gr00tZmqCtrl` publishes camera/joint observations and atomically receives arm/locomotion commands.
 - Robot-specific GR00T policy classes feed velocity and height into the existing lower-body ONNX policies.
 - A shared GR00T pipeline mixin applies one takeover gate to both command groups and rate-limits arm targets.
-- Existing `UpperBodyZmqCtrl` and standard X2/G1 Locomanipulation policy and pipeline behavior is unchanged.
+- Existing `UpperBodyZmqCtrl` and standard X2/G1 Locomanipulation command routing remain available.
+
+All G1 and X2 GR00T Locomanipulation policies inherit `max_height_command_rate_m_s=0.20` (metres per second).
+Set a finite, positive value on the policy configuration to tune it. Fresh GR00T height requests are clipped to the
+trained range and approached from the current emitted height using elapsed monotonic time, without overshoot.
+Manual commands and posture ZMQ share this limiter, so takeover and release preserve height-command continuity.
+Stale GR00T holds the emitted height, including after takeover is released, until a new height request arrives.
+Full policy resets preserve height and ramp toward the default after restarting timing. Velocity and waist-yaw
+behavior are unchanged. See [height-command configuration](policy.md#height-command-rate) for details.
+This limits commanded height rate, **not guaranteed physical body speed**; validate in simulation before hardware use.
 
 The X2 profile requires 14 arm joints. The G1 23-DoF profile requires 10 arm joints: five per arm, without the wrist
 yaw and wrist pitch joints that are absent from the logical 23-DoF layout.
