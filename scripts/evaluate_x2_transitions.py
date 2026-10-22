@@ -1,4 +1,4 @@
-"""Evaluate bounded torque-integral correction through pickup, walking and placement.
+"""Compare PD, retained integral and selected observer through pickup, walking and placement.
 
 Simulation only: no SDK changes, ROS nodes, hardware commands or sockets.
 """
@@ -31,7 +31,9 @@ from x2_integral_sim import (
     point_wrench,
     rows_in,
     synthetic_velocity,
+    torque_limit_metadata,
 )
+from x2_observer_reference import JOINT_NAMES, selected_observer_parameters
 
 from robojudo.config.x2.x2_cfg import x2_locomimic
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
@@ -39,6 +41,7 @@ from robojudo.environment import env_registry
 from robojudo.pipeline.four_mode_pipeline import ControlMode
 from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import X2LocomanipulationLocoMimicPipeline
 from robojudo.utils.bounded_integral import BoundedIntegralCorrection
+from robojudo.utils.disturbance_observer import BoundedDisturbanceObserver
 
 DURATION = 105.0
 
@@ -72,12 +75,28 @@ WINDOWS = {
 }
 
 
+def condition_parameters(condition):
+    """Use the frozen observer reference or the retained scalar integral settings."""
+    if condition == "observer":
+        if tuple(POSTURE) != JOINT_NAMES:
+            raise ValueError("Selected observer joint order differs from the benchmark")
+        return selected_observer_parameters()
+    if condition not in ("pd_only", "integral"):
+        raise ValueError("Unknown evaluation condition")
+    return {}
+
+
 def make_correction(env, parameters=None):
-    return BoundedIntegralCorrection(
+    parameters = dict(parameters or {})
+    method = parameters.pop("method", "integral")
+    if method not in ("integral", "observer"):
+        raise ValueError("Unknown correction method")
+    controller = BoundedDisturbanceObserver if method == "observer" else BoundedIntegralCorrection
+    return controller(
         env.stiffness[env.arm_indices],
         env.damping[env.arm_indices],
         env.torque_limits[env.arm_indices],
-        **(parameters or {}),
+        **parameters,
     )
 
 
@@ -205,13 +224,44 @@ def phase_statistics(rows):
         stats[phase] = {
             "samples": len(selected),
             "rms_tracking_error_rad": float(np.sqrt(np.mean(rms**2))),
+            "rms_desired_error_rad": float(
+                np.sqrt(
+                    np.mean(
+                        [
+                            (r[f"{name}_position_rad"] - r[f"{name}_desired_rad"]) ** 2
+                            for r in selected
+                            for name in POSTURE
+                        ]
+                    )
+                )
+            ),
             "peak_joint_error_rad": float(
                 max(abs(r[f"{name}_position_rad"] - r[f"{name}_target_rad"]) for r in selected for name in POSTURE)
             ),
             "joint_error_rad": {
                 name: {
+                    "rms": float(
+                        np.sqrt(
+                            np.mean(
+                                (column(selected, f"{name}_position_rad") - column(selected, f"{name}_target_rad")) ** 2
+                            )
+                        )
+                    ),
+                    "desired_rms": float(
+                        np.sqrt(
+                            np.mean(
+                                (column(selected, f"{name}_position_rad") - column(selected, f"{name}_desired_rad"))
+                                ** 2
+                            )
+                        )
+                    ),
                     "mean_abs": float(
                         np.mean(
+                            np.abs(column(selected, f"{name}_position_rad") - column(selected, f"{name}_target_rad"))
+                        )
+                    ),
+                    "max_abs": float(
+                        np.max(
                             np.abs(column(selected, f"{name}_position_rad") - column(selected, f"{name}_target_rad"))
                         )
                     ),
@@ -225,6 +275,22 @@ def phase_statistics(rows):
                 for name in POSTURE
             },
         }
+        stats[phase]["body"] = {
+            **{
+                f"{axis}_detrended_std_rad": detrended_std(column(selected, f"base_{axis}_rad"))
+                for axis in ("roll", "pitch")
+            },
+            "peak_tilt_rad": float(np.max(column(selected, "base_tilt_rad"))),
+            "min_height_m": float(np.min(column(selected, "base_height_m"))),
+            "mean_vx_m_s": float(np.mean(column(selected, "actual_vx_m_s"))),
+        }
+        stats[phase]["constraints"] = {
+            name: {
+                signal: float(np.mean(column(selected, f"{name}_{signal}")))
+                for signal in ("antiwindup", "at_bound", "at_slew_limit", "saturation_fraction")
+            }
+            for name in POSTURE
+        }
     return stats
 
 
@@ -236,7 +302,11 @@ def save_trace(path, rows):
             writer.writerows(rows)
 
 
-def run_trial(condition, profile, repetition, output, viewer=False, parameters=None):
+def run_trial(condition, profile, repetition, output, viewer=False, parameters=None, warmup_s=5.0):
+    if condition not in ("pd_only", "integral", "observer"):
+        raise ValueError("Unknown evaluation condition")
+    if (condition == "observer") != ((parameters or {}).get("method") == "observer"):
+        raise ValueError("Observer condition and parameters must agree")
     np.random.seed(repetition)
     pipeline = X2LocomanipulationLocoMimicPipeline(transition_config(viewer))
     for policy in pipeline.policy_manager.policies:
@@ -275,7 +345,7 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
             raise SimulationFailure("could not activate policy")
         env.elastic_band.active = False
         env.elastic_band.apply()
-        for _ in range(round(5 / pipeline.dt)):
+        for _ in range(round(warmup_s / pipeline.dt)):
             advance()
         # Reuse the actual deployment override, including EMA, snapping, clipping,
         # and max_joint_velocity_rad_s. No network controller is instantiated.
@@ -283,9 +353,9 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
         pipeline._configure_upper_body_override()
         pipeline._upper_body_filtered = env.last_target[env.arm_indices].astype(np.float32).copy()
         pipeline._set_upper_body_enabled(True)
-        env.integral_enabled = condition == "integral"
+        env.integral_enabled = condition != "pd_only"
         env.measurement_start = env.data.time
-        env.physics_steps = env.saturated_steps = 0
+        env.reset_measurements()
         for step in range(round(DURATION / pipeline.dt)):
             t = step * pipeline.dt
             env.reference_time = t
@@ -306,10 +376,12 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
     save_trace(path, rows)
     summary = {
         "condition": condition,
-        "correction": "bounded_integral",
+        "correction": "bounded_observer" if condition == "observer" else "bounded_integral",
         "correction_parameters": parameters or {},
         "profile": profile,
         "repetition": repetition,
+        "warmup_s": warmup_s,
+        "torque_limits": torque_limit_metadata(env),
         "status": "failed" if failure else "completed",
         "termination_reason": failure,
         "samples": len(rows),
@@ -317,6 +389,9 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
         "max_base_tilt_rad": env.max_base_tilt,
         "min_base_height_m": env.min_base_height,
         "saturated_physics_fraction": env.saturated_steps / max(env.physics_steps, 1),
+        "joint_saturated_physics_fraction": dict(
+            zip(env.joint_names, (env.joint_saturated_steps / max(env.physics_steps, 1)).tolist(), strict=True)
+        ),
         "max_effort_slew_nm_s": env.max_effort_slew,
         "max_effort_bound_excess_nm": env.max_effort_bound_excess,
         "phases": phase_statistics(rows),
@@ -350,7 +425,35 @@ def hand_difference(rows, reference, start, end, side):
     return float(np.mean(delta)), float(np.max(np.linalg.norm(displacement, axis=1)))
 
 
-def baseline_drift(rows):
+def recovery_measurement(rows, reference, pd_rows, pd_reference, side):
+    """Common measured PD envelope; late re-entry without 1 s remaining is censored."""
+    selected = rows_in(rows, 79, 89)
+    unloaded = rows_in(reference, 79, 89)
+    if not selected or len(selected) != len(unloaded):
+        raise ValueError("matched recovery samples are missing")
+    distance = np.linalg.norm(
+        np.stack(
+            [column(selected, f"{side}_torso_{axis}_m") - column(unloaded, f"{side}_torso_{axis}_m") for axis in "xyz"],
+            axis=1,
+        ),
+        axis=1,
+    )
+    envelope = hand_difference(pd_rows, pd_reference, 79, 89, side)[1]
+    remaining_inside = np.logical_and.accumulate((distance <= envelope)[::-1])[::-1]
+    times = column(selected, "elapsed_s")
+    candidates = np.flatnonzero(remaining_inside & (times <= times[-1] - 1.0 + 1e-9))
+    return {
+        "pd_envelope_m": envelope,
+        "recovery_time_s": float(times[candidates[0]] - 79) if len(candidates) else None,
+        "status": "recovered" if len(candidates) else "not_recovered_within_observation_window",
+        "observation_end_s": float(times[-1]),
+        "terminal_displacement_m": float(distance[-1]),
+        "full_recovery_peak_m": float(np.max(distance)),
+        "lowering_peak_m": hand_difference(rows, reference, 75, 79, side)[1],
+    }
+
+
+def baseline_drift(rows, method="integral"):
     """Report integral drift at matching held postures, without correcting the controller."""
     result = {}
     for phase, start, end in (
@@ -361,15 +464,17 @@ def baseline_drift(rows):
     ):
         selected = rows_in(rows, start, end)
         slopes = {
-            name: float(np.polyfit(column(selected, "elapsed_s"), column(selected, f"{name}_integral_nm"), 1)[0])
+            name: float(np.polyfit(column(selected, "elapsed_s"), column(selected, f"{name}_{method}_nm"), 1)[0])
             for name in POSTURE
         }
         result[phase] = {"effort_slope_nm_s": slopes}
     return result
 
 
-def comparisons(summaries, output):
+def comparisons(summaries, output, method="integral"):
     """Report matched measurements without angular or torque-recovery cutoffs."""
+    if method not in ("integral", "observer"):
+        raise ValueError("Unknown comparison method")
     index = {(s["condition"], s["profile"], s["repetition"]): s for s in summaries}
     results = []
     for repetition in sorted({s["repetition"] for s in summaries}):
@@ -378,9 +483,9 @@ def comparisons(summaries, output):
                 (condition, load, repetition)
                 for condition, load in (
                     ("pd_only", "unloaded"),
-                    ("integral", "unloaded"),
+                    (method, "unloaded"),
                     ("pd_only", profile),
-                    ("integral", profile),
+                    (method, profile),
                 )
             ]
             result = {"profile": profile, "repetition": repetition, "status": "unavailable"}
@@ -390,11 +495,21 @@ def comparisons(summaries, output):
                 continue
             pu, iu, pl, il = [read_trace(output, index[key]) for key in keys]
             result["status"] = "measured"
-            result["baseline_drift"] = {"unloaded_reference": baseline_drift(iu), "loaded": baseline_drift(il)}
+            result["baseline_drift"] = {
+                "unloaded_reference": baseline_drift(iu, method),
+                "loaded": baseline_drift(il, method),
+            }
             result["postplace_peak_diagnostic"] = {
                 side: {
                     "pd_peak_m": hand_difference(pl, pu, 79, 82, side)[1],
-                    "integral_peak_m": hand_difference(il, iu, 79, 82, side)[1],
+                    f"{method}_peak_m": hand_difference(il, iu, 79, 82, side)[1],
+                }
+                for side in SIDES
+            }
+            result["unloading"] = {
+                side: {
+                    "pd": recovery_measurement(pl, pu, pl, pu, side),
+                    method: recovery_measurement(il, iu, pl, pu, side),
                 }
                 for side in SIDES
             }
@@ -404,11 +519,11 @@ def comparisons(summaries, output):
                     continue
                 measured = {
                     "pd_rms_tracking_rad": index[keys[-2]]["phases"][phase]["rms_tracking_error_rad"],
-                    "integral_rms_tracking_rad": index[keys[-1]]["phases"][phase]["rms_tracking_error_rad"],
+                    f"{method}_rms_tracking_rad": index[keys[-1]]["phases"][phase]["rms_tracking_error_rad"],
                 }
                 for side in SIDES:
                     measured[f"{side}_pd_peak_m"] = hand_difference(pl, pu, start, end, side)[1]
-                    measured[f"{side}_integral_peak_m"] = hand_difference(il, iu, start, end, side)[1]
+                    measured[f"{side}_{method}_peak_m"] = hand_difference(il, iu, start, end, side)[1]
                 phases[phase] = measured
             result["transitions"] = phases
             support = {}
@@ -418,14 +533,16 @@ def comparisons(summaries, output):
                 measured = {}
                 for signal in ("arm_rms_error_rad", "base_tilt_rad"):
                     measured[f"pd_{signal}_detrended_std"] = detrended_std(column(pd_rows, signal))
-                    measured[f"integral_{signal}_detrended_std"] = detrended_std(column(integral_rows, signal))
+                    measured[f"{method}_{signal}_detrended_std"] = detrended_std(column(integral_rows, signal))
                 measured["pd_rms_rad"] = float(np.sqrt(np.mean(column(pd_rows, "arm_rms_error_rad") ** 2)))
-                measured["integral_rms_rad"] = float(np.sqrt(np.mean(column(integral_rows, "arm_rms_error_rad") ** 2)))
+                measured[f"{method}_rms_rad"] = float(np.sqrt(np.mean(column(integral_rows, "arm_rms_error_rad") ** 2)))
                 for side in SIDES:
                     old = hand_difference(pl, pu, start, end, side)[0]
                     new = hand_difference(il, iu, start, end, side)[0]
                     measured[f"{side}_pd_sag_m"] = old
-                    measured[f"{side}_integral_sag_m"] = new
+                    measured[f"{side}_{method}_sag_m"] = new
+                    measured[f"{side}_pd_peak_m"] = hand_difference(pl, pu, start, end, side)[1]
+                    measured[f"{side}_{method}_peak_m"] = hand_difference(il, iu, start, end, side)[1]
                     measured[f"{side}_reduction"] = 1 - abs(new) / abs(old) if abs(old) > 1e-12 else None
                 support[phase] = measured
             result["support"] = support
@@ -434,8 +551,8 @@ def comparisons(summaries, output):
                     "joints": {
                         name: {
                             "residual_nm": float(
-                                np.mean(column(rows_in(il, *WINDOWS[phase]), f"{name}_integral_nm"))
-                                - np.mean(column(rows_in(iu, *WINDOWS[phase]), f"{name}_integral_nm"))
+                                np.mean(column(rows_in(il, *WINDOWS[phase]), f"{name}_{method}_nm"))
+                                - np.mean(column(rows_in(iu, *WINDOWS[phase]), f"{name}_{method}_nm"))
                             )
                         }
                         for name in POSTURE
@@ -457,27 +574,33 @@ def main():
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--profile", choices=("unloaded", "constant", "sway"), action="append")
     parser.add_argument("--viewer", action="store_true")
-    parser.add_argument("--jobs", type=int, default=1)
-    parser.add_argument("--integral-gain-scale", type=float, default=0.5, help="Fixed Ki/Kp in 1/s")
-    parser.add_argument("--error-filter-tau", type=float, default=0.25)
     parser.add_argument(
-        "--error-deadband-deg", type=float, default=0.2, help="Integration noise band, not an accuracy cutoff"
+        "--condition",
+        choices=("pd_only", "integral", "observer"),
+        action="append",
+        help="Repeat to select methods; default compares all three",
+    )
+    parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument(
+        "--warmup-seconds",
+        type=float,
+        nargs="+",
+        default=[5.0],
+        help="One value, or one per repetition; use 4 5 6 for preparation sensitivity",
     )
     args = parser.parse_args()
     if args.repetitions < 1 or args.jobs < 1 or (args.viewer and args.jobs != 1):
         parser.error("positive repetitions/jobs required; --viewer requires --jobs 1")
+    if len(args.warmup_seconds) not in (1, args.repetitions) or any(
+        not np.isfinite(x) or x <= 0 for x in args.warmup_seconds
+    ):
+        parser.error("warmup-seconds must be positive finite, with one value or one per repetition")
     profiles = args.profile or ["unloaded", "constant", "sway"]
+    conditions = args.condition or ["pd_only", "integral", "observer"]
+    if len(set(conditions)) != len(conditions):
+        parser.error("conditions must be unique")
     if len(set(profiles)) != len(profiles):
         parser.error("profiles must be unique")
-    parameters = {
-        "integral_gain_scale": args.integral_gain_scale,
-        "filter_tau": args.error_filter_tau,
-        "deadband_deg": args.error_deadband_deg,
-    }
-    try:
-        BoundedIntegralCorrection([1], [1], [1], **parameters)
-    except ValueError as error:
-        parser.error(str(error))
     args.output.mkdir(parents=True, exist_ok=False)
     logging.basicConfig(level=logging.WARNING)
     logging.getLogger("robojudo").setLevel(logging.WARNING)
@@ -488,13 +611,26 @@ def main():
         "model_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
         "robot_xml_sha256": hashlib.sha256(Path(cfg.env.xml).read_bytes()).hexdigest(),
         "controller_sha256": hashlib.sha256(Path("robojudo/utils/bounded_integral.py").read_bytes()).hexdigest(),
-        "correction": "bounded_integral",
+        "correction": "bounded_observer" if "observer" in conditions else "bounded_integral",
+        "conditions": conditions,
+        "observer_parameters": condition_parameters("observer"),
         "assessment": "baseline_relative",
         "absolute_joint_error_cutoff_rad": None,
         "hardware_validation": "not_performed",
         **force_point_metadata(cfg.env.xml),
         "comparison_peak_metric": "3D torso-frame Euclidean displacement against matched unloaded trajectory",
         "duration_s": DURATION,
+        "warmup_seconds": args.warmup_seconds,
+        "source_sha256": {
+            str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in (
+                Path(__file__),
+                Path("scripts/x2_integral_sim.py"),
+                Path("scripts/x2_observer_reference.py"),
+                Path("robojudo/utils/bounded_integral.py"),
+                Path("robojudo/utils/disturbance_observer.py"),
+            )
+        },
         "phases": PHASES,
         "default_posture_rad": dict(zip(POSTURE, default_posture(), strict=True)),
         "carry_posture_rad": POSTURE,
@@ -503,19 +639,27 @@ def main():
         "measured_suspension": False,
         "upper_body_deployment_config": deployment_upper_config().model_dump(mode="json"),
         "controller_parameters": {
-            "ki_over_kp_per_s": args.integral_gain_scale,
-            "filter_tau_s": args.error_filter_tau,
-            "deadband_deg": args.error_deadband_deg,
+            "ki_over_kp_per_s": 0.5,
+            "filter_tau_s": 0.25,
+            "deadband_deg": 0.2,
             "effort_limit": "min(8 Nm, 0.8 * simulated actuator limit)",
             "slew_nm_s": 2,
         },
         "trials": [],
     }
     jobs = [
-        (condition, profile, repetition, args.output, args.viewer, parameters)
+        (
+            condition,
+            profile,
+            repetition,
+            args.output,
+            args.viewer,
+            condition_parameters(condition),
+            args.warmup_seconds[0 if len(args.warmup_seconds) == 1 else repetition - 1],
+        )
         for profile in profiles
         for repetition in range(1, args.repetitions + 1)
-        for condition in ("pd_only", "integral")
+        for condition in conditions
     ]
 
     def record(summary):
@@ -532,12 +676,33 @@ def main():
                 record(future.result())
     report["trials"].sort(key=lambda s: (s["profile"], s["repetition"], s["condition"]))
     report["comparisons"] = comparisons(report["trials"], args.output)
+    report["observer_comparisons"] = comparisons(report["trials"], args.output, "observer")
     (args.output / "summary.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     flat = [{k: v for k, v in s.items() if k != "phases"} for s in report["trials"]]
     with (args.output / "summary.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=sorted({k for s in flat for k in s}))
         writer.writeheader()
         writer.writerows(flat)
+    joint_rows = [
+        {
+            "condition": trial["condition"],
+            "profile": trial["profile"],
+            "repetition": trial["repetition"],
+            "warmup_s": trial["warmup_s"],
+            "phase": phase,
+            "joint": joint,
+            **{f"{metric}_deg": float(np.rad2deg(value)) for metric, value in errors.items()},
+            **stats["constraints"][joint],
+        }
+        for trial in report["trials"]
+        for phase, stats in trial["phases"].items()
+        for joint, errors in stats["joint_error_rad"].items()
+    ]
+    if joint_rows:
+        with (args.output / "joint_errors.csv").open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(joint_rows[0]))
+            writer.writeheader()
+            writer.writerows(joint_rows)
     print(f"Results: {args.output.resolve()}")
 
 

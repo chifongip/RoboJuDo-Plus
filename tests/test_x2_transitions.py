@@ -12,7 +12,7 @@ from box import Box
 from robojudo.pipeline.upper_body_zmq_pipeline import UpperBodyZmqPipelineMixin
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
-for name in ("x2_integral_sim", "evaluate_x2_transitions"):
+for name in ("x2_integral_sim", "x2_observer_reference", "evaluate_x2_transitions"):
     if name not in sys.modules:
         spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
         module = importlib.util.module_from_spec(spec)
@@ -130,6 +130,41 @@ class TestPostureTransitions(unittest.TestCase):
         self.assertTrue(all(set(value) == {"effort_slope_nm_s"} for value in drift.values()))
         self.assertAlmostEqual(drift["grasp_recovery"]["effort_slope_nm_s"]["left_elbow_joint"], 0.03)
 
+    def test_observer_is_explicitly_selected_and_never_uses_integral_labels(self):
+        from robojudo.utils.disturbance_observer import BoundedDisturbanceObserver
+
+        env = SimpleNamespace(
+            stiffness=np.array([50.0]),
+            damping=np.array([3.0]),
+            torque_limits=np.array([36.0]),
+            arm_indices=np.array([0]),
+        )
+        controller = evaluation.make_correction(
+            env, {"method": "observer", "inertia": 0.1, "friction_limit": 0.3, "friction_viscosity": 40.0}
+        )
+        self.assertIsInstance(controller, BoundedDisturbanceObserver)
+        rows = []
+        for start in (7, 23, 86, 102):
+            for offset in (0.1, 1.1, 2.1):
+                t = start + offset
+                rows.append({"elapsed_s": t, **{f"{name}_observer_nm": 0.02 * t for name in evaluation.POSTURE}})
+        self.assertAlmostEqual(
+            evaluation.baseline_drift(rows, "observer")["grasp_recovery"]["effort_slope_nm_s"]["left_elbow_joint"], 0.02
+        )
+        with self.assertRaises(ValueError):
+            evaluation.comparisons([], Path("/tmp"), "unknown")
+        with self.assertRaises(ValueError):
+            evaluation.run_trial("observer", "constant", 2, Path("/tmp"))
+
+    def test_benchmark_uses_selected_observer_and_unchanged_integral_defaults(self):
+        reference = sys.modules["x2_observer_reference"]
+        self.assertEqual(tuple(evaluation.POSTURE), reference.JOINT_NAMES)
+        self.assertEqual(evaluation.condition_parameters("integral"), {})
+        self.assertEqual(evaluation.condition_parameters("pd_only"), {})
+        self.assertEqual(evaluation.condition_parameters("observer"), reference.selected_observer_parameters())
+        with self.assertRaises(ValueError):
+            evaluation.condition_parameters("unknown")
+
     def test_failure_or_missing_reference_has_no_accuracy_verdict(self):
         row = {"condition": "integral", "profile": "constant", "repetition": 1, "status": "failed"}
         self.assertEqual(evaluation.comparisons([row], Path("/tmp"))[0]["status"], "unavailable")
@@ -150,6 +185,39 @@ class TestPostureTransitions(unittest.TestCase):
                     )
                 finally:
                     env.shutdown()
+
+
+class TestRecoveryMeasurement(unittest.TestCase):
+    def rows(self, magnitude, enter=0):
+        return [
+            {
+                "elapsed_s": float(t),
+                "left_torso_x_m": magnitude if t < enter else 0,
+                "left_torso_y_m": 0,
+                "left_torso_z_m": 0,
+            }
+            for t in np.round(np.arange(75, 89, 0.1), 2)
+        ]
+
+    def test_recovery_requires_staying_inside_measured_pd_envelope(self):
+        unloaded = self.rows(0)
+        pd = self.rows(0.001, 100)
+        recovered = self.rows(0.004, 82)
+        result = evaluation.recovery_measurement(recovered, unloaded, pd, unloaded, "left")
+        self.assertAlmostEqual(result["pd_envelope_m"], 0.001)
+        self.assertAlmostEqual(result["recovery_time_s"], 3)
+        self.assertAlmostEqual(result["lowering_peak_m"], 0.004)
+        recovered[-2]["left_torso_x_m"] = 0.004
+        result = evaluation.recovery_measurement(recovered, unloaded, pd, unloaded, "left")
+        self.assertIsNone(result["recovery_time_s"])
+
+    def test_less_than_one_second_remaining_is_censored(self):
+        unloaded = self.rows(0)
+        result = evaluation.recovery_measurement(
+            self.rows(0.004, 88.2), unloaded, self.rows(0.001, 100), unloaded, "left"
+        )
+        self.assertIsNone(result["recovery_time_s"])
+        self.assertEqual(result["status"], "not_recovered_within_observation_window")
 
 
 if __name__ == "__main__":

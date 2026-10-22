@@ -119,6 +119,43 @@ class TestSimulationFeedforward(unittest.TestCase):
 
 
 class TestHandCenterLoad(unittest.TestCase):
+    def test_physics_counter_catches_saturation_before_last_substep(self):
+        env = evaluation.X2IntegralEvaluationEnv(evaluation.evaluation_config().env)
+        self.addCleanup(env.shutdown)
+        calls = 0
+
+        def torque():
+            nonlocal calls
+            value = np.zeros(env.num_dofs)
+            if calls == 0:
+                value[env.arm_indices[3]] = 2 * env.torque_limits[env.arm_indices[3]]
+            calls += 1
+            return value
+
+        def fake_physics(_env, callback):
+            for _ in range(env.sim_decimation):
+                callback()
+
+        env.reset_measurements()
+        with patch.object(evaluation.MujocoEnv, "_simulate_torque", fake_physics):
+            env._simulate_torque(torque)
+        self.assertEqual(env.saturated_steps, 1)
+        self.assertEqual(env.control_saturated_steps[env.arm_indices[3]], 1)
+        self.assertEqual(env.physics_steps, env.sim_decimation)
+        env.reset_measurements()
+        self.assertEqual(env.joint_saturated_steps.sum(), 0)
+
+    def test_torque_metadata_distinguishes_policy_xml_and_unverified_hardware(self):
+        cfg = evaluation.evaluation_config()
+        env = evaluation.X2IntegralEvaluationEnv(cfg.env)
+        self.addCleanup(env.shutdown)
+        metadata = evaluation.torque_limit_metadata(env)
+        self.assertFalse(metadata["hardware_limits_verified"])
+        wrist = metadata["joints"]["left_wrist_pitch_joint"]
+        self.assertEqual(wrist["configured_total_limit_nm"], 2.2)
+        self.assertAlmostEqual(wrist["integral_bound_nm"], 1.76)
+        self.assertEqual(wrist["xml_joint_actuator_force_range_nm"], [-4.8, 4.8])
+
     def test_benchmark_selects_fine_tune_without_global_config_change(self):
         runtime = x2_locomimic()
         runtime.loco_policy.policy_name = "policy"
