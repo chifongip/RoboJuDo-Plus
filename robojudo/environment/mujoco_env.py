@@ -21,6 +21,7 @@ class MujocoEnv(Environment):
     def __init__(self, cfg_env: MujocoEnvCfg, device="cpu"):
         super().__init__(cfg_env=cfg_env, device=device)
         self._control_mask = np.ones(self.num_dofs, dtype=bool)
+        self._last_effort_clip_log_time = float("-inf")
 
         self.sim_duration = cfg_env.sim_duration
         self.sim_dt = cfg_env.sim_dt
@@ -38,20 +39,22 @@ class MujocoEnv(Environment):
             ElasticBand(cfg_env.elastic_band, self.model, self.data) if cfg_env.elastic_band is not None else None
         )
 
-        self.viewer = mujoco_viewer.MujocoViewer(
-            self.model,
-            self.data,
-            width=1200,
-            height=900,
-            hide_menus=True,
-            diable_key_callbacks=True,
-        )
-        self.viewer.cam.distance = 3.0
-        self.viewer.cam.elevation = -10.0
-        self.viewer.cam.azimuth = 180.0
+        self.viewer = None
+        if not cfg_env.headless:
+            self.viewer = mujoco_viewer.MujocoViewer(
+                self.model,
+                self.data,
+                width=1200,
+                height=900,
+                hide_menus=True,
+                diable_key_callbacks=True,
+            )
+            self.viewer.cam.distance = 3.0
+            self.viewer.cam.elevation = -10.0
+            self.viewer.cam.azimuth = 180.0
         # self.viewer._paused = True
 
-        if cfg_env.visualize_extras:
+        if cfg_env.visualize_extras and self.viewer is not None:
             self.visualizer = MujocoVisualizer(self.viewer, alignment=self.base_align)
         else:
             self.visualizer = None
@@ -193,6 +196,8 @@ class MujocoEnv(Environment):
             self._torso_pos = fk_info[self._torso_name]["pos"]
 
     def _render(self):
+        if self.viewer is None:
+            return
         self.viewer.cam.lookat = self.data.qpos.astype(np.float32)[:3]
         if self.viewer.is_alive:
             if self.elastic_band is not None:
@@ -201,9 +206,16 @@ class MujocoEnv(Environment):
 
     def _simulate_torque(self, torque_fn):
         self._render()
+        self.last_pd_torque = np.zeros(self.num_dofs)
+        self.last_feedforward_effort = np.zeros(self.num_dofs)
         for _ in range(self.sim_decimation):
             torque = np.asarray(torque_fn(), dtype=np.float64)
+            if torque.shape != (self.num_dofs,) or not np.isfinite(torque).all():
+                raise FloatingPointError("MuJoCo actuator torque must be a finite joint vector")
+            self.last_unclipped_torque = torque.copy()
             torque = np.clip(torque, -self.torque_limits, self.torque_limits)
+            self.last_applied_torque = torque.copy()
+            self.last_saturation_mask = torque != self.last_unclipped_torque
             self.data.ctrl[:] = 0.0
             self.data.ctrl[self._dof_actuator_indices] = torque
             if self.elastic_band is not None:
@@ -220,20 +232,51 @@ class MujocoEnv(Environment):
             raise ValueError("Damping must be non-negative")
         self._simulate_torque(lambda: -self.dof_vel * damping)
 
-    def step(self, pd_target, hand_pose=None):
+    def _bounded_feedforward(self, effort):
+        if effort is None:
+            return np.zeros(self.num_dofs)
+        effort = np.asarray(effort, dtype=np.float64)
+        if effort.shape != (self.num_dofs,) or not np.isfinite(effort).all():
+            raise ValueError(f"Feedforward effort must be finite with shape ({self.num_dofs},)")
+        limits_by_name = getattr(self.cfg_env, "feedforward_effort_limits", {})
+        if set(limits_by_name) - set(self.joint_names):
+            raise ValueError("Feedforward limits contain unknown joint names")
+        allowed = getattr(self.cfg_env, "feedforward_joint_names", self.joint_names)
+        if set(limits_by_name) - set(allowed):
+            raise ValueError("Feedforward limits contain disallowed joint names")
+        limits = np.asarray([limits_by_name.get(name, 0.0) for name in self.joint_names])
+        if not np.isfinite(limits).all() or np.any(limits < 0):
+            raise ValueError("Feedforward limits must be finite and non-negative")
+        clipped = np.clip(effort, -limits, limits)
+        now = time.monotonic()
+        if np.any(clipped != effort) and now - self._last_effort_clip_log_time >= 1.0:
+            logger.warning("Clamped MuJoCo feedforward effort to configured joint limits")
+            self._last_effort_clip_log_time = now
+        return clipped
+
+    def step(self, pd_target, hand_pose=None, *, feedforward_effort=None):
+        """Apply PD plus bounded effort; an optional callback is evaluated at each physics substep."""
         assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"
+        pd_target = np.asarray(pd_target, dtype=np.float64)
+        if pd_target.shape != (self.num_dofs,) or not np.isfinite(pd_target).all():
+            raise ValueError("PD target must be a finite joint vector")
+        fixed_effort = None if callable(feedforward_effort) else self._bounded_feedforward(feedforward_effort)
 
         if hand_pose is not None:
             logger.info("Hand pose-->", hand_pose)
 
         def pd_torque():
             torque = (pd_target - self.dof_pos) * self.stiffness - self.dof_vel * self.damping
-            return np.where(self._control_mask, torque, 0.0)
+            effort = self._bounded_feedforward(feedforward_effort()) if callable(feedforward_effort) else fixed_effort
+            self.last_pd_torque = np.where(self._control_mask, torque, 0.0)
+            self.last_feedforward_effort = np.where(self._control_mask, effort, 0.0)
+            return self.last_pd_torque + self.last_feedforward_effort
 
         self._simulate_torque(pd_torque)
 
     def shutdown(self):
-        self.viewer.close()
+        if self.viewer is not None:
+            self.viewer.close()
 
 
 if __name__ == "__main__":
