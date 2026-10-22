@@ -69,8 +69,14 @@ class BoundedDisturbanceObserver:
 
     def predict_velocity(self, position, velocity, target, effort, disturbance, dt):
         """Four implicit nominal substeps and analytic torque-to-endpoint-velocity gain."""
+        _, v, _, dv = self.predict_state(position, velocity, target, effort, disturbance, dt)
+        return v, dv
+
+    def predict_state(self, position, velocity, target, effort, disturbance, dt, dq=None, dv=None):
+        """Propagate state and disturbance sensitivities across a command-history segment."""
         q, v = position.copy(), velocity.copy()
-        dq, dv = np.zeros_like(q), np.zeros_like(v)
+        dq = np.zeros_like(q) if dq is None else dq.copy()
+        dv = np.zeros_like(v) if dv is None else dv.copy()
         h = dt / 4
         mass_h = self.inertia / h
         for _ in range(4):
@@ -95,9 +101,9 @@ class BoundedDisturbanceObserver:
             dv = force_derivative / denominator
             q += h * v
             dq += h * dv
-        return v, dv
+        return q, v, dq, dv
 
-    def update(self, target, position, velocity, dt):
+    def update(self, target, position, velocity, dt, *, prediction=None, feedback_dt=None, fresh=None):
         values = [np.asarray(x, dtype=float) for x in (target, position, velocity)]
         if not np.isfinite(dt) or dt <= 0 or any(x.shape != self.kp.shape or not np.isfinite(x).all() for x in values):
             self.reset()
@@ -105,18 +111,22 @@ class BoundedDisturbanceObserver:
         target, position, velocity = values
         previous_estimate = self.estimated_disturbance_nm.copy()
         self._estimate_before_update = previous_estimate.copy()
-        if self.previous_position is None:
+        if self.previous_position is None and prediction is None:
             self.velocity_prediction = velocity.copy()
             self.velocity_innovation[:] = 0
             estimate = previous_estimate
         else:
-            prediction, input_gain = self.predict_velocity(
-                self.previous_position,
-                self.previous_velocity,
-                self.previous_target,
-                self.effort,
-                previous_estimate,
-                dt,
+            prediction, input_gain = (
+                prediction
+                if prediction is not None
+                else self.predict_velocity(
+                    self.previous_position,
+                    self.previous_velocity,
+                    self.previous_target,
+                    self.effort,
+                    previous_estimate,
+                    dt,
+                )
             )
             if not np.isfinite(prediction).all() or not np.isfinite(input_gain).all() or np.any(input_gain <= 0):
                 self.reset()
@@ -124,12 +134,19 @@ class BoundedDisturbanceObserver:
             self.velocity_prediction = prediction
             self.velocity_innovation = velocity - prediction
             estimate = np.clip(
-                previous_estimate + -np.expm1(-self.bandwidth * dt) * self.velocity_innovation / input_gain,
+                previous_estimate
+                + -np.expm1(-self.bandwidth * (dt if feedback_dt is None else feedback_dt))
+                * self.velocity_innovation
+                / input_gain,
                 -self.limits,
                 self.limits,
             )
+        if fresh is not None:
+            estimate = np.where(fresh, estimate, previous_estimate)
         desired = -estimate
         increment = np.clip(desired - self.effort, -self.slew * dt, self.slew * dt)
+        if fresh is not None:
+            increment = np.where(fresh, increment, 0.0)
         candidate = np.clip(self.effort + increment, -self.limits, self.limits)
         total = self.kp * (target - position) - self.kd * velocity + candidate
         self.antiwindup = ((total > self.torque_limits) & (increment > 0)) | (

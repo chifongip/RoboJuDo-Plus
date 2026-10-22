@@ -50,7 +50,9 @@ class FakeAdapter:
             self.clear_arm_effort()
         self.effort = np.asarray(efforts if efforts is not None and expected == self.generation else np.zeros(14))
         self.commands.append((np.asarray(positions), self.effort.copy()))
-        return SimpleNamespace(arm_efforts=self.effort.tolist(), reset_generation=self.generation)
+        return SimpleNamespace(
+            arm_efforts=self.effort.tolist(), reset_generation=self.generation, command_time_sec=time.monotonic()
+        )
 
     def set_passive(self):
         self.clear_arm_effort()
@@ -79,6 +81,7 @@ def environment(cfg=None):
     env._arm_observer_eligible = True
     env._observer_reset_generation = 0
     env._observer_feedback_time = time.monotonic()
+    env._observer_sample_times = np.full(16, env._observer_feedback_time)
     env.joint_names = ["leg", "waist", *reversed(JOINT_NAMES)]
     env.num_dofs = 16
     env.stiffness, env.damping = np.full(16, 20.0), np.full(16, 2.0)
@@ -91,6 +94,53 @@ def environment(cfg=None):
 
 
 class ArmObserverTests(unittest.TestCase):
+    def test_repeated_native_sample_freezes_adaptation_despite_new_commands(self):
+        env = environment()
+        env._observer_feedback_time = 1.0
+        env._observer_sample_times[:] = 50.0  # Native and Python clock epochs differ.
+        target = np.full(16, 0.1)
+        for now in (1.0, 1.02, 1.04, 1.06, 1.08):
+            with patch("robojudo.environment.agibot_cpp_env.time.monotonic", return_value=now):
+                env.step(target)
+            np.testing.assert_array_equal(env._arm_observer.issued_nm, 0)
+            np.testing.assert_array_equal(env._arm_observer.observer.estimated_disturbance_nm, 0)
+        with patch("robojudo.environment.agibot_cpp_env.time.monotonic", return_value=1.11):
+            env.step(target)
+        self.assertIsNone(env._arm_observer.sample_times)
+        self.assertFalse(env._arm_observer.command_history)
+
+    def test_receive_intervals_replay_accepted_targets_across_inference_jitter(self):
+        controller = runtime()
+        q, v = np.zeros(16), np.zeros(16)
+        target = np.full(16, 0.1)
+        stamps = np.full(16, 100.0)
+        controller.propose(target, q, v, 1, sample_times=stamps)
+        controller.acknowledge(np.zeros(14), command_time=100.005)
+        # First interval has no command coverage before 100.005; initialize only.
+        stamps[:] = 100.02
+        controller.propose(target, q, v, 1.03, sample_times=stamps)
+        controller.acknowledge(np.zeros(14), command_time=100.021)
+        new_target = -target
+        controller.propose(new_target, q, v, 1.04, sample_times=stamps)
+        controller.acknowledge(np.zeros(14), command_time=100.025)
+        model = controller.observer
+        zeros = np.zeros(14)
+        q1, v1, _, _ = model.predict_state(zeros, zeros, target[controller.indices], zeros, zeros, 0.005)
+        q2, v2, _, _ = model.predict_state(q1, v1, new_target[controller.indices], zeros, zeros, 0.025)
+        q[controller.indices], v[controller.indices] = q2, v2
+        stamps[:] = 100.05  # 30 ms feedback interval, but 40 ms command interval.
+        controller.propose(new_target, q, v, 1.08, sample_times=stamps)
+        np.testing.assert_allclose(model.velocity_innovation, 0, atol=1e-11)
+        np.testing.assert_allclose(model.estimated_disturbance_nm, 0, atol=1e-10)
+        # A partial arm refresh must not adapt other joints from repeated samples.
+        controller.acknowledge(np.zeros(14), command_time=100.055)
+        previous = model.estimated_disturbance_nm.copy()
+        stamps[controller.indices[0]] = 100.07
+        v[controller.indices[0]] -= 0.1
+        controller.propose(new_target, q, v, 1.10, sample_times=stamps)
+        np.testing.assert_array_equal(model.estimated_disturbance_nm[1:], previous[1:])
+        self.assertNotEqual(model.estimated_disturbance_nm[0], previous[0])
+
     def test_configuration_defaults_and_explicit_active_limits(self):
         self.assertEqual(X2ArmObserverCfg().mode, "OFF")
         self.assertEqual(X2ArmObserverCfg(mode="SHADOW").mode, "SHADOW")
@@ -156,6 +206,7 @@ class ArmObserverTests(unittest.TestCase):
         env._odometry_type = "NONE"
         env.aimdk.get_robot_state = lambda: SimpleNamespace(
             joint_age_sec=[0.09] * 16,
+            joint_received_time_sec=[0.91] * 16,
             motor_state=SimpleNamespace(q=[0.0] * 16, dq=[-0.1] * 16),
             imu_state=SimpleNamespace(quaternion=[0, 0, 0, 1], gyroscope=[0, 0, 0], accelerometer=[0, 0, 0]),
         )
@@ -301,10 +352,12 @@ class ArmObserverTests(unittest.TestCase):
         env = environment()
         with patch("robojudo.environment.agibot_cpp_env.time.monotonic", return_value=1.0):
             env._observer_feedback_time = 1.0
+            env._observer_sample_times[:] = 1.0
             env.step(np.zeros(16))
         env._dof_vel[2:] = -0.1
         with patch("robojudo.environment.agibot_cpp_env.time.monotonic", return_value=1.02):
-            env._observer_feedback_time = 1.02
+            env._observer_feedback_time = 1.0
+            env._observer_sample_times[:] = 1.02
             env.step(np.zeros(16))
         self.assertGreater(np.max(abs(env.aimdk.effort)), 0)
         np.testing.assert_array_equal(env.aimdk.effort[::-1], env._arm_observer.observer.effort)
