@@ -50,6 +50,22 @@ class MujocoEnvCfg(EnvCfg):
     sim_duration: float = 60.0
     sim_dt: float = 0.001
     sim_decimation: int = 20
+    headless: bool = False
+    feedforward_effort_limits: dict[str, float] = Field(default_factory=dict)
+    """Simulation-only, per-joint feedforward bounds in Nm; omitted joints have zero bounds."""
+
+    @property
+    def feedforward_joint_names(self) -> list[str]:
+        return self.dof.joint_names
+
+    @model_validator(mode="after")
+    def check_feedforward_limits(self):
+        for name, limit in self.feedforward_effort_limits.items():
+            if name not in self.dof.joint_names:
+                raise ValueError(f"Unknown feedforward joint: {name}")
+            if not math.isfinite(limit) or limit < 0:
+                raise ValueError("Feedforward limits must be finite and non-negative")
+        return self
 
     visualize_extras: bool = True  # TODO: remove
 
