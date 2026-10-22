@@ -369,7 +369,9 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
         LocomanipulationPostureZmqCtrlCfg(posture_priority=100),
         UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
     ]
-    loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg()
+    loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg(
+        policy_name="policy_fine_tune",
+    )
     mimic_policies: list[X2DeployPolicyCfg] = [
         X2DeployPolicyCfg(max_timestep=2820),
         X2DeployPolicyCfg(max_timestep=2820),

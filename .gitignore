@@ -136,3 +136,4 @@ MUJOCO_LOG.TXT
 assets/resources
 
 record_data/
+*.json
