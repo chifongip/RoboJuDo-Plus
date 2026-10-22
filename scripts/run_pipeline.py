@@ -91,13 +91,13 @@ def main():
 
     pipeline = pipeline_class(cfg=cfg)
 
-    if not cfg.env.is_sim:
-        pipeline.prepare()
-    elif getattr(pipeline, "_has_default_pose_mode", False):
-        pipeline._set_default_pose_mode(True)
-        logger.warning("Sim mode — holding default pose, press R to start motion")
-
     try:
+        if not cfg.env.is_sim:
+            pipeline.prepare()
+        elif getattr(pipeline, "_has_default_pose_mode", False):
+            pipeline._set_default_pose_mode(True)
+            logger.warning("Sim mode — holding default pose, press R to start motion")
+
         while not getattr(pipeline, "should_exit", False):
             time_start = time.time()
             pipeline.step()
@@ -122,12 +122,20 @@ def main():
                             time.sleep(10)
                             break
     finally:
-        close_recording = getattr(pipeline, "close_recording", None)
-        if close_recording is not None:
-            close_recording()
-        ctrl_manager = getattr(pipeline, "ctrl_manager", None)
-        if ctrl_manager is not None:
-            ctrl_manager.close()
+        try:
+            # Do not leave X2 native publishers alive while other teardown work
+            # runs or raises. This also covers interruption and preparation errors.
+            if cfg.env.env_type == "AgiBotCppEnv":
+                pipeline.env.shutdown()
+        finally:
+            try:
+                close_recording = getattr(pipeline, "close_recording", None)
+                if close_recording is not None:
+                    close_recording()
+            finally:
+                ctrl_manager = getattr(pipeline, "ctrl_manager", None)
+                if ctrl_manager is not None:
+                    ctrl_manager.close()
 
 
 if __name__ == "__main__":

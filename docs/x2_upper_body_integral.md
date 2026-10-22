@@ -9,8 +9,9 @@ enters either controller.
 
 The user accepted the observer's carrying-accuracy tradeoff and chose to keep it
 after reviewing the sway/balance and saturation measurements. This selection is
-for simulation. SDK code, real-robot configuration and hardware commands are
-unchanged.
+for simulation. SDK code, real-robot configuration and hardware commands were
+unchanged during these studies. The optional deployment integration described
+below does not extend their hardware qualification.
 
 ## Retained files
 
@@ -401,3 +402,78 @@ Results, all 792 trial comparisons and audit:
 
 The final cleanup preserves removed sources and hashes in
 `logs/x2_transitions/observer-final-cleanup-20261022`. Historical logs remain intact.
+
+## Optional deployment integration
+
+The real X2 environment now supports `arm_observer.mode` values `OFF`, `SHADOW`
+and `ACTIVE`; every preset defaults to `OFF`. Eligibility additionally requires
+`RL_DEFAULT` with an active `X2LocomanipulationPolicy` or its GR00T subclass.
+Loco-mimic pipelines permit only idle locomanipulation: interpolation, mimic,
+recovery and joint-default preparation remain uncompensated. Arm target ownership
+and the existing upper-body filtering are unchanged.
+
+`SHADOW` is opt-in and always transmits zero additive effort. Its predictor uses
+zero issued correction, even when its proposed correction is nonzero. It uses the
+frozen simulation reference and configured simulation torque limits unless
+explicit limits are supplied. `env.get_arm_observer_status()` exposes named,
+reference-order proposed, headroom-limited and issued command vectors. These are
+command diagnostics, not measured torque or a counterfactual compensated rollout.
+
+`ACTIVE` requires all three explicit configuration fields:
+`actuator_limits_nm` and `correction_limits_nm` (14 positive finite values each,
+in the reference's left-seven/right-seven order), and positive finite
+`slew_nm_s`. Correction limits cannot exceed actuator limits. There are no
+hardware-qualified defaults, and simulation limits are never substituted for
+missing active limits. Configure the mode before environment construction;
+changing the source configuration in place does not reconfigure the running
+observer. Runtime eligibility disable clears correction immediately.
+
+The observer runs after final target clipping, using measured q/qd and monotonic
+elapsed control time. Per-joint receive ages are captured atomically with the
+native joint snapshot; newer backend packets cannot make an older Python cache
+appear fresh. These are receive ages, not verified physical acquisition ages. It leaves PD targets and gains unchanged. Correction is
+bounded and slew-limited, then restricted to modeled PD torque headroom. If PD
+already exceeds a configured limit, only correction reducing saturation is
+permitted. Safety removal can reduce correction faster than the normal slew
+limit. Accepted effort is reconciled into the next predictor; downstream limiting
+freezes the affected estimate updates. The predictor models total actuator
+clipping, but cannot verify proprietary servo clipping between host updates.
+The selected nominal model remains simulation-derived, including in active mode.
+
+The adapter queues positions and arm effort atomically under its existing command
+mutex. Position-only calls clear effort. Non-arm effort remains zero. HOLD,
+damping, passive operation, re-arm, gain/control selection changes and shutdown
+clear buffered effort. Before deselecting arms or entering re-arm's idle state,
+the adapter explicitly publishes zero effort to the previous arm selection,
+preserving its current PD/HOLD/damping behavior. Loco-mimic interpolation clears
+correction in the same cycle that it starts. The runner explicitly shuts down X2
+on normal exit, interruption, preparation failure and loop errors, before other
+cleanup. A reset generation prevents a correction computed before a
+watchdog transition from being accepted afterward, including transient holds.
+The environment also resets on mode/policy changes, stale feedback, excessive
+elapsed time, invalid samples and rejected submissions. Re-entry starts with zero
+correction. Existing watchdog deadlines, recovery requirements and damping
+latching remain in force.
+
+### Firmware evidence and remaining deployment blockers
+
+The integration request explicitly confirmed that the target SDK combines PD and
+nonzero additive effort correctly. This is user-provided verification, not a
+firmware-version qualification performed by this change.
+
+The inspected vendor SDK message and bundled AimDK X2 1.0.0 Joint Control docs
+(`third_party/aimdk/docs/cn/_build/html/en/dev/Interface/control_mod/joint_control.html`)
+define position, velocity, effort in Nm, stiffness and damping. They do not
+specify a combined PD-plus-effort equation or identify firmware versions that
+implement it. The [vendor Joint Control documentation](https://x2-aimdk.agibot.com/en/latest/Interface/control_mod/joint_control.html)
+was also checked; direct retrieval timed out. Field presence alone is not evidence
+of firmware addition semantics.
+
+Before deployment, the remaining blockers are a versioned firmware/support or
+verification reference; verified arm peak/continuous and firmware torque limits;
+qualification of the nominal observer model, correction bounds and slew on the
+actual platform; measured feedback/transport timing; and resolution or explicit
+qualification of the documented robustness failures and walking-stability limits.
+Supplying numeric configuration does not resolve these blockers. No hardware
+connection, deployment process or robot command is part of this integration.
+Historical studies and rejected-controller archives are unchanged.

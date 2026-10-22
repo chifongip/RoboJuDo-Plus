@@ -17,11 +17,7 @@ class ControlMode(str, Enum):
     RECOVERY_DEFAULT = "RECOVERY_DEFAULT"
 
 
-MODE_COMMANDS = {
-    f"[{mode.value}]": mode
-    for mode in ControlMode
-    if mode != ControlMode.RECOVERY_DEFAULT
-}
+MODE_COMMANDS = {f"[{mode.value}]": mode for mode in ControlMode if mode != ControlMode.RECOVERY_DEFAULT}
 FALL_TILT_THRESHOLD_RAD = 1.0
 ELASTIC_BAND_COMMANDS = {
     "[ELASTIC_BAND_LOWER]": "lower_elastic_band",
@@ -59,9 +55,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         super().__init__(cfg=cfg)
 
         if self._joint_default_dof.joint_names != self.env.joint_names:
-            raise ValueError(
-                f"{self._mode_label} JOINT_DEFAULT joint order must match the environment joint order"
-            )
+            raise ValueError(f"{self._mode_label} JOINT_DEFAULT joint order must match the environment joint order")
         self._rl_stiffness = self.stiffness_from_env()
         self._rl_damping = self.damping_from_env()
         self._enter_mode(ControlMode.PASSIVE_DEFAULT, force=True)
@@ -99,12 +93,18 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
     def _enter_mode(self, requested: ControlMode, force: bool = False) -> bool:
         if requested == self.mode and not force:
             return True
-        if requested == ControlMode.RL_DEFAULT and not force and not (
-            self.mode == ControlMode.JOINT_DEFAULT and self._joint_default_complete
+        if (
+            requested == ControlMode.RL_DEFAULT
+            and not force
+            and not (self.mode == ControlMode.JOINT_DEFAULT and self._joint_default_complete)
         ):
             logger.error("Rejected RL_DEFAULT: JOINT_DEFAULT interpolation has not completed")
             return False
 
+        reset_observer = getattr(self.env, "reset_arm_observer", None)
+        if reset_observer is not None:
+            reset_observer()
+            self.env.set_arm_observer_eligible(False)
         previous = self.mode
         policy_modes = (ControlMode.RL_DEFAULT, ControlMode.RECOVERY_DEFAULT)
         if previous in policy_modes and requested not in policy_modes:
@@ -197,9 +197,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             if requested is not None:
                 if self._enter_mode(requested):
                     self._manual_mode_override = (
-                        requested
-                        if requested in (ControlMode.PASSIVE_DEFAULT, ControlMode.JOINT_DEFAULT)
-                        else None
+                        requested if requested in (ControlMode.PASSIVE_DEFAULT, ControlMode.JOINT_DEFAULT) else None
                     )
                 continue
             method_name = ELASTIC_BAND_COMMANDS.get(command)
@@ -223,9 +221,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             self._force_damping(str(exc))
             return
         if tilt > FALL_TILT_THRESHOLD_RAD and self.mode != ControlMode.DAMPING_DEFAULT:
-            self._force_damping(
-                f"robot tilt {tilt:.3f} rad exceeds {FALL_TILT_THRESHOLD_RAD:.1f} rad"
-            )
+            self._force_damping(f"robot tilt {tilt:.3f} rad exceeds {FALL_TILT_THRESHOLD_RAD:.1f} rad")
 
     def _robot_tilt(self) -> float:
         base_quat = np.asarray(self.env.base_quat)
@@ -249,12 +245,36 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             logger.warning("JOINT_DEFAULT interpolation complete; RL_DEFAULT is now enabled")
         return target
 
+    def _sync_arm_observer_eligibility(self):
+        env = getattr(self, "env", None)
+        set_eligible = getattr(env, "set_arm_observer_eligible", None)
+        if set_eligible is not None and getattr(env, "_arm_observer", None) is not None:
+            from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
+
+            inner = self._inner_policy()
+            eligible = self.mode == ControlMode.RL_DEFAULT and isinstance(inner, X2LocomanipulationPolicy)
+            manager = getattr(self, "policy_manager", None)
+            if manager is not None:
+                eligible = eligible and (
+                    manager.current_policy_id == manager.policy_loco_id
+                    and manager.interp_state == manager.InterpState.IDLE
+                )
+            identity = id(inner)
+            if identity != getattr(self, "_observer_policy_identity", None):
+                self.env.reset_arm_observer()
+                self._observer_policy_identity = identity
+            set_eligible(eligible)
+
+    def _send_policy_target(self, pd_target, hand_pose=None):
+        self._sync_arm_observer_eligibility()
+        self.env.step(pd_target, hand_pose)
+
     def _step_rl_policy(self, env_data, ctrl_data, dry_run: bool):
         obs, extras = self.policy.get_observation(env_data, ctrl_data)
         pd_target = self.policy.get_pd_target(obs)
         pd_target = self._apply_pd_target_override(pd_target, ctrl_data)
         if not dry_run:
-            self.env.step(pd_target, extras.get("hand_pose"))
+            self._send_policy_target(pd_target, extras.get("hand_pose"))
         return pd_target, extras
 
     def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
@@ -303,7 +323,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
                     pd_target = self._step_joint_default()
                 elif self.mode in (ControlMode.RL_DEFAULT, ControlMode.RECOVERY_DEFAULT):
                     pd_target, extras = self._step_rl_policy(env_data, ctrl_data, dry_run=False)
-        except (FloatingPointError, RuntimeError, ValueError) as exc:
+        except (FloatingPointError, RuntimeError, TypeError, ValueError) as exc:
             if dry_run:
                 raise
             self._force_damping(str(exc))

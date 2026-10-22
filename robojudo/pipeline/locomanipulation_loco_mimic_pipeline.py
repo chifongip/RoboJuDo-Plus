@@ -83,9 +83,7 @@ class LocomanipulationLocoMimicPipelineMixin:
             logger.warning("Ignored recovery request outside JOINT_DEFAULT")
             return False
         if not self._joint_default_complete:
-            logger.warning(
-                "Ignored recovery request: JOINT_DEFAULT interpolation has not completed"
-            )
+            logger.warning("Ignored recovery request: JOINT_DEFAULT interpolation has not completed")
             return False
         try:
             tilt = self._robot_tilt()
@@ -153,7 +151,7 @@ class LocomanipulationLocoMimicPipelineMixin:
             pd_target = self._apply_pd_target_override(pd_target, ctrl_data)
         self._upper_body_override_was_available = upper_body_override_available
         if not dry_run:
-            self.env.step(pd_target, extras.get("hand_pose"))
+            self._send_policy_target(pd_target, extras.get("hand_pose"))
         return pd_target, extras
 
     def _process_policy_commands(self, commands: list[str], extras):
@@ -162,34 +160,37 @@ class LocomanipulationLocoMimicPipelineMixin:
                 commands.append("[POLICY_LOCO]")
                 logger.info("Mimic motion done, switch to locomotion policy.")
 
-        for command in commands:
-            if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT and (
-                command.startswith("[POLICY_SWITCH]") or command == "[POLICY_MIMIC]"
-            ):
-                logger.warning("Ignored %s during recovery", command)
-                continue
-            match command:
-                case cmd if cmd.startswith("[POLICY_SWITCH]"):
-                    switch_target = cmd.split(",")[1]
-                    if switch_target == "NEXT":
-                        self.policy_manager.toggle_mimic_policy(1)
-                    elif switch_target == "LAST":
-                        self.policy_manager.toggle_mimic_policy(-1)
-                case "[POLICY_LOCO]":
-                    if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
-                        self._request_loco_from_recovery()
-                    elif self.policy_manager.switch_to_loco():
-                        self.policy_locomotion_mimic_flag = 0
-                case "[POLICY_MIMIC]":
-                    if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
-                        logger.warning("Ignored mimic request during recovery")
-                        continue
-                    self._set_upper_body_enabled(False)
-                    if self.policy_manager.switch_to_mimic():
-                        self.policy_locomotion_mimic_flag = 1
-                case "[POLICY_RECOVERY]":
-                    if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
-                        logger.warning("Ignored repeated recovery request")
+        try:
+            for command in commands:
+                if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT and (
+                    command.startswith("[POLICY_SWITCH]") or command == "[POLICY_MIMIC]"
+                ):
+                    logger.warning("Ignored %s during recovery", command)
+                    continue
+                match command:
+                    case cmd if cmd.startswith("[POLICY_SWITCH]"):
+                        switch_target = cmd.split(",")[1]
+                        if switch_target == "NEXT":
+                            self.policy_manager.toggle_mimic_policy(1)
+                        elif switch_target == "LAST":
+                            self.policy_manager.toggle_mimic_policy(-1)
+                    case "[POLICY_LOCO]":
+                        if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
+                            self._request_loco_from_recovery()
+                        elif self.policy_manager.switch_to_loco():
+                            self.policy_locomotion_mimic_flag = 0
+                    case "[POLICY_MIMIC]":
+                        if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
+                            logger.warning("Ignored mimic request during recovery")
+                            continue
+                        self._set_upper_body_enabled(False)
+                        if self.policy_manager.switch_to_mimic():
+                            self.policy_locomotion_mimic_flag = 1
+                    case "[POLICY_RECOVERY]":
+                        if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
+                            logger.warning("Ignored repeated recovery request")
+        finally:
+            self._sync_arm_observer_eligibility()
 
     def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
         commands = ctrl_data.get("COMMANDS", [])
@@ -209,7 +210,10 @@ class LocomanipulationLocoMimicPipelineMixin:
                 self.policy.debug_viz(self.visualizer, env_data, ctrl_data, extras)
         self._record_upper_body_sample(env_data, extras, pd_target, rl_active=rl_active)
         if rl_active or self.policy_manager.warmup_policy_indices:
-            self.policy_manager.step(env_data, ctrl_data)
+            try:
+                self.policy_manager.step(env_data, ctrl_data)
+            finally:
+                self._sync_arm_observer_eligibility()
         if self.cfg.debug.log_obs:
             self.debug_logger.log(
                 env_data=env_data,

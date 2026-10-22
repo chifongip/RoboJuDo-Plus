@@ -72,13 +72,12 @@ class TestG1Locomanipulation(unittest.TestCase):
                 )
 
     def test_real_configs_use_native_unitree_layouts_and_safety_controls(self):
+        from robojudo.config.g1.env.g1_env_cfg import G1_23_DOF_INDICES
         from robojudo.config.g1.g1_cfg import (
             g1_23_locomanipulation_default_real,
             g1_23_locomanipulation_stiff_real,
             g1_29_locomanipulation_stiff_real,
         )
-
-        from robojudo.config.g1.env.g1_env_cfg import G1_23_DOF_INDICES
 
         motor_mapping_23 = [*range(13), *range(15, 20), *range(22, 27)]
         self.assertEqual(G1_23_DOF_INDICES, motor_mapping_23)
@@ -242,11 +241,11 @@ class TestG1Locomanipulation(unittest.TestCase):
         self.assertEqual(env.unitree.damping, [5.0])
 
     def test_unitree_real_backends_keep_reported_robot_frame_velocity(self):
+        from scipy.spatial.transform import Rotation
+
         from robojudo.environment.unitree_cpp_env import UnitreeCppEnv
         from robojudo.environment.unitree_env import UnitreeEnv
         from robojudo.utils.rotation import TransformAlignment
-
-        from scipy.spatial.transform import Rotation
 
         body_velocity = np.asarray([0.4, -0.2, 0.1], dtype=np.float32)
         sport_state = SimpleNamespace(position=np.zeros(3), velocity=body_velocity)
@@ -276,7 +275,7 @@ class TestG1Locomanipulation(unittest.TestCase):
                 cpp_env.RemoteControllerHandler = None
                 cpp_env._motor_to_logical = lambda values, dtype: np.asarray(values, dtype=dtype)
                 cpp_env.unitree = SimpleNamespace(
-                    get_robot_state=lambda: SimpleNamespace(
+                    get_robot_state=lambda imu=imu: SimpleNamespace(
                         motor_state=SimpleNamespace(q=[0.0], dq=[0.0]),
                         imu_state=imu,
                     ),
@@ -474,7 +473,11 @@ class TestG1Locomanipulation(unittest.TestCase):
 
         cfg = g1_23_locomanipulation_stiff()
         pipeline = G1LocomanipulationPipeline.__new__(G1LocomanipulationPipeline)
-        pipeline._upper_body_cfg = cfg.ctrl[-1].model_copy(update={"ema_alpha": 0.0})
+        # Isolate joint mapping; speed limiting has its own tests.
+        pipeline.dt = 1.0 / cfg.policy.freq
+        pipeline._upper_body_cfg = cfg.ctrl[-1].model_copy(
+            update={"ema_alpha": 0.0, "max_joint_velocity_rad_s": 1000.0}
+        )
         pipeline._upper_body_enabled = True
         pipeline._upper_body_stream_was_fresh = False
         pipeline._upper_body_indices = np.asarray(

@@ -202,15 +202,15 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
     ctrl_type: str = "UpperBodyZmqCtrl"
     endpoint: str = "tcp://127.0.0.1:8559"
     joint_names: list[str] = []
-    timeout_s: float = Field(default=0.25, gt=0.0)
+    timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
     ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
     max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_upper_body_zmq(self):
-        if not self.endpoint.startswith("tcp://"):
+        if not self.endpoint.startswith("tcp://") or not self.endpoint.removeprefix("tcp://").strip():
             raise ValueError("Upper-body ZMQ endpoint must use tcp://")
-        if not self.joint_names:
+        if not self.joint_names or any(not name.strip() for name in self.joint_names):
             raise ValueError("Upper-body ZMQ joint_names must not be empty")
         if len(self.joint_names) != len(set(self.joint_names)):
             raise ValueError("Upper-body ZMQ joint_names must be unique")
@@ -240,7 +240,7 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
     require_complete_positions: bool = True
     observation_enabled: bool = False
     observation_endpoint: str = "tcp://*:8561"
-    """observation_profile: Exact deployment schema identifier (for example, ``g1_23dof``), including joint layout and order."""
+    """Exact deployment schema identifier, including joint layout and order (for example, ``g1_23dof``)."""
     observation_profile: str = "custom"
     observation_task: str = "upper body manipulation"
     observation_fps: int = Field(default=30, gt=0)

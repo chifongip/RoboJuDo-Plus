@@ -1,4 +1,4 @@
-"""Bounded model-based disturbance correction for simulation comparisons only."""
+"""Bounded model-based disturbance correction with explicit issued-effort reconciliation."""
 
 import numpy as np
 
@@ -46,7 +46,26 @@ class BoundedDisturbanceObserver:
         self.velocity_prediction = np.zeros_like(self.kp)
         self.velocity_innovation = np.zeros_like(self.kp)
         self.antiwindup = np.zeros_like(self.kp, dtype=bool)
+        self._estimate_before_update = np.zeros_like(self.kp)
         self.previous_position = self.previous_velocity = self.previous_target = None
+
+    def acknowledge_effort(self, issued_effort, *, freeze_limited_estimate=True):
+        """Reconcile a downstream limiter (or shadow zero) without inventing applied torque.
+
+        Freeze estimate changes on limited joints. The next predictor and slew
+        calculation use the accepted command, rather than the proposed effort.
+        """
+        issued = np.asarray(issued_effort, dtype=float)
+        if issued.shape != self.kp.shape or not np.isfinite(issued).all() or np.any(abs(issued) > self.limits):
+            self.reset()
+            raise ValueError("Issued effort must be finite and within observer bounds")
+        limited = issued != self.effort
+        if freeze_limited_estimate:
+            self.estimated_disturbance_nm = np.where(
+                limited, self._estimate_before_update, self.estimated_disturbance_nm
+            )
+        self.antiwindup |= limited
+        self.effort = issued.copy()
 
     def predict_velocity(self, position, velocity, target, effort, disturbance, dt):
         """Four implicit nominal substeps and analytic torque-to-endpoint-velocity gain."""
@@ -85,6 +104,7 @@ class BoundedDisturbanceObserver:
             raise ValueError("Observer feedback must be finite matching vectors with positive dt")
         target, position, velocity = values
         previous_estimate = self.estimated_disturbance_nm.copy()
+        self._estimate_before_update = previous_estimate.copy()
         if self.previous_position is None:
             self.velocity_prediction = velocity.copy()
             self.velocity_innovation[:] = 0
