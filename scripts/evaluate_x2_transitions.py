@@ -422,6 +422,8 @@ def run_trial(
     save_trace(path, rows)
     summary = {
         "condition": condition,
+        "physics_dt_s": env.sim_dt,
+        "controller_dt_s": env.control_dt,
         "correction": "bounded_observer" if condition == "observer" else "bounded_integral",
         "correction_parameters": parameters or {},
         "profile": profile,

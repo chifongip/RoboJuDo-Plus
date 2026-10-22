@@ -15,6 +15,71 @@ from x2_robustness_analysis import recovery
 from x2_robustness_sim import PhysicsWriter, load_physics, perturb_plant
 
 
+class TestPhysicsCoverage(unittest.TestCase):
+    def test_both_timesteps_complete_truncated_missing_and_duplicate_samples(self):
+        from x2_robustness_analysis import complete_window, physics_timestep
+
+        for dt in (0.005, 0.0025):
+            with self.subTest(dt=dt):
+                data = {"elapsed_s": np.arange(dt, 2 + dt / 2, dt)}
+                self.assertAlmostEqual(physics_timestep(data, {"physics_dt_s": dt}), dt)
+                self.assertAlmostEqual(physics_timestep(data, {}), dt)
+                self.assertTrue(complete_window(data, 0, 1, dt))
+                self.assertTrue(complete_window(data, 1, 2, dt))
+                self.assertFalse(complete_window({"elapsed_s": data["elapsed_s"][:-2]}, 1, 2, dt))
+                damaged = data["elapsed_s"].copy()
+                damaged[len(damaged) // 2 + 4] = damaged[len(damaged) // 2 + 3]
+                self.assertFalse(complete_window({"elapsed_s": damaged}, 1, 2, dt))
+                self.assertFalse(complete_window({"elapsed_s": np.delete(data["elapsed_s"], -3)}, 1, 2, dt))
+
+    def test_analysis_keeps_refined_windows_and_marks_real_gaps_incomplete(self):
+        from unittest.mock import patch
+
+        from x2_integral_sim import POSTURE
+        from x2_robustness_analysis import analyze_trial
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "trace.npz").touch()
+            for dt in (0.005, 0.0025):
+                times = np.arange(dt, 2 + dt / 2, dt)
+                data = {"elapsed_s": times}
+                for field in ("feedback_age_s", "base_tilt_rad", "base_height_m"):
+                    data[field] = np.zeros(len(times))
+                for name in POSTURE:
+                    for field in (
+                        "injected_position_noise_rad",
+                        "injected_velocity_noise_rad_s",
+                        "saturation_fraction",
+                        "position_rad",
+                        "target_rad",
+                    ):
+                        data[f"{name}_{field}"] = np.zeros(len(times))
+                summary = dict(
+                    physics_trace="trace.npz",
+                    physics_dt_s=dt,
+                    case="test",
+                    condition="observer",
+                    profile="unloaded",
+                    repetition=1,
+                    seed=1,
+                    status="completed",
+                )
+                with (
+                    patch("x2_robustness_analysis.load_physics", return_value=data),
+                    patch("x2_robustness_analysis.physics_statistics", side_effect=lambda _: {"test": {}}),
+                    patch("x2_robustness_analysis.WINDOWS", {"test": (1, 2)}),
+                    patch("x2_robustness_analysis.PHASES", [("test", 1, 2)]),
+                ):
+                    complete = analyze_trial(root, summary)
+                    self.assertIn("test", complete["windows"])
+                    self.assertTrue(complete["phases"]["test"]["complete"])
+                    data["elapsed_s"][-3] = data["elapsed_s"][-4]
+                    damaged = analyze_trial(root, summary)
+                    self.assertNotIn("test", damaged["windows"])
+                    self.assertFalse(damaged["phases"]["test"]["complete"])
+
+
 class TestStudyPairing(unittest.TestCase):
     def test_full_matrix_preserves_matched_conditions_and_both_payload_directions(self):
         from evaluate_x2_compliant_robustness import jobs_for

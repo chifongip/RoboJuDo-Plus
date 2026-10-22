@@ -61,6 +61,7 @@ class AgiBotCppEnv(Environment):
         self._arm_observer_eligible = False
         self._observer_reset_generation = None
         self._observer_feedback_time = None
+        self._observer_sample_times = None
         self._control_joint_names: set[str] = set()
         self._last_clamp_log_time = 0.0
         self._last_safety_state: str | None = None
@@ -131,7 +132,7 @@ class AgiBotCppEnv(Environment):
         if self._arm_observer is not None and not hasattr(self.aimdk.get_safety_status(), "reset_generation"):
             self.aimdk.shutdown()
             raise RuntimeError("Rebuild aimdk_cpp for observer command receipts and reset generations")
-        if self._arm_observer is not None and not hasattr(self.aimdk.get_robot_state(), "joint_age_sec"):
+        if self._arm_observer is not None and not hasattr(self.aimdk.get_robot_state(), "joint_received_time_sec"):
             self.aimdk.shutdown()
             raise RuntimeError("Rebuild aimdk_cpp for timestamped observer joint snapshots")
         self._odometry_type = cfg_env.odometry_type
@@ -212,6 +213,7 @@ class AgiBotCppEnv(Environment):
         observer = getattr(self, "_arm_observer", None)
         if observer is not None:
             ages = np.asarray(state.joint_age_sec, dtype=float)
+            self._observer_sample_times = np.asarray(state.joint_received_time_sec, dtype=float)
             self._observer_feedback_time = None
             if ages.shape == (self.num_dofs,):
                 arm_ages = ages[observer.indices]
@@ -386,6 +388,7 @@ class AgiBotCppEnv(Environment):
             or observer.mode == "OFF"
             or status.state != "ACTIVE"
             or not report.required_streams_fresh
+            or getattr(self, "_observer_sample_times", None) is None
             or sample_time is None
             or not np.isfinite(sample_time)
             or not 0 <= now - sample_time <= observer.max_dt
@@ -394,12 +397,14 @@ class AgiBotCppEnv(Environment):
             self.aimdk.step(target.tolist())
             return
         try:
-            effort = observer.propose(target, self._dof_pos, self._dof_vel, now)
+            effort = observer.propose(
+                target, self._dof_pos, self._dof_vel, now, sample_times=self._observer_sample_times
+            )
             receipt = self.aimdk.step(target.tolist(), effort, self._observer_reset_generation)
             if receipt.reset_generation != self._observer_reset_generation:
                 self.reset_arm_observer()
                 return
-            observer.acknowledge(receipt.arm_efforts)
+            observer.acknowledge(receipt.arm_efforts, command_time=receipt.command_time_sec)
         except (TypeError, ValueError, RuntimeError, FloatingPointError):
             self.reset_arm_observer()
             raise

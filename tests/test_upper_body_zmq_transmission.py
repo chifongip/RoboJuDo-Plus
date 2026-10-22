@@ -49,6 +49,7 @@ class UpperBodyTransmissionTests(unittest.TestCase):
         env._arm_observer_eligible = False
         env._observer_reset_generation = 0
         env._observer_feedback_time = time.monotonic()
+        env._observer_sample_times = np.full(env.num_dofs, env._observer_feedback_time)
         pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
         pipeline.env, pipeline.cfg, pipeline.dt = env, cfg, 0.02
         pipeline.mode = ControlMode.RL_DEFAULT
@@ -86,6 +87,7 @@ class UpperBodyTransmissionTests(unittest.TestCase):
 
     def apply(self, data):
         self.pipeline.env._observer_feedback_time = time.monotonic()
+        self.pipeline.env._observer_sample_times[:] = self.pipeline.env._observer_feedback_time
         target, _ = self.pipeline._step_rl_policy({}, data, dry_run=False)
         sent, effort = self.pipeline.env.aimdk.commands[-1]
         np.testing.assert_array_equal(sent, np.clip(target, *self.pipeline.env.position_limits.T))
@@ -113,6 +115,11 @@ class UpperBodyTransmissionTests(unittest.TestCase):
         np.testing.assert_array_equal(effort, 0)  # First observer sample initializes history.
         time.sleep(0.02)
         self.pipeline.env._dof_vel[self.pipeline.env._arm_observer.indices] = -0.1
+        _, effort = self.apply(self.receive(positions))
+        # The first receipt follows the initial snapshot; that partially unknown
+        # interval initializes only. The next interval has complete command history.
+        np.testing.assert_array_equal(effort, 0)
+        time.sleep(0.02)
         _, effort = self.apply(self.receive(positions))
         self.assertGreater(np.max(abs(effort)), 0)
         np.testing.assert_array_equal(effort, self.pipeline.env._arm_observer.issued_nm)

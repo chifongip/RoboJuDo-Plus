@@ -14,6 +14,27 @@ def mask(data, start, end):
     return (t >= start) & (t < end)
 
 
+def physics_timestep(data, summary):
+    """Use recorded cadence, inferring it only for historical traces without metadata."""
+    value = summary.get("physics_dt_s")
+    if value is None:
+        gaps = np.diff(data.get("elapsed_s", []))
+        positive = gaps[gaps > 0]
+        value = float(np.min(positive)) if len(positive) else None
+    if value is None or not np.isfinite(value) or value <= 0:
+        raise ValueError("A positive physics timestep is required to assess coverage")
+    return float(value)
+
+
+def complete_window(data, start, end, dt):
+    times = np.round(data["elapsed_s"], 8)
+    actual = times[mask(data, start, end)]
+    # Physics traces contain endpoint samples: the first interval ends at dt.
+    first = max(dt, start)
+    expected = np.arange(first, end - dt * 1e-6, dt)
+    return len(actual) == len(expected) and np.allclose(actual, expected, rtol=0, atol=1e-8)
+
+
 def error_metrics(error):
     return {
         "rms": float(np.sqrt(np.mean(error**2))),
@@ -178,6 +199,11 @@ def analyze_trial(root, summary):
         "invalid_physics_samples": invalid_samples,
     }
     if len(data.get("elapsed_s", [])):
+        dt = physics_timestep(data, summary)
+        result["physics_dt_s"] = dt
+        for phase, start, end in PHASES:
+            if phase in result["phases"]:
+                result["phases"][phase]["complete"] = complete_window(data, start, end, dt)
         result["feedback"] = {
             "age_max_s": float(data["feedback_age_s"].max()),
             "age_p95_s": float(np.percentile(data["feedback_age_s"], 95)),
@@ -211,7 +237,7 @@ def analyze_trial(root, summary):
         for name, (start, end) in WINDOWS.items():
             sel = mask(data, start, end)
             # A later failure must not erase a fully observed earlier window.
-            if np.count_nonzero(sel) != round((end - start) / 0.005):
+            if not complete_window(data, start, end, dt):
                 continue
             error = np.stack([data[f"{j}_position_rad"][sel] - data[f"{j}_target_rad"][sel] for j in POSTURE])
             result["windows"][name] = error_metrics(error)
@@ -263,8 +289,8 @@ def analyze_case(root):
                         "phase": phase,
                         "trial_status": summary["status"],
                         "phase_samples": stats["samples"],
-                        "phase_complete": stats["samples"]
-                        == round(next(end - start for name, start, end in PHASES if name == phase) / 0.005),
+                        "phase_complete": stats["complete"],
+                        "physics_dt_s": result["physics_dt_s"],
                         "joint": joint,
                         **{f"{key}_deg": float(np.rad2deg(value)) for key, value in errors.items()},
                         **stats["joints"][joint],

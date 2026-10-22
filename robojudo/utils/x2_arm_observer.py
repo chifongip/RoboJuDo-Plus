@@ -55,6 +55,10 @@ class X2ArmObserver:
     def reset(self):
         self.observer.reset()
         self.last_time = None
+        self.sample_times = None
+        self.sample_position = self.sample_velocity = None
+        self.command_history = []
+        self.pending_target = None
         self.proposed_nm = np.zeros(14)
         self.limited_nm = np.zeros(14)
         self.issued_nm = np.zeros(14)
@@ -62,7 +66,43 @@ class X2ArmObserver:
     def adapter_limits(self):
         return self.observer.limits[self.adapter_order].tolist()
 
-    def propose(self, target, position, velocity, now):
+    def _predict_history(self, q, qd, stamps):
+        """Replay accepted commands only over each joint's observed receive interval.
+
+        Receive time is not physical acquisition time. No assumption that Python's
+        monotonic clock shares an epoch with the native clock is needed.
+        """
+        if self.sample_times is None:
+            return (qd.copy(), np.ones(14)), np.zeros(14), np.zeros(14, dtype=bool)
+        elapsed = stamps - self.sample_times
+        fresh = (elapsed > 0) & (elapsed <= self.max_dt)
+        position, velocity = self.sample_position.copy(), self.sample_velocity.copy()
+        dq, dv = np.zeros(14), np.zeros(14)
+        covered = np.zeros(14)
+        for i, (start, goal, effort) in enumerate(self.command_history):
+            end = self.command_history[i + 1][0] if i + 1 < len(self.command_history) else np.inf
+            duration = np.maximum(0, np.minimum(stamps, end) - np.maximum(self.sample_times, start))
+            active = fresh & (duration > 0)
+            if not active.any():
+                continue
+            result = self.observer.predict_state(
+                position,
+                velocity,
+                goal,
+                effort,
+                self.observer.estimated_disturbance_nm,
+                np.where(active, duration, 0.02),
+                dq,
+                dv,
+            )
+            position, velocity, dq, dv = [
+                np.where(active, new, old) for new, old in zip(result, (position, velocity, dq, dv), strict=True)
+            ]
+            covered += duration
+        fresh &= np.isclose(covered, elapsed, rtol=0, atol=1e-9) & (dv > 0)
+        return (np.where(fresh, velocity, qd), np.where(fresh, dv, 1)), np.maximum(elapsed, 0), fresh
+
+    def propose(self, target, position, velocity, now, *, sample_times=None):
         try:
             if not np.isscalar(now) or not np.isfinite(now):
                 raise ValueError("Observer time must be a finite scalar")
@@ -73,7 +113,25 @@ class X2ArmObserver:
                 dt = min(self.max_dt, 0.02)
             q, qd, goal = [self._arm_vector(value) for value in (position, velocity, target)]
             with np.errstate(over="raise", invalid="raise", divide="raise"):
-                self.proposed_nm = self.observer.update(goal, q, qd, dt)
+                if sample_times is None:
+                    # Synchronous callers use one clock and one sample per command.
+                    self.proposed_nm = self.observer.update(goal, q, qd, dt)
+                else:
+                    stamps = self._arm_vector(sample_times)
+                    if not np.isfinite(stamps).all():
+                        raise ValueError("Feedback timestamps must be finite")
+                    if self.sample_times is not None and np.any(stamps < self.sample_times):
+                        self.reset()
+                    prediction, elapsed, fresh = self._predict_history(q, qd, stamps)
+                    self.proposed_nm = self.observer.update(
+                        goal, q, qd, dt, prediction=prediction, feedback_dt=elapsed, fresh=fresh
+                    )
+                    self.sample_times = stamps.copy()
+                    self.sample_position, self.sample_velocity = q.copy(), qd.copy()
+                    # Keep the command active at the oldest sample and subsequent changes.
+                    while len(self.command_history) > 1 and self.command_history[1][0] <= stamps.min():
+                        self.command_history.pop(0)
+                self.pending_target = goal.copy()
                 pd = self.observer.kp * (goal - q) - self.observer.kd * qd
                 lower = np.minimum(0.0, -self.observer.torque_limits - pd)
                 upper = np.maximum(0.0, self.observer.torque_limits - pd)
@@ -86,7 +144,7 @@ class X2ArmObserver:
         # Reconcile that removal before the next predictor/update.
         return (self.limited_nm if self.mode == "ACTIVE" else np.zeros(14))[self.adapter_order].tolist()
 
-    def acknowledge(self, adapter_effort):
+    def acknowledge(self, adapter_effort, *, command_time=None):
         try:
             issued = np.asarray(adapter_effort, dtype=float)
             if issued.shape != (14,):
@@ -100,6 +158,18 @@ class X2ArmObserver:
                 raise ValueError("Non-active observer cannot acknowledge nonzero torque")
             self.observer.acknowledge_effort(issued, freeze_limited_estimate=self.mode != "SHADOW")
             self.issued_nm = issued
+            if command_time is not None:
+                if not np.isscalar(command_time) or not np.isfinite(command_time):
+                    raise ValueError("Command receipt time must be finite")
+                if self.pending_target is None or (self.command_history and command_time < self.command_history[-1][0]):
+                    raise ValueError("Command receipt has no proposal or moves backwards in time")
+                if not self.command_history or not (
+                    np.array_equal(self.pending_target, self.command_history[-1][1])
+                    and np.array_equal(issued, self.command_history[-1][2])
+                ):
+                    self.command_history.append((command_time, self.pending_target.copy(), issued.copy()))
+                if len(self.command_history) > 256:
+                    raise ValueError("Observer command history exceeded its bounded capacity")
         except (TypeError, ValueError):
             self.reset()
             raise

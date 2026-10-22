@@ -428,8 +428,14 @@ missing active limits. Configure the mode before environment construction;
 changing the source configuration in place does not reconfigure the running
 observer. Runtime eligibility disable clears correction immediately.
 
-The observer runs after final target clipping, using measured q/qd and monotonic
-elapsed control time. Per-joint receive ages are captured atomically with the
+The observer runs after final target clipping. Stable per-joint native receive
+timestamps determine which samples are new and how much observed time elapsed.
+Repeated samples freeze adaptation; Python monotonic elapsed time bounds command
+slew only. Timestamped accepted targets and corrections are replayed over each
+joint's observed interval, including command changes during inference delays.
+Intervals lacking complete command history initialize feedback without adaptation.
+Reset clears both sample and command history. Native timestamps share one clock
+domain; they do not require Python and C++ clock epochs to match. Per-joint receive ages are captured atomically with the
 native joint snapshot; newer backend packets cannot make an older Python cache
 appear fresh. These are receive ages, not verified physical acquisition ages. It leaves PD targets and gains unchanged. Correction is
 bounded and slew-limited, then restricted to modeled PD torque headroom. If PD
@@ -477,3 +483,19 @@ qualification of the documented robustness failures and walking-stability limits
 Supplying numeric configuration does not resolve these blockers. No hardware
 connection, deployment process or robot command is part of this integration.
 Historical studies and rejected-controller archives are unchanged.
+
+### Deployment-path regression coverage
+
+`tests/test_x2_observer_closed_loop.py` drives a headless MuJoCo plant through the
+real deployment environment and observer wrapper with a fake native adapter. It
+covers OFF/SHADOW/ACTIVE, arm-only routing, saturation, downstream correction
+limiting/reconciliation, eligibility changes, stale snapshots and zero-effort
+re-entry. The native regression suite captures the actual publishing loop through
+an in-process sink, without constructing actuator publishers, and checks HOLD,
+recovery, reset generations, re-arm, deselection and latched damping messages.
+These tests supplement the historical studies; they do not requalify the frozen
+simulation results or establish hardware stability.
+
+Trial summaries now record physics/controller timesteps. Analysis checks timestamp
+coverage at the recorded cadence, including 2.5 ms refinement. Historical summaries
+without timestep metadata infer cadence from trace timestamps.

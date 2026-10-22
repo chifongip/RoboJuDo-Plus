@@ -39,6 +39,17 @@ class DisturbanceObserverTests(unittest.TestCase):
                 minus, _ = controller.predict_velocity(*args, d - 1e-6, 0.02)
                 np.testing.assert_allclose(gain, (plus - minus) / 2e-6, rtol=1e-6)
 
+    def test_segmented_prediction_propagates_disturbance_sensitivity(self):
+        model = observer()
+        zero = np.zeros(1)
+
+        def replay(disturbance):
+            q, v, dq, dv = model.predict_state(zero, zero, np.array([0.1]), zero, disturbance, 0.007)
+            return model.predict_state(q, v, np.array([-0.1]), np.array([0.02]), disturbance, 0.023, dq, dv)
+
+        _, _, _, gain = replay(zero)
+        np.testing.assert_allclose(gain, (replay(zero + 1e-6)[1] - replay(zero - 1e-6)[1]) / 2e-6, rtol=1e-6)
+
     def test_predictor_retains_friction_and_known_clipped_actuator(self):
         controller = observer()
         zero = np.zeros(1)
