@@ -59,6 +59,24 @@ def force_point_metadata(xml):
     }
 
 
+def torque_limit_metadata(env):
+    """Identify configured limits without claiming physical-robot verification."""
+    return {
+        "source": "X2 locomomanipulation environment/policy DoF configuration",
+        "hardware_limits_verified": False,
+        "hardware_limit_kind": "unknown: peak, continuous and firmware-enforced limits have not been verified",
+        "total_torque_clip": "PD plus additive effort, clipped at every simulation physics substep",
+        "joints": {
+            name: {
+                "configured_total_limit_nm": float(env.torque_limits[index]),
+                "xml_joint_actuator_force_range_nm": env.model.jnt_actfrcrange[env.model.joint(name).id].tolist(),
+                "integral_bound_nm": float(env.integral.limits[list(POSTURE).index(name)]) if name in POSTURE else 0.0,
+            }
+            for index, name in enumerate(env.joint_names)
+        },
+    }
+
+
 @env_registry.register
 class X2IntegralEvaluationEnv(MujocoEnv):
     """Hand-center loads are separate from feedback-only arm torque correction."""
@@ -75,6 +93,8 @@ class X2IntegralEvaluationEnv(MujocoEnv):
         self.last_force_n = 0.0
         self.physics_steps = 0
         self.saturated_steps = 0
+        self.joint_saturated_steps = np.zeros(self.num_dofs, dtype=int)
+        self.control_saturated_steps = np.zeros(self.num_dofs, dtype=int)
         self.max_base_tilt = 0.0
         self.min_base_height = float("inf")
         self.integral = BoundedIntegralCorrection(
@@ -147,16 +167,29 @@ class X2IntegralEvaluationEnv(MujocoEnv):
             )
 
     def _simulate_torque(self, torque_fn):
+        self.control_saturated_steps[:] = 0
+
         def loaded_torque():
             self.update_load()
             torque = torque_fn()
             self.physics_steps += 1
-            self.saturated_steps += int(np.any(np.abs(torque) > self.torque_limits))
+            saturated = np.abs(torque) > self.torque_limits
+            self.saturated_steps += int(np.any(saturated))
+            self.joint_saturated_steps += saturated
+            self.control_saturated_steps += saturated
             return torque
 
         super()._simulate_torque(loaded_torque)
         mujoco.mj_fwdPosition(self.model, self.data)
         self.check_state()
+
+    def reset_measurements(self):
+        """Exclude supported preparation and policy warmup from measurement extrema."""
+        self.physics_steps = self.saturated_steps = 0
+        self.joint_saturated_steps[:] = 0
+        self.max_base_tilt = 0.0
+        self.min_base_height = float("inf")
+        self.max_effort_slew = self.max_effort_bound_excess = 0.0
 
     def step(self, pd_target, hand_pose=None, *, feedforward_effort=None):
         if feedforward_effort is not None:
@@ -235,6 +268,8 @@ def sample_row(env, elapsed):
         "base_tilt_rad": math.acos(float(np.clip(rotation[2, 2], -1, 1))),
         "arm_rms_error_rad": float(np.sqrt(np.mean(errors**2))),
         "saturated": int(np.any(env.last_saturation_mask)),
+        "base_roll_rad": float(np.arctan2(rotation[2, 1], rotation[2, 2])),
+        "base_pitch_rad": float(np.arcsin(np.clip(-rotation[2, 0], -1, 1))),
     }
     for side_index, side in enumerate(SIDES):
         for axis, label in enumerate("xyz"):
@@ -244,9 +279,12 @@ def sample_row(env, elapsed):
         name = env.joint_names[index]
         row[f"{name}_target_rad"] = float(env.last_target[index])
         row[f"{name}_position_rad"] = float(env.dof_pos[index])
+        row[f"{name}_velocity_rad_s"] = float(env.dof_vel[index])
         row[f"{name}_pd_nm"] = float(env.last_pd_torque[index])
         row[f"{name}_feedforward_nm"] = float(env.last_feedforward_effort[index])
         row[f"{name}_applied_nm"] = float(env.last_applied_torque[index])
+    for index, name in enumerate(env.joint_names):
+        row[f"{name}_saturation_fraction"] = float(env.control_saturated_steps[index] / env.sim_decimation)
     return row
 
 
@@ -272,10 +310,19 @@ def integral_sample(env, t):
     for axis, value in zip("xyz", env.force, strict=True):
         row[f"force_{axis}_n"] = float(value)
     for i, joint in enumerate(POSTURE):
-        row[f"{joint}_filtered_error_rad"] = float(env.integral.filtered_error[i])
-        row[f"{joint}_integral_nm"] = float(env.integral.effort[i])
+        row[f"{joint}_correction_nm"] = float(env.integral.effort[i])
+        if isinstance(env.integral, BoundedIntegralCorrection):
+            row[f"{joint}_filtered_error_rad"] = float(env.integral.filtered_error[i])
+            row[f"{joint}_integral_nm"] = float(env.integral.effort[i])
+        else:
+            row[f"{joint}_observer_nm"] = float(env.integral.effort[i])
+            row[f"{joint}_disturbance_estimate_nm"] = float(env.integral.estimated_disturbance_nm[i])
+            row[f"{joint}_velocity_prediction_rad_s"] = float(env.integral.velocity_prediction[i])
+            row[f"{joint}_velocity_innovation_rad_s"] = float(env.integral.velocity_innovation[i])
         row[f"{joint}_effort_slew_nm_s"] = float(env.last_slew[i])
         row[f"{joint}_antiwindup"] = int(env.integral.antiwindup[i])
+        row[f"{joint}_at_bound"] = int(abs(env.integral.effort[i]) >= env.integral.limits[i] - 1e-10)
+        row[f"{joint}_at_slew_limit"] = int(abs(env.last_slew[i]) >= env.integral.slew - 1e-10)
     return row
 
 
