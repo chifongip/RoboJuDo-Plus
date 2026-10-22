@@ -302,13 +302,46 @@ def save_trace(path, rows):
             writer.writerows(rows)
 
 
-def run_trial(condition, profile, repetition, output, viewer=False, parameters=None, warmup_s=5.0):
+def run_trial(
+    condition,
+    profile,
+    repetition,
+    output,
+    viewer=False,
+    parameters=None,
+    warmup_s=5.0,
+    experiment=None,
+    seed=None,
+    payload_config=None,
+    physics_dt=None,
+):
     if condition not in ("pd_only", "integral", "observer"):
         raise ValueError("Unknown evaluation condition")
     if (condition == "observer") != ((parameters or {}).get("method") == "observer"):
         raise ValueError("Observer condition and parameters must agree")
-    np.random.seed(repetition)
-    pipeline = X2LocomanipulationLocoMimicPipeline(transition_config(viewer))
+    np.random.seed(repetition if seed is None else seed)
+    cfg = transition_config(viewer)
+    if profile == "compliant_payload":
+        payload_config = dict(payload_config or {})
+        experiment = experiment if experiment is not None else {"case": "N0"}
+    elif payload_config is not None:
+        raise ValueError("Payload configuration requires the compliant_payload profile")
+    if physics_dt is not None:
+        if physics_dt not in (0.005, 0.0025):
+            raise ValueError("Supported evaluation physics steps are 5 or 2.5 ms")
+        cfg.env.sim_dt = physics_dt
+        cfg.env.sim_decimation = round(0.02 / physics_dt)
+    if experiment is not None:
+        import x2_robustness_sim  # Registers the simulation-only environment.
+
+        cfg.env.env_type = "X2RobustnessEvaluationEnv"
+        if payload_config is not None:
+            cfg.env.env_type = "X2CompliantPayloadEvaluationEnv"
+    pipeline = (
+        x2_robustness_sim.construct_pipeline(X2LocomanipulationLocoMimicPipeline, cfg)
+        if experiment is not None
+        else X2LocomanipulationLocoMimicPipeline(cfg)
+    )
     for policy in pipeline.policy_manager.policies:
         if hasattr(policy, "close_progress"):
             policy.close_progress()
@@ -318,6 +351,12 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
     defaults, carrying = default_posture(), np.asarray(list(POSTURE.values()))
     upper_cfg = deployment_upper_config()
     rows, failure = [], ""
+    if experiment is not None:
+        env.configure_robustness(
+            experiment, repetition if seed is None else seed, output, condition, profile, repetition
+        )
+    if payload_config is not None:
+        env.configure_payload(payload_config)
 
     def control_data(env_data):
         data = synthetic_velocity(env.command_vx)
@@ -345,6 +384,8 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
             raise SimulationFailure("could not activate policy")
         env.elastic_band.active = False
         env.elastic_band.apply()
+        if experiment is not None:
+            env.start_feedback(warmup_s)
         for _ in range(round(warmup_s / pipeline.dt)):
             advance()
         # Reuse the actual deployment override, including EMA, snapping, clipping,
@@ -356,6 +397,8 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
         env.integral_enabled = condition != "pd_only"
         env.measurement_start = env.data.time
         env.reset_measurements()
+        if experiment is not None:
+            env.start_telemetry()
         for step in range(round(DURATION / pipeline.dt)):
             t = step * pipeline.dt
             env.reference_time = t
@@ -367,6 +410,9 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
         failure = str(error)
         logging.exception("%s %s repetition %d failed", condition, profile, repetition)
     finally:
+        trial_end_elapsed = float(env.data.time - env.measurement_start) if env.measurement_start is not None else None
+        if experiment is not None:
+            env.close_telemetry()
         env.clear_load()
         pipeline.ctrl_manager.close()
         env.shutdown()
@@ -384,6 +430,7 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
         "torque_limits": torque_limit_metadata(env),
         "status": "failed" if failure else "completed",
         "termination_reason": failure,
+        "termination_elapsed_s": trial_end_elapsed,
         "samples": len(rows),
         "trace": str(path.relative_to(output)),
         "max_base_tilt_rad": env.max_base_tilt,
@@ -402,6 +449,8 @@ def run_trial(condition, profile, repetition, output, viewer=False, parameters=N
         )
         walking = [r for r in rows if r["phase"] == "walk"]
         summary["mean_walking_speed_m_s"] = float(np.mean(column(walking, "actual_vx_m_s"))) if walking else None
+    if experiment is not None:
+        summary.update(env.robustness_summary())
     (directory / f"{condition}_{repetition}.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
     return summary
 
@@ -572,7 +621,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("logs/x2_transitions") / time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--repetitions", type=int, default=3)
-    parser.add_argument("--profile", choices=("unloaded", "constant", "sway"), action="append")
+    parser.add_argument("--profile", choices=("unloaded", "constant", "sway", "compliant_payload"), action="append")
     parser.add_argument("--viewer", action="store_true")
     parser.add_argument(
         "--condition",
