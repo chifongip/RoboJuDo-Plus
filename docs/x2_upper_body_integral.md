@@ -23,10 +23,22 @@ unchanged.
 | `scripts/evaluate_x2_transitions.py` | PD/integral/observer benchmark |
 | `scripts/plot_x2_transitions.py` | Comparison and all-14-joint plots |
 
-The four matching test modules cover the controllers, simulation, selected
-coefficients and transition/recovery measurements. Identification, parameter
-search, rejected candidate runners and their dedicated tests have been removed.
-Their execution sources and historical results remain in the experiment logs.
+Matching tests cover the controllers, feedback channel, payload mechanics, simulation
+and recovery measurements. The retained robustness tools are:
+
+| File | Purpose |
+| --- | --- |
+| `scripts/evaluate_x2_robustness.py` | Original 594-trial stress matrix and shared execution/provenance helpers |
+| `scripts/evaluate_x2_compliant_robustness.py` | Full 792-trial compliant-payload matrix |
+| `scripts/x2_feedback_perturbations.py` | Matched feedback imperfections and plant uncertainty cases |
+| `scripts/x2_robustness_sim.py` | Isolated feedback injection and physics-cadence telemetry |
+| `scripts/x2_robustness_analysis.py` | All-joint, balance, saturation and recovery measurements |
+| `scripts/x2_robustness_report.py` | Original stress-matrix reporting |
+| `scripts/x2_compliant_payload.py` | Shared three-axis compliant-payload mechanics |
+
+Identification, parameter-search, rejected-controller and one-off study runners
+and their dedicated tests are archived under the historical experiment logs.
+The observer has no retained experimental damping or phase-dependent intervention.
 
 ## Controller assumptions
 
@@ -176,3 +188,216 @@ python -m unittest discover -s tests -p 'test_x2_integral*.py'
 python -m unittest discover -s tests -p test_x2_disturbance_observer.py
 python -m unittest discover -s tests -p test_x2_transitions.py
 ```
+
+## Finite robustness study
+
+The simulation-only robustness runner preserves the selected observer at 8 rad/s:
+
+```bash
+PYTHONPATH="" OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  python scripts/evaluate_x2_robustness.py --jobs 8 \
+  --output logs/x2_transitions/observer-robustness-20261022
+python scripts/plot_x2_transitions.py \
+  logs/x2_transitions/observer-robustness-20261022 --physics --case N0 --case X2 --case P2
+```
+
+There are 22 cases and 594 primary trials, with all three controllers, all three
+load profiles and paired seeds/warmups `(1,4 s), (2,5 s), (3,6 s)`. The runner
+requires exact nominal trace reproduction before perturbed trials and separately
+checks serial/parallel equivalence. Each simulation has isolated state and random
+streams. BLAS/OpenMP/ONNX are limited to one thread per process. XML compilation
+is limited to two simultaneous initializations, and its asset cache is released
+after construction to limit memory without changing the plant. On this host,
+16-worker startup attempts terminated abruptly under resource pressure; the
+completed study used eight workers, with approximately 2.1–2.4 GiB live memory
+per worker. Eight is now the runner default; `--jobs` remains configurable.
+
+`x2_feedback_perturbations.py` defines the fixed matrix: position noise at
+0.01/0.10 degrees standard deviation; velocity noise at 0.005/0.05 rad/s;
+50 ms colored correlated noise at 0.03 degrees/0.015 rad/s; fixed feedback delays
+of 5/20/40 ms; jitter over 10–30 ms; 40/80 ms dropout bursts; plant inertia
+multipliers 0.7/1.3, armature 0.5/1.5 and friction loss 0.5/1.5; two combined
+cases and two shared arm-PD/correction cases. The resolved matrix is archived in
+`manifest.json`, and `--case-file` accepts an explicit JSON list of configurations
+including an unchanged N0. These ranges are exploratory assumptions: archived
+identification supports local-model uncertainty, but supplies no physical
+confidence interval, measured sensor-noise spectrum or transport distribution.
+
+Acquisition runs at 200 Hz. Noise is added before packet delivery; white noise
+is independent, while colored noise has a 50 ms AR(1) correlation time,
+within-arm correlation 0.5 and position/velocity correlation 0.5. Arms are
+independent. The delivery queue discards out-of-order old packets. Dropped
+acquisitions are discarded; the last delivered noisy packet is held, without
+extrapolation or clean-state substitution. Correction continues at 50 Hz using
+elapsed control time. No freshness flags, phases or load truth enter correction.
+Except for P1/P2, perturbations affect only additive-correction feedback; the
+existing PD servo and locomotion sensing remain unchanged. P1/P2 also perturb
+arm PD at its existing physics cadence. No actuator delay is added.
+
+The reference nominal observer model remains fixed while uncertainty changes
+only the actual MuJoCo plant. Link masses, centers of mass and geometry remain
+fixed. Fitted observer friction viscosity is not treated as a plant parameter.
+For relevant background see [Chen et al.](https://doi.org/10.1109/TIE.2015.2478397)
+and [Hespanha et al.](https://web.ece.ucsb.edu/~hespanha/published/ncs_v15p.pdf).
+
+Physics telemetry is logged at 5 ms into compressed, chunked NPZ files, with
+clean evaluation state separate from delivered controller measurements.
+The legacy CSV retains 20 ms samples and PD-envelope recovery semantics.
+The new recovery threshold is the matched unloaded hand's p99 Euclidean
+excursion around its median XYZ position over 20–25 s, without detrending.
+This is an unloaded **motion** envelope, not an isolated sensor-noise estimate.
+Drift and degenerate envelopes are reported. Settlement after unloading at
+79 s requires remaining inside through 89 s with at least 1 s remaining.
+First-sample membership is not a physical settling-time measurement.
+Peak time, signed extrema, rebound, terminal residual and late residual RMS
+are reported alongside censored settling outcomes.
+
+Each case has legacy and physics summaries, all-14-joint error/saturation/ripple
+metrics and matched hand comparisons. The study root contains paired changes,
+failures, plots, an experiment report, nominal/equivalence checks and source,
+configuration, seed, model and XML provenance. Historical logs are preserved.
+Use `--analyze-only --output <existing-study>` to regenerate analysis; this
+rewrites derived reports only. No hardware qualification or continuous operating
+envelope is inferred from these finite, exploratory simulation cases.
+
+### Robustness results and qualification (2026-10-22)
+
+The finite study is complete: 594 primary trials, 586 completed and eight stopped
+at the existing simulation fall-tilt threshold. The observer failed two sway
+trials: friction loss ×0.5 and correlated colored measurement noise, both with
+the seed-3/6 s preparation pairing. Integral failed six sway trials across
+friction, feedback-delay and shared-PD cases. PD-only completed all trials but
+retained much larger carrying errors. These counts are not failure probabilities.
+
+The observer's 27 nominal reference traces reproduce historical shared fields
+exactly. The new 5 ms constant-load unloading peak is 0.370–0.372 mm, including
+the release state; worst-hand entry that remains inside its measured unloaded
+motion band is 0.490–0.495 s. The legacy 20 ms PD-envelope metric remains intact.
+Under high velocity noise, carrying accuracy, unloading displacement and ripple
+worsen. When arm PD also receives delayed feedback, all methods develop severe
+oscillatory regulation/saturation; wide unloaded motion bands can make immediate
+band entry uninformative about physical settling.
+
+The selected observer coefficients remain unchanged. Previously accepted nominal
+tradeoffs do not constitute acceptance of these new failures or stress costs.
+Results describe the sampled points, not a continuous operating envelope or
+hardware qualification. Physical torque ratings remain unverified.
+
+The concise findings and complete evidence are in
+`logs/x2_transitions/observer-robustness-20261022/findings.md` and that directory's
+matrix report, all-joint CSVs, physics summaries, plots and source/hash audits.
+
+### Archived diagnostic and rejected-controller studies
+
+Same-state interventions showed that reducing correction authority prevented the
+two original sway falls, with worse arm accuracy; they did not isolate the full
+mechanical failure mechanism. A 4 rad/s observer and an added-damping candidate
+were rejected after nominal sway falls. Their runners, intervention hooks,
+optional damping and dedicated tests are not retained implementation. Sources
+and unfavorable results remain in:
+
+- `logs/x2_transitions/observer-causality-20261022-final`
+- `logs/x2_transitions/observer-bandwidth4-20261022`
+- `logs/x2_transitions/observer-damping05-20261022`
+
+### Shared compliant payload in three dimensions
+
+`compliant_payload` is a separate profile; the original `sway` stress test is
+unchanged. One translation-only mass moves relative to the midpoint of the
+hand centers. It represents a compliant grip that stays held, with equal hand
+reactions. Object rotation, unequal load sharing, collisions and slipping are
+outside this approximation.
+
+The fixed exploratory parameters are mass `40/9.81 kg`, total Cartesian
+stiffness `[100, 100, 800] N/m`, and damping ratio `0.25` per axis, with
+`C = 2 * 0.25 * sqrt(m*K)`. The full-load equilibrium is 50 mm below the hand
+midpoint and gives 20 N downward per hand. Initial displacement `[5,0,1] mm`
+and lateral velocity `0.005*sqrt(Ky/m) m/s` excite all three directions; a
+second condition reverses both signs.
+
+For midpoint position/velocity `a, va` and payload state `p, v`, the force on
+the object is `F = K*(a-p) + C*(va-v)`. During the existing pickup/unloading
+schedule, load fraction `lambda` scales both the object grip force and the
+equal-and-opposite hand reactions. A virtual support supplies
+`-(1-lambda)*m*g`. At full load, `m*pdd = m*g + F`, and each hand receives
+`-F/2`. Actual dynamic forces are logged without clipping.
+
+Payload state advances once per robot physics step using semi-implicit Euler;
+it is detached and caught by virtual support after unloading. Support work,
+changing-coupling work, damping/catch dissipation and numerical energy residual
+are logged explicitly. Payload truth is evaluation-only and never enters the
+controller. MuJoCo shows a sphere and compliant-connection markers.
+
+```bash
+PYTHONPATH="" OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  python scripts/evaluate_x2_transitions.py --profile compliant_payload \
+  --condition observer --repetitions 1 --warmup-seconds 5 --viewer --jobs 1 \
+  --output logs/x2_transitions/my-compliant-view
+```
+
+The archived 39-trial study had 18 exact historical reference replays, 18 compliant
+trials and three smaller-timestep comparisons. Its one-off runner is archived;
+the benchmark above retains the payload profile and MuJoCo visualization.
+Controllers are PD-only, retained integral and the selected 8 rad/s observer.
+Primary physics/telemetry is 5 ms; the numerical checks use 2.5 ms physics with separately
+derived 5 ms analysis traces. Controller updates stay at 50 Hz throughout.
+Payload parameters and relative initial conditions are matched; realized forces
+respond to each controller's trajectory and therefore need not match. The model
+parameters are not hardware measurements or a full grasp/contact model.
+
+All 39 runs completed without falls or numerical failures. Across six primary
+compliant trials, the observer's 55–60 s aggregate walking RMS was
+0.253–0.255°, versus integral 0.210–0.211° and PD-only approximately 5.234°.
+Observer unloading peak was 0.376–0.378 mm and motion-band recovery
+0.510–0.515 s; the integral retained lower carrying RMS but unloaded by
+29.270–29.285 mm. These aggregate errors do not bound every joint/transient.
+
+Smaller-timestep outcomes were unchanged, but full-run world payload positions
+differed by 4.1–13.7 cm. Active relative payload motion differed by up to
+1.63 mm, so whole-trajectory numerical convergence is not established. Fine
+unloading/recovery is not qualified because the study did not include matched
+fine-step unloaded baselines. Forces are recorded at the start of each physics
+interval with an explicit evaluation timestamp; payload positions/velocities
+are recorded at the end. Full results and provenance:
+`logs/x2_transitions/compliant-payload-20261022/findings.md`.
+
+### Full compliant-payload robustness study
+
+```bash
+PYTHONPATH="" OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  python scripts/evaluate_x2_compliant_robustness.py --jobs 8 \
+  --output logs/x2_transitions/my-compliant-robustness
+```
+
+This runs 22 perturbation cases × three controllers × four load conditions ×
+three paired seed/warmup settings: 792 trials. Conditions are unloaded, constant
+load and both compliant-payload initial motion directions. The original prescribed
+sway is available in the benchmark and original robustness runner. All 36 nominal
+traces must match the archived 39-trial study before perturbed acquisition starts.
+The runner archives sources/configurations and writes progress, per-trial legacy
+and 5 ms traces, per-case physics summaries, all-joint tables and trace hashes.
+Output directories must be new. Acquisition completion and analysis completion
+are recorded separately in `execution.json` and `completion.json`.
+
+The completed study acquired 792 trials in 109.8 minutes with eight workers:
+791 completed and one observer trial fell under shared-PD combined impairment P2
+(positive payload motion, seed 2, at 71 s). All 36 nominal checks were exact;
+16,625,200 physics samples contained no invalid numeric values. All correction
+bounds and slew limits held. The previous F1/C1 sway falls did not recur with the
+compliant payload, whose fore–aft forces are much smaller and motion-dependent.
+This does not establish that their original failure mechanism was fixed.
+
+Nominal observer walking RMS was 0.253–0.255° and unloading peak 0.376–0.378 mm.
+High velocity noise increased these to 0.544–0.563° and 4.295–6.373 mm. The
+integral retained lower nominal carrying RMS. Shared-PD cases produced severe
+oscillation/clipping across methods, including completed trials; the P2 fall
+cannot be attributed to the observer alone. Noisy unloaded motion enlarges
+recovery envelopes, so first-sample membership does not establish fast settling.
+Timestep convergence remains unresolved and physical torque ratings unverified.
+
+Results, all 792 trial comparisons and audit:
+`logs/x2_transitions/compliant-robustness-20261022/findings.md`,
+`review_overview.csv` and `review_audit.json` in that directory.
+
+The final cleanup preserves removed sources and hashes in
+`logs/x2_transitions/observer-final-cleanup-20261022`. Historical logs remain intact.

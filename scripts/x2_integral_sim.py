@@ -198,10 +198,11 @@ class X2IntegralEvaluationEnv(MujocoEnv):
         self.raw_effort[:] = 0
         previous = self.integral.effort.copy()
         if self.integral_enabled:
+            position, velocity = self.correction_feedback()
             self.raw_effort[self.arm_indices] = self.integral.update(
                 self.last_target[self.arm_indices],
-                self.dof_pos[self.arm_indices],
-                self.dof_vel[self.arm_indices],
+                position,
+                velocity,
                 self.control_dt,
             )
         self.last_slew = (self.integral.effort - previous) / self.control_dt
@@ -210,6 +211,10 @@ class X2IntegralEvaluationEnv(MujocoEnv):
             self.max_effort_bound_excess, float(np.max(np.abs(self.integral.effort) - self.integral.limits))
         )
         MujocoEnv.step(self, pd_target, hand_pose, feedforward_effort=self.raw_effort)
+
+    def correction_feedback(self):
+        """Measured arm feedback; simulation studies may replace this channel."""
+        return self.dof_pos[self.arm_indices], self.dof_vel[self.arm_indices]
 
     def clear_load(self):
         self.measurement_start = None
