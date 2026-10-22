@@ -19,6 +19,7 @@ class UpperBodyZmqPipelineMixin:
         )
         self._upper_body_enabled = False
         self._upper_body_stream_was_fresh = False
+        self._upper_body_generation = None
         self._upper_body_indices = np.asarray([], dtype=np.int32)
         self._upper_body_default = np.asarray([], dtype=np.float32)
         self._upper_body_filtered = np.asarray([], dtype=np.float32)
@@ -87,6 +88,12 @@ class UpperBodyZmqPipelineMixin:
             return
         self._upper_body_enabled = enabled
         self._upper_body_stream_was_fresh = False
+        manager = getattr(self, "ctrl_manager", None)
+        entry = getattr(manager, "controllers", {}).get("UpperBodyZmqCtrl")
+        if entry is not None:
+            receiver = entry["inst"]
+            receiver.reset()
+            self._upper_body_generation = receiver.reset_generation
         logger.warning("Upper-body ZMQ control %s", "enabled" if enabled else "disabled")
 
     def _toggle_upper_body(self):
@@ -109,18 +116,38 @@ class UpperBodyZmqPipelineMixin:
         desired = self._upper_body_default.copy()
         stream_data = ctrl_data.get("UpperBodyZmqCtrl", {})
         stream_is_fresh = bool(stream_data.get("fresh", False))
+        generation = getattr(self, "_upper_body_generation", None)
+        if generation is not None:
+            stream_generation = stream_data.get("reset_generation")
+            stream_is_fresh = stream_is_fresh and isinstance(stream_generation, int) and stream_generation >= generation
+            if isinstance(stream_generation, int) and stream_generation >= generation:
+                self._upper_body_generation = stream_generation
+        positions = stream_data.get("joint_positions", {})
+        received_at = stream_data.get("joint_received_at")
+        if received_at is not None:
+            now = time.monotonic()
+            # Inference occurs after CtrlManager samples the receiver. Recheck
+            # leases at application time, rather than trusting an earlier bool.
+            positions = {
+                name: value
+                for name, value in positions.items()
+                if name in received_at and 0 <= now - received_at[name] <= self._upper_body_cfg.timeout_s
+            }
+            stream_is_fresh = stream_is_fresh and bool(positions)
         if self._upper_body_enabled and stream_is_fresh:
-            positions = stream_data.get("joint_positions", {})
             for local_index, name in enumerate(self._upper_body_cfg.joint_names):
                 if name in positions:
-                    desired[local_index] = positions[name]
-            limits = self.env.position_limits[self._upper_body_indices]
-            desired = np.clip(desired, limits[:, 0], limits[:, 1])
+                    # Narrow only after bounding to the destination dtype; large
+                    # finite JSON values must not overflow before joint clipping.
+                    numeric_limit = np.finfo(desired.dtype).max
+                    desired[local_index] = np.clip(positions[name], -numeric_limit, numeric_limit)
             if not self._upper_body_stream_was_fresh:
                 logger.info("Upper-body ZMQ stream active")
         elif self._upper_body_enabled and self._upper_body_stream_was_fresh:
             logger.warning("Upper-body ZMQ stream timed out; returning to defaults")
 
+        limits = self.env.position_limits[self._upper_body_indices]
+        desired = np.clip(desired, limits[:, 0], limits[:, 1])
         self._upper_body_stream_was_fresh = self._upper_body_enabled and stream_is_fresh
         alpha = self._upper_body_cfg.ema_alpha
         previous = self._upper_body_filtered

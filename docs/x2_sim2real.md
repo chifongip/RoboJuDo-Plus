@@ -187,10 +187,16 @@ publisher must bind that endpoint and send JSON objects in radians using the fol
 }
 ```
 
-Updates may contain any non-empty subset of the 14 arm joints: shoulder pitch/roll/yaw, elbow, and wrist yaw/pitch/roll
-for the left and right sides. Values from earlier partial updates remain active while messages are fresh. Waist joints
-remain policy-controlled, and the head remains at its configured default pose. Unknown joints, malformed envelopes,
-and non-finite values cause the complete message to be rejected.
+Each message must be one UTF-8 JSON frame, with no topic prefix or multipart envelope,
+and at most 16 KiB. Updates may contain any non-empty subset of the 14 arm joints:
+shoulder pitch/roll/yaw, elbow, and wrist yaw/pitch/roll for the left and right sides.
+Each joint has its own `timeout_s` lease: updating one joint does not keep another
+joint's old target alive. Expired or missing joints smoothly return to their
+configured defaults. Waist joints remain policy-controlled, and the head remains
+at its configured default pose. Unknown joints, duplicate JSON keys, malformed
+envelopes, booleans and non-finite values reject the entire message without
+refreshing any lease. Large finite positions are clipped without overflowing the
+filter's float32 storage.
 
 `x2_locomanipulation_real` instead connects to dex teleop at `tcp://10.0.1.20:8560` and requires one complete
 `synchronized_teleop_frame` containing all 14 arm joints and both sets of 12 OmniHand joints. It rejects incomplete,
@@ -199,12 +205,55 @@ locally timed-out, duplicate/out-of-order, `sim2sim`, or incorrectly ordered fra
 External arm control starts disabled. Press joystick `Start` in `RL_DEFAULT`, or release keyboard `T` in simulation, to
 toggle it. Targets are clamped to the X2 joint limits and filtered at 50 Hz with an EMA alpha of `0.95`. If no valid
 message arrives for `0.25 s`, or external control is disabled, the arms smoothly return to the recorded locomanipulation
-pose. A fresh message resumes control after a timeout without another toggle. Leaving `RL_DEFAULT`, resetting the
-simulation, or entering a safety mode disables the override.
+pose. A fresh message resumes control after a timeout without another toggle.
+Receive timestamps are checked again after policy inference, immediately before
+target filtering. Leaving `RL_DEFAULT`, resetting the simulation, or entering a
+safety mode disables the override. Toggle edges reset the receiver session and
+flush pending messages; the data read before an enable edge cannot activate the
+new session. The publisher must continue sending afterward.
 After smoothing, `UpperBodyZmqCtrlCfg.max_joint_velocity_rad_s` limits each commanded joint to `1.0 rad/s` by default
 (`0.02 rad` per cycle at 50 Hz). This applies to live commands, reconnection, and returns on timeout or disable.
 The limit uses the configured control timestep and bounds commanded position changes, not measured speed or torque.
 Validate changes to this setting in simulation first. GR00T uses the same `1.0 rad/s` default.
+
+The receiver processes at most 100 frames per control poll. If it exhausts that
+budget, or polling stalls longer than the timeout, it clears the command cache,
+discards queued frames until the queue is observed empty, and requires a later
+packet before resuming. This intentionally favors default-pose fallback over
+replaying a queue after a stall. PUB/SUB delivery is best effort: continuously
+publish current snapshots rather than relying on one-shot updates.
+
+The inspected MoveIt adapter in `x2_ws` binds a PUB socket, uses a send high-water
+mark of one, and emits complete 14-arm `positions` snapshots at a configured
+50 Hz. It creates the direct arm HAL publisher only when `command_transport` is
+`ros_topic`. Use `command_transport:=zmq` for the RoboJuDo route: the inspected
+`box_pick_place.launch.py` defaults to `zmq`, while `real_robot.launch.py` defaults
+to `ros_topic`. Keep one arm HAL command owner. The subscriber's endpoint must
+name the publisher host; `127.0.0.1` is correct only when both run on the same host.
+
+The path is: MoveIt/ros2_control → ZMQ PUB → `UpperBodyZmqCtrl` → `CtrlManager` →
+mode gate and EMA/velocity limiting → final environment position clipping →
+optional arm observer → atomic AimDK position/arm-effort submission. Only the
+14 named arm targets are overridden. Leg/waist policy targets and head ownership
+are preserved. The observer uses the final clipped arm targets, not raw ZMQ data.
+
+Legacy `positions` messages contain no source timestamp, sequence or delivery
+acknowledgement. Local receive-age and session checks cannot establish source
+age, detect an otherwise valid delayed/replayed packet, or prove physical command
+application. A stronger guarantee requires a coordinated publisher/receiver
+protocol change and an explicit clock/session contract; adding an arbitrary
+extra JSON field currently provides no such guarantee. Actual network timing,
+robot feedback and firmware behavior still require deployment qualification.
+
+Hardware-free checks cover malformed/duplicate/multipart payloads, per-joint
+expiry, control-loop stalls and bounded draining. The loopback integration tests
+use ephemeral localhost ports, actual PUB/SUB and `CtrlManager`, X2 filtering and
+observer code, and a fake native adapter; they exercise timeout, reconnect,
+post-inference expiry and enable-session invalidation without robot commands:
+
+```bash
+python -m unittest discover -s tests -p 'test_upper_body_zmq*.py'
+```
 
 Use the interactive predefined-pose publisher to exercise the interface:
 
@@ -223,16 +272,24 @@ import zmq
 
 context = zmq.Context()
 publisher = context.socket(zmq.PUB)
+publisher.setsockopt(zmq.SNDHWM, 1)
+publisher.setsockopt(zmq.LINGER, 0)
 publisher.bind("tcp://127.0.0.1:8559")
-time.sleep(0.2)  # Allow the subscriber connection to settle.
-publisher.send_json(
-    {
-        "positions": {
-            "left_shoulder_pitch_joint": 0.35,
-            "right_shoulder_pitch_joint": 0.35,
-        }
+message = {
+    "positions": {
+        "left_shoulder_pitch_joint": 0.35,
+        "right_shoulder_pitch_joint": 0.35,
     }
-)
+}
+try:
+    while True:
+        publisher.send_json(message)
+        time.sleep(0.02)  # Continuously refresh the commanded joints at about 50 Hz.
+except KeyboardInterrupt:
+    pass
+finally:
+    publisher.close()
+    context.term()
 ```
 
 ## Startup Sequence
