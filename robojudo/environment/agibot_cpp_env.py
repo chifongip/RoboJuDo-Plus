@@ -354,6 +354,19 @@ class AgiBotCppEnv(Environment):
             "proposed_nm": observer.proposed_nm.tolist(),
             "limited_nm": observer.limited_nm.tolist(),
             "issued_nm": observer.issued_nm.tolist(),
+            "desired_nm": observer.observer.desired_nm.tolist(),
+            "velocity_prediction_rad_s": observer.observer.velocity_prediction.tolist(),
+            "velocity_innovation_rad_s": observer.observer.velocity_innovation.tolist(),
+            "instantaneous_disturbance_nm": observer.observer.instantaneous_disturbance_nm.tolist(),
+            "inversion_residual_rad_s": observer.observer.inversion_residual_rad_s.tolist(),
+            "fresh": observer.observer.fresh.tolist(),
+            "release_limited": observer.observer.release_limited.tolist(),
+            "antiwindup": observer.observer.antiwindup.tolist(),
+            "estimate_at_bound": np.isclose(
+                abs(observer.observer.estimated_disturbance_nm), observer.observer.limits, rtol=0, atol=1e-3
+            ).tolist(),
+            "headroom_limited": (observer.proposed_nm != observer.limited_nm).tolist(),
+            "downstream_limited": (observer.limited_nm != observer.issued_nm).tolist(),
             "reset_generation": self._observer_reset_generation,
             "model_qualification": "simulation_only",
         }
