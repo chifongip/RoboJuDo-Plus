@@ -1,27 +1,17 @@
 """Sampled observer contracts on its model and respects actuator constraints."""
 
 import hashlib
-import importlib.util
 import json
-import sys
 import unittest
-from pathlib import Path
 
 import numpy as np
 
-from robojudo.utils.disturbance_observer import BoundedDisturbanceObserver
-
-if "x2_observer_reference" not in sys.modules:
-    spec = importlib.util.spec_from_file_location(
-        "x2_observer_reference", Path(__file__).parents[1] / "scripts/x2_observer_reference.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+from robojudo.config.x2 import observer_parameters as reference
+from robojudo.utils.observers import LinearizedDisturbanceObserver
 
 
 def observer(**kwargs):
-    return BoundedDisturbanceObserver(
+    return LinearizedDisturbanceObserver(
         [50.0], [3.0], [36.0], inertia=0.1, friction_limit=0.3, friction_viscosity=40.0, **kwargs
     )
 
@@ -113,7 +103,6 @@ class DisturbanceObserverTests(unittest.TestCase):
 
 class TestSelectedObserverReference(unittest.TestCase):
     def test_coefficients_match_three_warmup_validated_reference(self):
-        reference = sys.modules["x2_observer_reference"]
         parameters = reference.selected_observer_parameters()
         fingerprint = hashlib.sha256(json.dumps(parameters, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         # Frozen from the actual nine-trial validation, not a newly tuned default.
@@ -122,7 +111,6 @@ class TestSelectedObserverReference(unittest.TestCase):
         self.assertEqual(len(parameters["friction_viscosity"]), 14)
 
     def test_reference_returns_independent_parameter_state(self):
-        reference = sys.modules["x2_observer_reference"]
         first = reference.selected_observer_parameters()
         first["inertia"][0] = -1
         self.assertGreater(reference.selected_observer_parameters()["inertia"][0], 0)

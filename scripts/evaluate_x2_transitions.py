@@ -1,4 +1,4 @@
-"""Compare PD, retained integral and selected observer through pickup, walking and placement.
+"""Compare PD, integral and both observers through pickup, walking and placement.
 
 Simulation only: no SDK changes, ROS nodes, hardware commands or sockets.
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import hashlib
 import json
 import logging
@@ -33,17 +34,18 @@ from x2_integral_sim import (
     synthetic_velocity,
     torque_limit_metadata,
 )
-from x2_observer_reference import JOINT_NAMES, selected_observer_parameters
 
+from robojudo.config.x2.observer_parameters import JOINT_NAMES, selected_observer_parameters
 from robojudo.config.x2.x2_cfg import x2_locomimic
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
 from robojudo.environment import env_registry
 from robojudo.pipeline.four_mode_pipeline import ControlMode
 from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import X2LocomanipulationLocoMimicPipeline
 from robojudo.utils.bounded_integral import BoundedIntegralCorrection
-from robojudo.utils.disturbance_observer import BoundedDisturbanceObserver
+from robojudo.utils.observers import LinearizedDisturbanceObserver, NonlinearDisturbanceObserver
 
 DURATION = 105.0
+CONDITIONS = ("pd_only", "integral", "observer", "nonlinear_observer")
 
 
 PHASES = (
@@ -77,10 +79,13 @@ WINDOWS = {
 
 def condition_parameters(condition):
     """Use the frozen observer reference or the retained scalar integral settings."""
-    if condition == "observer":
+    if condition in ("observer", "nonlinear_observer"):
         if tuple(POSTURE) != JOINT_NAMES:
             raise ValueError("Selected observer joint order differs from the benchmark")
-        return selected_observer_parameters()
+        parameters = selected_observer_parameters()
+        if condition == "nonlinear_observer":
+            parameters.update(method="nonlinear_observer", release_slew_nm_s=16.0)
+        return parameters
     if condition not in ("pd_only", "integral"):
         raise ValueError("Unknown evaluation condition")
     return {}
@@ -89,15 +94,27 @@ def condition_parameters(condition):
 def make_correction(env, parameters=None):
     parameters = dict(parameters or {})
     method = parameters.pop("method", "integral")
-    if method not in ("integral", "observer"):
+    if method not in ("integral", "observer", "nonlinear_observer"):
         raise ValueError("Unknown correction method")
-    controller = BoundedDisturbanceObserver if method == "observer" else BoundedIntegralCorrection
-    return controller(
+    release_slew = parameters.pop("release_slew_nm_s", None)
+    controller = {
+        "integral": BoundedIntegralCorrection,
+        "observer": LinearizedDisturbanceObserver,
+        "nonlinear_observer": NonlinearDisturbanceObserver,
+    }[method]
+    if release_slew is not None and method != "nonlinear_observer":
+        raise ValueError("Separate release slew requires the nonlinear observer")
+    correction = controller(
         env.stiffness[env.arm_indices],
         env.damping[env.arm_indices],
         env.torque_limits[env.arm_indices],
         **parameters,
     )
+    if method == "nonlinear_observer":
+        if release_slew is None or not np.isfinite(release_slew) or release_slew <= 0:
+            raise ValueError("Nonlinear observer requires a positive finite release slew")
+        correction.release_slew = release_slew
+    return correction
 
 
 def smoothstep(s):
@@ -315,9 +332,10 @@ def run_trial(
     payload_config=None,
     physics_dt=None,
 ):
-    if condition not in ("pd_only", "integral", "observer"):
+    if condition not in CONDITIONS:
         raise ValueError("Unknown evaluation condition")
-    if (condition == "observer") != ((parameters or {}).get("method") == "observer"):
+    expected_method = condition if condition in ("observer", "nonlinear_observer") else "integral"
+    if (parameters or {}).get("method", "integral") != expected_method:
         raise ValueError("Observer condition and parameters must agree")
     np.random.seed(repetition if seed is None else seed)
     cfg = transition_config(viewer)
@@ -346,6 +364,7 @@ def run_trial(
         if hasattr(policy, "close_progress"):
             policy.close_progress()
     env = pipeline.env
+    mujoco.mj_clearCache(mujoco.mj_getCache())
     env.integral = make_correction(env, parameters)
     env.profile = profile
     defaults, carrying = default_posture(), np.asarray(list(POSTURE.values()))
@@ -358,7 +377,7 @@ def run_trial(
     if payload_config is not None:
         env.configure_payload(payload_config)
 
-    def control_data(env_data):
+    def control_data(_env_data):
         data = synthetic_velocity(env.command_vx)
         data["UpperBodyZmqCtrl"] = {"fresh": True, "joint_positions": dict(zip(POSTURE, env.desired_arm, strict=True))}
         return data
@@ -424,7 +443,12 @@ def run_trial(
         "condition": condition,
         "physics_dt_s": env.sim_dt,
         "controller_dt_s": env.control_dt,
-        "correction": "bounded_observer" if condition == "observer" else "bounded_integral",
+        "correction": {
+            "pd_only": "none",
+            "integral": "bounded_integral",
+            "observer": "linearized_observer",
+            "nonlinear_observer": "nonlinear_observer",
+        }[condition],
         "correction_parameters": parameters or {},
         "profile": profile,
         "repetition": repetition,
@@ -507,6 +531,7 @@ def recovery_measurement(rows, reference, pd_rows, pd_reference, side):
 def baseline_drift(rows, method="integral"):
     """Report integral drift at matching held postures, without correcting the controller."""
     result = {}
+    signal = "observer" if method == "nonlinear_observer" else method
     for phase, start, end in (
         ("default_baseline", 7, 10),
         ("grasp_baseline", 23, 26),
@@ -515,7 +540,7 @@ def baseline_drift(rows, method="integral"):
     ):
         selected = rows_in(rows, start, end)
         slopes = {
-            name: float(np.polyfit(column(selected, "elapsed_s"), column(selected, f"{name}_{method}_nm"), 1)[0])
+            name: float(np.polyfit(column(selected, "elapsed_s"), column(selected, f"{name}_{signal}_nm"), 1)[0])
             for name in POSTURE
         }
         result[phase] = {"effort_slope_nm_s": slopes}
@@ -524,12 +549,15 @@ def baseline_drift(rows, method="integral"):
 
 def comparisons(summaries, output, method="integral"):
     """Report matched measurements without angular or torque-recovery cutoffs."""
-    if method not in ("integral", "observer"):
+    if method not in ("integral", "observer", "nonlinear_observer"):
         raise ValueError("Unknown comparison method")
+    correction_signal = "observer" if method == "nonlinear_observer" else method
     index = {(s["condition"], s["profile"], s["repetition"]): s for s in summaries}
     results = []
     for repetition in sorted({s["repetition"] for s in summaries}):
-        for profile in ("constant", "sway"):
+        for profile in ("constant", "sway", "compliant_payload"):
+            if not any(s["profile"] == profile for s in summaries):
+                continue
             keys = [
                 (condition, load, repetition)
                 for condition, load in (
@@ -602,8 +630,8 @@ def comparisons(summaries, output, method="integral"):
                     "joints": {
                         name: {
                             "residual_nm": float(
-                                np.mean(column(rows_in(il, *WINDOWS[phase]), f"{name}_{method}_nm"))
-                                - np.mean(column(rows_in(iu, *WINDOWS[phase]), f"{name}_{method}_nm"))
+                                np.mean(column(rows_in(il, *WINDOWS[phase]), f"{name}_{correction_signal}_nm"))
+                                - np.mean(column(rows_in(iu, *WINDOWS[phase]), f"{name}_{correction_signal}_nm"))
                             )
                         }
                         for name in POSTURE
@@ -616,7 +644,9 @@ def comparisons(summaries, output, method="integral"):
 
 
 def worker(job):
-    return run_trial(*job)
+    result = run_trial(*job)
+    gc.collect()
+    return result
 
 
 def main():
@@ -627,9 +657,9 @@ def main():
     parser.add_argument("--viewer", action="store_true")
     parser.add_argument(
         "--condition",
-        choices=("pd_only", "integral", "observer"),
+        choices=CONDITIONS,
         action="append",
-        help="Repeat to select methods; default compares all three",
+        help="Repeat to select methods; default compares PD, integral, linearized and nonlinear observers",
     )
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument(
@@ -646,8 +676,8 @@ def main():
         not np.isfinite(x) or x <= 0 for x in args.warmup_seconds
     ):
         parser.error("warmup-seconds must be positive finite, with one value or one per repetition")
-    profiles = args.profile or ["unloaded", "constant", "sway"]
-    conditions = args.condition or ["pd_only", "integral", "observer"]
+    profiles = args.profile or ["unloaded", "constant", "compliant_payload"]
+    conditions = args.condition or list(CONDITIONS)
     if len(set(conditions)) != len(conditions):
         parser.error("conditions must be unique")
     if len(set(profiles)) != len(profiles):
@@ -662,9 +692,14 @@ def main():
         "model_sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
         "robot_xml_sha256": hashlib.sha256(Path(cfg.env.xml).read_bytes()).hexdigest(),
         "controller_sha256": hashlib.sha256(Path("robojudo/utils/bounded_integral.py").read_bytes()).hexdigest(),
-        "correction": "bounded_observer" if "observer" in conditions else "bounded_integral",
+        "correction": "bounded_observer"
+        if any(c in ("observer", "nonlinear_observer") for c in conditions)
+        else "bounded_integral",
         "conditions": conditions,
         "observer_parameters": condition_parameters("observer"),
+        "condition_parameters": {condition: condition_parameters(condition) for condition in conditions},
+        "controller_path": "synchronous correction core; identical final-target/feedback/torque-clipping harness",
+        "profiles": profiles,
         "assessment": "baseline_relative",
         "absolute_joint_error_cutoff_rad": None,
         "hardware_validation": "not_performed",
@@ -677,9 +712,13 @@ def main():
             for p in (
                 Path(__file__),
                 Path("scripts/x2_integral_sim.py"),
-                Path("scripts/x2_observer_reference.py"),
+                Path("robojudo/config/x2/observer_parameters.py"),
                 Path("robojudo/utils/bounded_integral.py"),
-                Path("robojudo/utils/disturbance_observer.py"),
+                Path("robojudo/utils/observers/linearized.py"),
+                Path("robojudo/utils/observers/model.py"),
+                Path("robojudo/utils/observers/nonlinear.py"),
+                Path("scripts/x2_compliant_payload.py"),
+                Path("scripts/x2_robustness_sim.py"),
             )
         },
         "phases": PHASES,
@@ -695,6 +734,7 @@ def main():
             "deadband_deg": 0.2,
             "effort_limit": "min(8 Nm, 0.8 * simulated actuator limit)",
             "slew_nm_s": 2,
+            "nonlinear_release_slew_nm_s": 16,
         },
         "trials": [],
     }
@@ -728,6 +768,7 @@ def main():
     report["trials"].sort(key=lambda s: (s["profile"], s["repetition"], s["condition"]))
     report["comparisons"] = comparisons(report["trials"], args.output)
     report["observer_comparisons"] = comparisons(report["trials"], args.output, "observer")
+    report["nonlinear_observer_comparisons"] = comparisons(report["trials"], args.output, "nonlinear_observer")
     (args.output / "summary.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     flat = [{k: v for k, v in s.items() if k != "phases"} for s in report["trials"]]
     with (args.output / "summary.csv").open("w", newline="") as stream:

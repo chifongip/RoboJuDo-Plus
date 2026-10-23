@@ -9,7 +9,6 @@ import argparse
 import json
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import mujoco
 import numpy as np
@@ -21,42 +20,33 @@ from x2_integral_sim import (
     synthetic_velocity,
 )
 
-from robojudo.config.x2.env.x2_real_env_cfg import X2ArmObserverCfg
+from robojudo.config.observer_cfg import JointObserverCfg
+from robojudo.config.x2.observer_parameters import JOINT_NAMES, selected_observer_parameters
 from robojudo.config.x2.x2_cfg import x2_locomimic
 from robojudo.environment import env_registry
 from robojudo.environment.mujoco_env import MujocoEnv
 from robojudo.pipeline.four_mode_pipeline import ControlMode
 from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import X2LocomanipulationLocoMimicPipeline
-from robojudo.utils.disturbance_observer import BoundedDisturbanceObserver
-from robojudo.utils.x2_arm_observer import X2ArmObserver
-from robojudo.utils.x2_observer_reference import JOINT_NAMES, selected_observer_parameters
+from robojudo.utils.observers import JointObserver
 
 LOAD_START, RELEASE, DURATION = 1.0, 7.0, 12.0
 
 
-class LegacyObserver(BoundedDisturbanceObserver):
-    def update(self, *args, predictor=None, **kwargs):
-        return super().update(*args, **kwargs)
-
-
 def runtime(condition, release_rate, names, kp, kd, limits):
     indices = np.array([names.index(n) for n in JOINT_NAMES])
-    cfg = X2ArmObserverCfg(
+    parameters = selected_observer_parameters()
+    parameters.pop("method")
+    cfg = JointObserverCfg(
+        algorithm="linearized" if condition == "legacy" else "nonlinear",
+        joint_names=list(JOINT_NAMES),
+        **parameters,
         mode="ACTIVE",
         actuator_limits_nm=np.asarray(limits)[indices].tolist(),
         correction_limits_nm=np.minimum(8, 0.8 * np.asarray(limits)[indices]).tolist(),
         slew_nm_s=2,
-        release_slew_nm_s=release_rate,
+        release_slew_nm_s=None if condition == "legacy" else release_rate,
     )
-    wrapper = X2ArmObserver(cfg, names, list(JOINT_NAMES), kp, kd, limits, 0.1)
-    if condition == "legacy":
-        parameters = selected_observer_parameters()
-        parameters.pop("method")
-        wrapper.observer = LegacyObserver(
-            np.asarray(kp)[indices], np.asarray(kd)[indices], cfg.actuator_limits_nm, **parameters
-        )
-        wrapper.reset()
-    return wrapper
+    return JointObserver(cfg, names, kp, kd, actuator_limits=limits, max_dt=0.1)
 
 
 class SimulationAdapter:
@@ -67,10 +57,9 @@ class SimulationAdapter:
 
     def issue(self, target, q, v, now, stamps):
         started = time.perf_counter()
-        proposed = np.array(self.wrapper.propose(target, q, v, now, sample_times=stamps))
+        proposed = self.wrapper.propose(target, q, v, now, sample_times=stamps)
         issued = proposed if self.clip is None else np.clip(proposed, -self.clip, self.clip)
-        receipt = SimpleNamespace(arm_efforts=issued.tolist(), command_time_sec=now)
-        self.wrapper.acknowledge(receipt.arm_efforts, command_time=receipt.command_time_sec)
+        self.wrapper.acknowledge(issued, command_time=now)
         return issued, time.perf_counter() - started
 
 
@@ -200,6 +189,8 @@ class X2ReleaseEvaluationEnv(X2IntegralEvaluationEnv):
         self.records = []
 
     def step(self, pd_target, hand_pose=None, *, feedforward_effort=None):
+        if feedforward_effort is not None:
+            raise ValueError("Release evaluation owns feedforward effort")
         self.last_target = np.clip(np.asarray(pd_target), *self.position_limits.T)
         effort = np.zeros(self.num_dofs)
         if self.release_adapter is not None:

@@ -6,7 +6,7 @@ import numpy as np
 
 from robojudo.environment import env_registry
 from robojudo.environment.mujoco_env import MujocoEnv
-from robojudo.utils.joint_observer import JointObserver
+from robojudo.utils.observers import JointObserver
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +32,9 @@ class ObserverMujocoEnv(MujocoEnv):
                 self.joint_names,
                 self.stiffness,
                 self.damping,
-                self.torque_limits,
-                self.control_dt,
+                actuator_limits=self.torque_limits,
+                control_dt=self.control_dt,
+                max_dt=5 * self.control_dt,
             )
         )
 
@@ -79,16 +80,7 @@ class ObserverMujocoEnv(MujocoEnv):
         observer = self._observer
         if observer is None:
             return {"mode": "OFF", "eligible": False}
-        return {
-            "mode": observer.mode,
-            "eligible": self._observer_eligible,
-            "joint_names": observer.joint_names.copy(),
-            "estimated_disturbance_nm": observer.observer.estimated_disturbance_nm.tolist(),
-            "proposed_nm": observer.proposed_nm.tolist(),
-            "limited_nm": observer.limited_nm.tolist(),
-            "issued_nm": observer.issued_nm.tolist(),
-            "model_qualification": "simulation_only",
-        }
+        return {**observer.get_status(), "eligible": self._observer_eligible, "model_qualification": "simulation_only"}
 
     def step(self, pd_target, hand_pose=None, *, feedforward_effort=None):
         try:

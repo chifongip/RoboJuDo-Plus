@@ -3,14 +3,14 @@
 import unittest
 
 import numpy as np
-from test_x2_arm_observer import config, environment, runtime
+from test_x2_observer import config, environment, runtime
 
-from robojudo.config.x2.env.x2_real_env_cfg import X2ArmObserverCfg
-from robojudo.utils.deployment_disturbance_observer import DeploymentDisturbanceObserver
+from robojudo.config.observer_cfg import JointObserverCfg
+from robojudo.utils.observers import NonlinearDisturbanceObserver
 
 
 def observer():
-    return DeploymentDisturbanceObserver(
+    return NonlinearDisturbanceObserver(
         [50.0],
         [3.0],
         [36.0],
@@ -25,7 +25,7 @@ def affine_predictor(disturbance):
     return disturbance.copy(), np.ones(1)
 
 
-class DeploymentObserverTests(unittest.TestCase):
+class NonlinearObserverTests(unittest.TestCase):
     def test_finite_release_and_reversal_invert_friction_transition(self):
         for sign in (-1, 1):
             for actual in (0.0, -4.0 * sign):
@@ -101,24 +101,24 @@ class DeploymentObserverTests(unittest.TestCase):
         np.testing.assert_array_equal(model.estimated_disturbance_nm, -4)
 
     def test_release_config_validation(self):
-        self.assertIsNone(X2ArmObserverCfg().release_slew_nm_s)
+        self.assertIsNone(config().release_slew_nm_s)
         for invalid in (0, -1, float("nan"), float("inf")):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                X2ArmObserverCfg(release_slew_nm_s=invalid)
+                JointObserverCfg.model_validate({**config().model_dump(), "release_slew_nm_s": invalid})
 
     def test_faster_release_keeps_eligibility_and_generation_resets(self):
         cfg = config().model_copy(update={"release_slew_nm_s": 16})
         env = environment(cfg)
-        env._arm_observer.observer.effort[:] = 0.5
-        env._arm_observer.observer.estimated_disturbance_nm[:] = -0.5
-        env.set_arm_observer_eligible(False)
-        np.testing.assert_array_equal(env._arm_observer.observer.effort, 0)
-        env.set_arm_observer_eligible(True)
+        env._observer.observer.effort[:] = 0.5
+        env._observer.observer.estimated_disturbance_nm[:] = -0.5
+        env.set_observer_eligible(False)
+        np.testing.assert_array_equal(env._observer.observer.effort, 0)
+        env.set_observer_eligible(True)
         env.aimdk.reset_on_step = True
         env.step(np.zeros(16))
-        np.testing.assert_array_equal(env._arm_observer.issued_nm, 0)
-        np.testing.assert_array_equal(env._arm_observer.observer.estimated_disturbance_nm, 0)
-        self.assertIsNone(env._arm_observer.sample_times)
+        np.testing.assert_array_equal(env._observer.issued_nm, 0)
+        np.testing.assert_array_equal(env._observer.observer.estimated_disturbance_nm, 0)
+        self.assertIsNone(env._observer.sample_times)
 
     def test_saturation_discontinuity_keeps_best_bounded_candidate(self):
         model = observer()

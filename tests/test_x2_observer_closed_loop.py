@@ -4,13 +4,12 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from test_x2_arm_observer import FakeAdapter, environment
+from test_x2_observer import FakeAdapter, config, environment
 
-from robojudo.config.x2.env.x2_real_env_cfg import X2ArmObserverCfg
+from robojudo.config.x2.observer_parameters import JOINT_NAMES
 from robojudo.config.x2.x2_cfg import x2_locomimic
 from robojudo.environment.mujoco_env import MujocoEnv
-from robojudo.utils.x2_arm_observer import X2ArmObserver
-from robojudo.utils.x2_observer_reference import JOINT_NAMES
+from robojudo.utils.observers import JointObserver
 
 
 class PlantAdapter(FakeAdapter):
@@ -46,25 +45,21 @@ class DeploymentClosedLoopTests(unittest.TestCase):
             env.position_limits = plant.position_limits
             env.stiffness, env.damping = plant.stiffness, plant.damping
             env._control_joint_names = set(plant.joint_names)
-            observer_cfg = X2ArmObserverCfg(
-                mode=mode,
-                actuator_limits_nm=plant.torque_limits[arms].tolist(),
-                correction_limits_nm=[1.0] * 14,
-                slew_nm_s=2.0,
-            )
-            env._arm_observer = (
+            observer_cfg = config(mode).model_copy(update={"actuator_limits_nm": plant.torque_limits[arms].tolist()})
+            env._observer = (
                 None
                 if mode == "OFF"
-                else X2ArmObserver(
+                else JointObserver(
                     observer_cfg,
                     plant.joint_names,
-                    list(JOINT_NAMES),
                     plant.stiffness,
                     plant.damping,
-                    plant.torque_limits,
-                    0.1,
+                    actuator_limits=plant.torque_limits,
+                    max_dt=0.1,
                 )
             )
+            if env._observer is not None:
+                env._configure_observer_order(list(JOINT_NAMES))
             env.aimdk = PlantAdapter(plant, arms)
             peak, limited = 0.0, False
 
@@ -77,17 +72,17 @@ class DeploymentClosedLoopTests(unittest.TestCase):
                     env.step(goal)
                 np.testing.assert_array_equal(np.delete(plant.last_feedforward_effort, arms), 0)
                 self.assertTrue(np.all(abs(plant.last_applied_torque) <= plant.torque_limits))
-                if env._arm_observer is not None:
-                    np.testing.assert_array_equal(env._arm_observer.issued_nm, env.aimdk.effort)
-                    np.testing.assert_array_equal(env._arm_observer.observer.effort, env.aimdk.effort)
+                if env._observer is not None:
+                    np.testing.assert_array_equal(env._observer.issued_nm, env.aimdk.effort)
+                    np.testing.assert_array_equal(env._observer.observer.effort, env.aimdk.effort)
                 if mode != "ACTIVE":
                     np.testing.assert_array_equal(env.aimdk.effort, 0)
 
             for _ in range(30):
                 advance(target)
                 peak = max(peak, float(np.max(abs(env.aimdk.effort))))
-                if env._arm_observer is not None:
-                    limited |= np.any(abs(env._arm_observer.limited_nm) > abs(env.aimdk.effort) + 1e-10)
+                if env._observer is not None:
+                    limited |= np.any(abs(env._observer.limited_nm) > abs(env.aimdk.effort) + 1e-10)
             if mode == "ACTIVE":
                 self.assertGreater(peak, 0)
                 self.assertTrue(limited)
@@ -99,14 +94,14 @@ class DeploymentClosedLoopTests(unittest.TestCase):
                 self.assertTrue(np.all(env.aimdk.effort[pd > plant.torque_limits[arms]] <= 0))
                 advance(target)
             if mode != "OFF":
-                env.set_arm_observer_eligible(False)
+                env.set_observer_eligible(False)
                 advance(target)
                 np.testing.assert_array_equal(env.aimdk.effort, 0)
-                env.set_arm_observer_eligible(True)
+                env.set_observer_eligible(True)
                 advance(target)
                 np.testing.assert_array_equal(env.aimdk.effort, 0)
                 advance(target, stale=True)
-                self.assertIsNone(env._arm_observer.sample_times)
+                self.assertIsNone(env._observer.sample_times)
                 advance(target)
                 np.testing.assert_array_equal(env.aimdk.effort, 0)
 

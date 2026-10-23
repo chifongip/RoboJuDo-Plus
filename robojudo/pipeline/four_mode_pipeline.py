@@ -101,12 +101,10 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             logger.error("Rejected RL_DEFAULT: JOINT_DEFAULT interpolation has not completed")
             return False
 
-        reset_observer = getattr(self.env, "reset_observer", getattr(self.env, "reset_arm_observer", None))
+        reset_observer = getattr(self.env, "reset_observer", None)
         if reset_observer is not None:
             reset_observer()
-            set_eligible = getattr(
-                self.env, "set_observer_eligible", getattr(self.env, "set_arm_observer_eligible", None)
-            )
+            set_eligible = getattr(self.env, "set_observer_eligible", None)
             set_eligible(False)
         previous = self.mode
         policy_modes = (ControlMode.RL_DEFAULT, ControlMode.RECOVERY_DEFAULT)
@@ -248,10 +246,10 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             logger.warning("JOINT_DEFAULT interpolation complete; RL_DEFAULT is now enabled")
         return target
 
-    def _sync_arm_observer_eligibility(self):
+    def _sync_observer_eligibility(self):
         env = getattr(self, "env", None)
-        set_eligible = getattr(env, "set_observer_eligible", getattr(env, "set_arm_observer_eligible", None))
-        observer = getattr(env, "_observer", getattr(env, "_arm_observer", None))
+        set_eligible = getattr(env, "set_observer_eligible", None)
+        observer = getattr(env, "_observer", None)
         if set_eligible is not None and observer is not None:
             from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
 
@@ -265,13 +263,13 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
                 )
             identity = id(inner)
             if identity != getattr(self, "_observer_policy_identity", None):
-                reset_observer = getattr(env, "reset_observer", getattr(env, "reset_arm_observer", None))
+                reset_observer = getattr(env, "reset_observer", None)
                 reset_observer()
                 self._observer_policy_identity = identity
             set_eligible(eligible)
 
     def _send_policy_target(self, pd_target, hand_pose=None):
-        self._sync_arm_observer_eligibility()
+        self._sync_observer_eligibility()
         self.env.step(pd_target, hand_pose)
 
     def _step_rl_policy(self, env_data, ctrl_data, dry_run: bool):

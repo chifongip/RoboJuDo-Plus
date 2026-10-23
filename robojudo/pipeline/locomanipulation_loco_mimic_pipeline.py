@@ -190,7 +190,7 @@ class LocomanipulationLocoMimicPipelineMixin:
                         if getattr(self, "mode", None) == ControlMode.RECOVERY_DEFAULT:
                             logger.warning("Ignored repeated recovery request")
         finally:
-            self._sync_arm_observer_eligibility()
+            self._sync_observer_eligibility()
 
     def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
         commands = ctrl_data.get("COMMANDS", [])
@@ -213,7 +213,7 @@ class LocomanipulationLocoMimicPipelineMixin:
             try:
                 self.policy_manager.step(env_data, ctrl_data)
             finally:
-                self._sync_arm_observer_eligibility()
+                self._sync_observer_eligibility()
         if self.cfg.debug.log_obs:
             self.debug_logger.log(
                 env_data=env_data,

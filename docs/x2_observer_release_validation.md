@@ -1,5 +1,9 @@
 # X2 deployment observer: abrupt-unloading validation
 
+Historical report: API names below describe commit `f0ba949`. The subsequent
+[shared observer refactor](joint_observer.md) preserves these numerical results
+and replaces the deployment-specific names with explicit algorithm selection.
+
 Implemented and evaluated 2026-10-23. The deployment wrapper now uses a bounded
 nonlinear disturbance estimate, directional estimate unwinding, and independent
 growth/release slew rates. `x2_locomimic_real_observer` remains **OFF**; its selected

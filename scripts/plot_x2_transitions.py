@@ -32,22 +32,6 @@ def plot_profile(root, report, profile):
     reference_trials = {
         (t["condition"], t["repetition"]): t for t in report["trials"] if t["profile"] == "unloaded" and t["samples"]
     }
-    if report.get("reused_pd_baseline"):
-        baseline_root = Path(report["reused_pd_baseline"])
-        baseline = json.loads((baseline_root / "summary.json").read_text())
-        warmups = {t["warmup_s"] for t in trials if t["condition"] in ("integral", "observer")}
-        for trial in baseline["trials"]:
-            if trial["condition"] != "integral" or trial["warmup_s"] not in warmups:
-                continue
-            retained = {
-                **trial,
-                "condition": "retained_integral",
-                "trace": str((baseline_root / trial["trace"]).resolve()),
-            }
-            if trial["profile"] == profile:
-                trials.append(retained)
-            if trial["profile"] == "unloaded":
-                reference_trials[("retained_integral", trial["repetition"])] = retained
     fig, axes = plt.subplots(10, 1, figsize=(13, 23), sharex=True)
     pose_fig, pose_axes = plt.subplots(7, 2, figsize=(16, 19), sharex=True)
     target_trial = next((t for t in trials if t["condition"] == "pd_only"), trials[0] if trials else None)
@@ -56,9 +40,9 @@ def plot_profile(root, report, profile):
         condition = trial["condition"]
         color, style = {
             "pd_only": ("tab:orange", "--"),
-            "integral": ("tab:green", ":") if any(t["condition"] == "observer" for t in trials) else ("tab:blue", "-"),
+            "integral": ("tab:green", ":"),
             "observer": ("tab:blue", "-"),
-            "retained_integral": ("tab:green", ":"),
+            "nonlinear_observer": ("tab:purple", "-."),
         }[condition]
         t = rows["reference_time_s"]
         label = f"{condition}, seed {trial.get('seed', trial['repetition'])}"
@@ -82,13 +66,13 @@ def plot_profile(root, report, profile):
             for index, side in enumerate(("left", "right")):
                 key = f"{side}_torso_z_m"
                 axes[index + 1].plot(t[:n], 1000 * (unloaded[key][:n] - rows[key][:n]), style, color=color)
-            if condition in ("integral", "retained_integral", "observer"):
-                key = f"{elbow}_{'observer' if condition == 'observer' else 'integral'}_nm"
+            if condition in ("integral", "observer", "nonlinear_observer"):
+                key = f"{elbow}_{'observer' if condition in ('observer', 'nonlinear_observer') else 'integral'}_nm"
                 axes[4].plot(t[:n], rows[key][:n], style, color=color, label=f"{condition} total")
                 axes[4].plot(t[:n], unloaded[key][:n], ":", color="gray", label="unloaded reference")
                 axes[5].plot(t[:n], rows[key][:n] - unloaded[key][:n], style, color=color)
         axes[3].plot(t, np.rad2deg(rows["arm_rms_error_rad"]), style, color=color)
-        if condition in ("integral", "observer"):
+        if condition in ("integral", "observer", "nonlinear_observer"):
             axes[6].plot(t, rows[f"{elbow}_target_velocity_rad_s"], color=color)
             axes[7].plot(t, rows["force_z_n"], color="black", alpha=0.5)
             axes[7].plot(t, rows["force_x_n"], color="tab:green", alpha=0.5)

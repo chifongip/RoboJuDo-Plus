@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from box import Box
@@ -12,7 +13,7 @@ from box import Box
 from robojudo.pipeline.upper_body_zmq_pipeline import UpperBodyZmqPipelineMixin
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
-for name in ("x2_integral_sim", "x2_observer_reference", "evaluate_x2_transitions"):
+for name in ("x2_integral_sim", "evaluate_x2_transitions"):
     if name not in sys.modules:
         spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
         module = importlib.util.module_from_spec(spec)
@@ -131,7 +132,7 @@ class TestPostureTransitions(unittest.TestCase):
         self.assertAlmostEqual(drift["grasp_recovery"]["effort_slope_nm_s"]["left_elbow_joint"], 0.03)
 
     def test_observer_is_explicitly_selected_and_never_uses_integral_labels(self):
-        from robojudo.utils.disturbance_observer import BoundedDisturbanceObserver
+        from robojudo.utils.observers import LinearizedDisturbanceObserver
 
         env = SimpleNamespace(
             stiffness=np.array([50.0]),
@@ -142,7 +143,7 @@ class TestPostureTransitions(unittest.TestCase):
         controller = evaluation.make_correction(
             env, {"method": "observer", "inertia": 0.1, "friction_limit": 0.3, "friction_viscosity": 40.0}
         )
-        self.assertIsInstance(controller, BoundedDisturbanceObserver)
+        self.assertIsInstance(controller, LinearizedDisturbanceObserver)
         rows = []
         for start in (7, 23, 86, 102):
             for offset in (0.1, 1.1, 2.1):
@@ -157,13 +158,87 @@ class TestPostureTransitions(unittest.TestCase):
             evaluation.run_trial("observer", "constant", 2, Path("/tmp"))
 
     def test_benchmark_uses_selected_observer_and_unchanged_integral_defaults(self):
-        reference = sys.modules["x2_observer_reference"]
+        from robojudo.config.x2 import observer_parameters as reference
+
         self.assertEqual(tuple(evaluation.POSTURE), reference.JOINT_NAMES)
         self.assertEqual(evaluation.condition_parameters("integral"), {})
         self.assertEqual(evaluation.condition_parameters("pd_only"), {})
         self.assertEqual(evaluation.condition_parameters("observer"), reference.selected_observer_parameters())
         with self.assertRaises(ValueError):
             evaluation.condition_parameters("unknown")
+
+    def test_nonlinear_condition_preserves_model_and_selects_release_rate(self):
+        from robojudo.utils.observers import NonlinearDisturbanceObserver
+
+        linear = evaluation.condition_parameters("observer")
+        nonlinear = evaluation.condition_parameters("nonlinear_observer")
+        self.assertEqual(nonlinear, {**linear, "method": "nonlinear_observer", "release_slew_nm_s": 16.0})
+        env = SimpleNamespace(
+            stiffness=np.full(14, 50.0),
+            damping=np.full(14, 3.0),
+            torque_limits=np.full(14, 36.0),
+            arm_indices=np.arange(14),
+        )
+        controller = evaluation.make_correction(env, nonlinear)
+        self.assertIsInstance(controller, NonlinearDisturbanceObserver)
+        self.assertEqual(controller.slew, 2)
+        self.assertEqual(controller.release_slew, 16)
+        self.assertEqual(controller.bandwidth, 8)
+        self.assertEqual(nonlinear, evaluation.condition_parameters("nonlinear_observer"))
+        with self.assertRaises(ValueError):
+            evaluation.run_trial("nonlinear_observer", "constant", 1, Path("/tmp"), parameters=linear)
+
+    def test_nonlinear_and_compliant_comparison_labels_do_not_use_integral_columns(self):
+        rows = [
+            {
+                "elapsed_s": start + offset,
+                **{f"{name}_observer_nm": 0.02 * (start + offset) for name in evaluation.POSTURE},
+            }
+            for start in (7, 23, 86, 102)
+            for offset in (0.1, 1.1, 2.1)
+        ]
+        drift = evaluation.baseline_drift(rows, "nonlinear_observer")
+        self.assertAlmostEqual(drift["grasp_recovery"]["effort_slope_nm_s"]["left_elbow_joint"], 0.02)
+        summary = {
+            "condition": "nonlinear_observer",
+            "profile": "compliant_payload",
+            "repetition": 1,
+            "status": "failed",
+        }
+        results = evaluation.comparisons([summary], Path("/tmp"), "nonlinear_observer")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["profile"], "compliant_payload")
+        self.assertEqual(results[0]["status"], "unavailable")
+
+    def test_successful_compliant_comparisons_include_correction_recovery(self):
+        for method in ("integral", "observer", "nonlinear_observer"):
+            with self.subTest(method=method):
+                signal = "integral" if method == "integral" else "observer"
+                rows = [
+                    {
+                        "elapsed_s": float(t),
+                        "arm_rms_error_rad": 0.01,
+                        "base_tilt_rad": 0.02,
+                        **{f"{side}_torso_{axis}_m": 0.0 for side in evaluation.SIDES for axis in "xyz"},
+                        **{f"{name}_{signal}_nm": 0.2 for name in evaluation.POSTURE},
+                    }
+                    for t in np.arange(0, 105, 0.1)
+                ]
+                summaries = [
+                    {
+                        "condition": condition,
+                        "profile": profile,
+                        "repetition": 1,
+                        "status": "completed",
+                        "phases": {p: {"rms_tracking_error_rad": 0.01} for p in evaluation.TRANSITIONS},
+                    }
+                    for condition in ("pd_only", method)
+                    for profile in ("unloaded", "compliant_payload")
+                ]
+                with patch.object(evaluation, "read_trace", return_value=rows):
+                    result = evaluation.comparisons(summaries, Path("/tmp"), method)[0]
+                self.assertEqual(result["status"], "measured")
+                self.assertEqual(result["recovery"]["grasp_recovery"]["joints"]["left_elbow_joint"]["residual_nm"], 0)
 
     def test_failure_or_missing_reference_has_no_accuracy_verdict(self):
         row = {"condition": "integral", "profile": "constant", "repetition": 1, "status": "failed"}
