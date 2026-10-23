@@ -173,3 +173,7 @@ and missing velocity-source priorities in three GR00T presets; one test is skipp
 The full suite's ZeroMQ tests use loopback sockets, not robot connections.
 Historical response-review and release-validation reports retain the names used
 when those experiments were conducted.
+
+The subsequent [factorial ablation](x2_observer_ablation.md) separates estimator,
+release rate and directional anti-windup across abrupt unloading and gradual
+placement, documenting the benefits and tradeoffs of the shared nonlinear preset.
