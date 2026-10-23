@@ -1,5 +1,9 @@
 # X2 ACTIVE observer response review
 
+Historical report: source locations and API names below refer to the reviewed
+implementation. See [shared joint observers](joint_observer.md) for the current
+configuration, algorithms and runtime after the behavior-preserving refactor.
+
 Reviewed 2026-10-23 following successful real-world compensation and reported
 overshoot on load removal. The strongest code-level explanation is the symmetric
 2 Nm/s output slew limit. Two additional mechanisms deserve correction before

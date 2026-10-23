@@ -7,11 +7,11 @@ import numpy as np
 
 from robojudo.config.config_manager import ConfigManager
 from robojudo.config.x2 import x2_locomimic, x2_locomimic_observer
+from robojudo.config.x2.observer_parameters import JOINT_NAMES
 from robojudo.environment import env_registry
 from robojudo.pipeline.four_mode_pipeline import ControlMode, FourModePipelineMixin
 from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager
 from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
-from robojudo.utils.x2_observer_reference import JOINT_NAMES
 
 
 class InteractiveObserverTests(unittest.TestCase):
@@ -44,6 +44,7 @@ class InteractiveObserverTests(unittest.TestCase):
         self.assertEqual(actual, base)
         self.assertTrue(cfg.env.is_sim)
         self.assertEqual(cfg.env.observer.mode, "ACTIVE")
+        self.assertEqual(self.env.get_observer_status()["algorithm"], "nonlinear")
         self.assertEqual(cfg.env.sim_dt * cfg.env.sim_decimation, 0.02)
         self.assertEqual(set(cfg.env.feedforward_effort_limits), set(JOINT_NAMES))
         cfg.env.observer.correction_limits_nm[0] = 0.01

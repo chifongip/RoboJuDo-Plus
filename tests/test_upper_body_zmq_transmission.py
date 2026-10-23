@@ -7,14 +7,14 @@ from types import SimpleNamespace
 
 import numpy as np
 import zmq
-from test_x2_arm_observer import FakeAdapter, config
+from test_x2_observer import FakeAdapter, config
 
 from robojudo.config.x2 import x2_locomanipulation_real
 from robojudo.controller.ctrl_manager import CtrlManager
 from robojudo.pipeline.four_mode_pipeline import ControlMode
 from robojudo.pipeline.x2_locomanipulation_pipeline import X2LocomanipulationPipeline
 from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
-from robojudo.utils.x2_arm_observer import X2ArmObserver
+from robojudo.utils.observers import JointObserver
 
 
 class UpperBodyTransmissionTests(unittest.TestCase):
@@ -43,10 +43,11 @@ class UpperBodyTransmissionTests(unittest.TestCase):
         env.stiffness, env.damping = np.asarray(dof.stiffness), np.asarray(dof.damping)
         env._control_joint_names = set(env.joint_names)
         env._last_clamp_log_time = 0.0
-        env._arm_observer = X2ArmObserver(
-            config(), env.joint_names, cfg.env.arm_joint_names, env.stiffness, env.damping, dof.torque_limits, 0.1
+        env._observer = JointObserver(
+            config(), env.joint_names, env.stiffness, env.damping, actuator_limits=dof.torque_limits, max_dt=0.1
         )
-        env._arm_observer_eligible = False
+        env._configure_observer_order(cfg.env.arm_joint_names)
+        env._observer_eligible = False
         env._observer_reset_generation = 0
         env._observer_feedback_time = time.monotonic()
         env._observer_sample_times = np.full(env.num_dofs, env._observer_feedback_time)
@@ -94,7 +95,7 @@ class UpperBodyTransmissionTests(unittest.TestCase):
         nonarm = [i for i, name in enumerate(self.pipeline.env.joint_names) if name not in self.arms]
         np.testing.assert_array_equal(target[nonarm], self.policy_target[nonarm])
         self.assertEqual(effort.shape, (14,))
-        observer = self.pipeline.env._arm_observer
+        observer = self.pipeline.env._observer
         np.testing.assert_array_equal(observer.observer.previous_target, sent[observer.indices])
         return target, effort
 
@@ -114,7 +115,7 @@ class UpperBodyTransmissionTests(unittest.TestCase):
         self.assertTrue(np.all(abs(target[self.pipeline._upper_body_indices] - previous) <= 0.0200001))
         np.testing.assert_array_equal(effort, 0)  # First observer sample initializes history.
         time.sleep(0.02)
-        self.pipeline.env._dof_vel[self.pipeline.env._arm_observer.indices] = -0.1
+        self.pipeline.env._dof_vel[self.pipeline.env._observer.indices] = -0.1
         _, effort = self.apply(self.receive(positions))
         # The first receipt follows the initial snapshot; that partially unknown
         # interval initializes only. The next interval has complete command history.
@@ -122,7 +123,7 @@ class UpperBodyTransmissionTests(unittest.TestCase):
         time.sleep(0.02)
         _, effort = self.apply(self.receive(positions))
         self.assertGreater(np.max(abs(effort)), 0)
-        np.testing.assert_array_equal(effort, self.pipeline.env._arm_observer.issued_nm)
+        np.testing.assert_array_equal(effort, self.pipeline.env._observer.issued_nm)
 
     def test_malformed_and_multipart_packets_cannot_replace_a_valid_snapshot(self):
         positions = {name: 0.1 for name in self.arms}

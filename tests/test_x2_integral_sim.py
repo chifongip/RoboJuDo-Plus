@@ -119,6 +119,36 @@ class TestSimulationFeedforward(unittest.TestCase):
 
 
 class TestHandCenterLoad(unittest.TestCase):
+    def test_nonlinear_slew_occupancy_uses_release_rate_when_unwinding(self):
+        from robojudo.utils.observers import NonlinearDisturbanceObserver
+
+        env = evaluation.X2IntegralEvaluationEnv(evaluation.evaluation_config().env)
+        self.addCleanup(env.shutdown)
+        env.step(env.dof_pos)
+        indices = env.arm_indices
+        env.integral = NonlinearDisturbanceObserver(
+            env.stiffness[indices],
+            env.damping[indices],
+            env.torque_limits[indices],
+            inertia=0.1,
+            friction_limit=0.3,
+            friction_viscosity=40,
+        )
+        env.integral.release_slew = 16
+        env.integral.effort[:] = 0.5
+        env.integral_enabled = True
+        for value, occupied in ((0.4, 0), (0.44, 1)):
+
+            def update(*args, value=value):
+                env.integral.effort[:] = value
+                env.integral.desired_nm[:] = value
+                return env.integral.effort.copy()
+
+            with patch.object(env.integral, "update", side_effect=update), patch.object(evaluation.MujocoEnv, "step"):
+                env.step(env.dof_pos)
+            row = evaluation.integral_sample(env, 1)
+            self.assertEqual(row["left_elbow_joint_at_slew_limit"], occupied)
+
     def test_physics_counter_catches_saturation_before_last_substep(self):
         env = evaluation.X2IntegralEvaluationEnv(evaluation.evaluation_config().env)
         self.addCleanup(env.shutdown)

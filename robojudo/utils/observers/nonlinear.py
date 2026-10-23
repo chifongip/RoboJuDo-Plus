@@ -1,11 +1,11 @@
-"""Finite-residual observer for deployment; the validated simulation DOB stays frozen."""
+"""Bounded nonlinear disturbance estimation, independent of robot and environment."""
 
 import numpy as np
 
-from robojudo.utils.disturbance_observer import BoundedDisturbanceObserver
+from .model import JointDynamics
 
 
-class DeploymentDisturbanceObserver(BoundedDisturbanceObserver):
+class NonlinearDisturbanceObserver(JointDynamics):
     """Invert the bounded nonlinear predictor before filtering a disturbance estimate.
 
     Predictors receive a disturbance vector and return endpoint velocity and its
@@ -29,7 +29,7 @@ class DeploymentDisturbanceObserver(BoundedDisturbanceObserver):
         """Twenty bounded bisections, retaining the smallest observed residual.
 
         In continuous monotone sectors torque resolution is limits / 2**20.
-        The legacy predictor switches its integration rule at torque saturation;
+        The nominal predictor switches its integration rule at torque saturation;
         near those discontinuities a root may not exist. Retain the best tested
         candidate (including the previous estimate), never an unbounded Newton
         step. Nonfinite predictions fail closed.

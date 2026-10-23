@@ -9,21 +9,33 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from robojudo.config.x2.env.x2_real_env_cfg import X2ArmObserverCfg
+from robojudo.config.observer_cfg import JointObserverCfg
+from robojudo.config.x2.observer_parameters import JOINT_NAMES, selected_observer_parameters
 from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
 from robojudo.pipeline.four_mode_pipeline import ControlMode, FourModePipelineMixin
-from robojudo.utils.x2_arm_observer import X2ArmObserver
-from robojudo.utils.x2_observer_reference import JOINT_NAMES
+from robojudo.utils.observers import JointObserver
 
 
 def config(mode="ACTIVE"):
     # Synthetic test limits, not deployment recommendations.
-    return X2ArmObserverCfg(mode=mode, actuator_limits_nm=[10.0] * 14, correction_limits_nm=[1.0] * 14, slew_nm_s=2.0)
+    parameters = selected_observer_parameters()
+    parameters.pop("method")
+    return JointObserverCfg(
+        algorithm="nonlinear",
+        joint_names=list(JOINT_NAMES),
+        **parameters,
+        mode=mode,
+        actuator_limits_nm=[10.0] * 14,
+        correction_limits_nm=[1.0] * 14,
+        slew_nm_s=2.0,
+    )
 
 
 def runtime(cfg=None):
     names = ["leg", "waist", *reversed(JOINT_NAMES)]
-    return X2ArmObserver(cfg or config(), names, list(reversed(JOINT_NAMES)), [20] * 16, [2] * 16, [10] * 16, 0.1)
+    cfg = JointObserverCfg.model_validate((cfg or config()).model_dump())
+    cfg.validate_hardware()
+    return JointObserver(cfg, names, [20] * 16, [2] * 16, actuator_limits=[10] * 16, max_dt=0.1)
 
 
 class FakeAdapter:
@@ -77,8 +89,9 @@ def environment(cfg=None):
     env = AgiBotCppEnv.__new__(AgiBotCppEnv)
     env.enabled = True
     env.aimdk = FakeAdapter()
-    env._arm_observer = runtime(cfg)
-    env._arm_observer_eligible = True
+    env._observer = runtime(cfg)
+    env._configure_observer_order(list(reversed(JOINT_NAMES)))
+    env._observer_eligible = True
     env._observer_reset_generation = 0
     env._observer_feedback_time = time.monotonic()
     env._observer_sample_times = np.full(16, env._observer_feedback_time)
@@ -102,12 +115,12 @@ class ArmObserverTests(unittest.TestCase):
         for now in (1.0, 1.02, 1.04, 1.06, 1.08):
             with patch("robojudo.environment.agibot_cpp_env.time.monotonic", return_value=now):
                 env.step(target)
-            np.testing.assert_array_equal(env._arm_observer.issued_nm, 0)
-            np.testing.assert_array_equal(env._arm_observer.observer.estimated_disturbance_nm, 0)
+            np.testing.assert_array_equal(env._observer.issued_nm, 0)
+            np.testing.assert_array_equal(env._observer.observer.estimated_disturbance_nm, 0)
         with patch("robojudo.environment.agibot_cpp_env.time.monotonic", return_value=1.11):
             env.step(target)
-        self.assertIsNone(env._arm_observer.sample_times)
-        self.assertFalse(env._arm_observer.command_history)
+        self.assertIsNone(env._observer.sample_times)
+        self.assertFalse(env._observer.command_history)
 
     def test_receive_intervals_replay_accepted_targets_across_inference_jitter(self):
         controller = runtime()
@@ -142,20 +155,21 @@ class ArmObserverTests(unittest.TestCase):
         self.assertNotEqual(model.estimated_disturbance_nm[0], previous[0])
 
     def test_configuration_defaults_and_explicit_active_limits(self):
-        self.assertEqual(X2ArmObserverCfg().mode, "OFF")
-        self.assertEqual(X2ArmObserverCfg(mode="SHADOW").mode, "SHADOW")
+        self.assertEqual(config("OFF").mode, "OFF")
+        self.assertEqual(config("SHADOW").mode, "SHADOW")
         for kwargs in (
-            {"mode": "ACTIVE"},
+            {"actuator_limits_nm": None},
             {"correction_limits_nm": [1]},
             {"actuator_limits_nm": [float("nan")] * 14},
             {"slew_nm_s": float("inf")},
             {"actuator_limits_nm": [1] * 14, "correction_limits_nm": [2] * 14},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                X2ArmObserverCfg(**kwargs)
+                candidate = JointObserverCfg.model_validate({**config().model_dump(), **kwargs})
+                candidate.validate_hardware()
 
     def test_mutated_configuration_is_revalidated_before_hardware_fallback(self):
-        cfg = X2ArmObserverCfg(mode="SHADOW")
+        cfg = config("SHADOW").model_copy(update={"actuator_limits_nm": None})
         cfg.mode = "ACTIVE"
         with self.assertRaises(ValueError):
             runtime(cfg)
@@ -217,12 +231,12 @@ class ArmObserverTests(unittest.TestCase):
         env.aimdk.fresh = True
         with (
             patch("robojudo.environment.agibot_cpp_env.time.monotonic", return_value=1.03),
-            patch.object(env._arm_observer, "propose") as propose,
+            patch.object(env._observer, "propose") as propose,
         ):
             env.step(np.zeros(16))
         propose.assert_not_called()
         np.testing.assert_array_equal(env.aimdk.effort, 0)
-        self.assertIsNone(env._arm_observer.observer.previous_position)
+        self.assertIsNone(env._observer.observer.previous_position)
 
     def test_malformed_target_damps_instead_of_leaving_pending_effort(self):
         for target in (np.zeros((16, 1)), [0] * 15, None, ["bad"] * 16):
@@ -243,7 +257,7 @@ class ArmObserverTests(unittest.TestCase):
             qd[2:] -= np.linspace(0.01, 0.14, 14)
             effort = controller.propose(q, q, qd, now)
             controller.acknowledge(effort)
-            np.testing.assert_allclose(effort, controller.issued_nm[::-1])
+            np.testing.assert_allclose(effort, controller.issued_nm)
             self.assertTrue(np.all(abs(controller.issued_nm - previous) <= 2 * (now - previous_time) + 1e-12))
         self.assertGreater(np.max(abs(controller.issued_nm)), 0)
         self.assertTrue(np.all(abs(controller.issued_nm) <= 1))
@@ -278,7 +292,7 @@ class ArmObserverTests(unittest.TestCase):
     def test_final_clipped_targets_and_unchanged_non_arm_positions(self):
         env = environment()
         target = np.linspace(-2, 2, 16)
-        with patch.object(env._arm_observer, "propose", wraps=env._arm_observer.propose) as propose:
+        with patch.object(env._observer, "propose", wraps=env._observer.propose) as propose:
             env.step(target)
         np.testing.assert_array_equal(propose.call_args.args[0], np.clip(target, -1, 1))
         np.testing.assert_array_equal(env.aimdk.commands[-1][0], np.clip(target, -1, 1))
@@ -292,12 +306,12 @@ class ArmObserverTests(unittest.TestCase):
                 env.aimdk.state = "HOLD" if cause == "hold" else "ACTIVE"
                 env._observer_feedback_time = time.monotonic() - (1 if cause == "old_sample" else 0)
                 env.aimdk.reset_on_step = cause == "race"
-                env._arm_observer.observer.effort[:] = 0.5
+                env._observer.observer.effort[:] = 0.5
                 if cause == "generation":
                     env.aimdk.generation += 1
                 env.step(np.zeros(16))
                 np.testing.assert_array_equal(env.aimdk.effort, 0)
-                np.testing.assert_array_equal(env._arm_observer.observer.effort, 0)
+                np.testing.assert_array_equal(env._observer.observer.effort, 0)
 
     def test_lifecycle_clear_and_gain_refresh(self):
         for method, args in (
@@ -307,27 +321,27 @@ class ArmObserverTests(unittest.TestCase):
             ("set_control_joint_names", (["leg"],)),
             ("shutdown", ()),
             ("set_gains", ([30] * 16, [3] * 16)),
-            ("set_arm_observer_eligible", (False,)),
+            ("set_observer_eligible", (False,)),
         ):
             with self.subTest(method=method):
                 env = environment()
-                env._arm_observer.observer.effort[:] = 0.5
+                env._observer.observer.effort[:] = 0.5
                 env.aimdk.effort[:] = 0.5
                 getattr(env, method)(*args)
-                self.assertIsNone(env._arm_observer.observer.previous_position)
+                self.assertIsNone(env._observer.observer.previous_position)
                 np.testing.assert_array_equal(env.aimdk.effort, 0)
-                np.testing.assert_array_equal(env._arm_observer.observer.effort, 0)
+                np.testing.assert_array_equal(env._observer.observer.effort, 0)
                 if method == "set_gains":
-                    np.testing.assert_array_equal(env._arm_observer.observer.kp, 30)
-                    np.testing.assert_array_equal(env._arm_observer.observer.kd, 3)
+                    np.testing.assert_array_equal(env._observer.observer.kp, 30)
+                    np.testing.assert_array_equal(env._observer.observer.kd, 3)
 
     def test_environment_disable_immediately_clears_pending_correction(self):
         env = environment()
         env.aimdk.effort[:] = 0.5
-        env._arm_observer.observer.effort[:] = 0.5
+        env._observer.observer.effort[:] = 0.5
         env.enabled = False
         np.testing.assert_array_equal(env.aimdk.effort, 0)
-        self.assertIsNone(env._arm_observer.observer.previous_position)
+        self.assertIsNone(env._observer.observer.previous_position)
 
     def test_control_joint_iterators_are_not_consumed_before_native_submission(self):
         env = environment()
@@ -342,7 +356,7 @@ class ArmObserverTests(unittest.TestCase):
 
     def test_disabled_uses_original_position_only_call(self):
         env = environment()
-        env._arm_observer = None
+        env._observer = None
         env.aimdk = Mock()
         target = np.linspace(-0.5, 0.5, 16)
         env.step(target)
@@ -360,23 +374,23 @@ class ArmObserverTests(unittest.TestCase):
             env._observer_sample_times[:] = 1.02
             env.step(np.zeros(16))
         self.assertGreater(np.max(abs(env.aimdk.effort)), 0)
-        np.testing.assert_array_equal(env.aimdk.effort[::-1], env._arm_observer.observer.effort)
-        env.set_arm_observer_eligible(False)
+        np.testing.assert_array_equal(env.aimdk.effort[::-1], env._observer.observer.effort)
+        env.set_observer_eligible(False)
         np.testing.assert_array_equal(env.aimdk.effort, 0)
-        self.assertIsNone(env._arm_observer.observer.previous_position)
+        self.assertIsNone(env._observer.observer.previous_position)
 
     def test_shadow_status_is_named_and_does_not_expose_mutable_state(self):
         env = environment(config("SHADOW"))
         env.step(np.zeros(16))
-        status = env.get_arm_observer_status()
+        status = env.get_observer_status()
         self.assertEqual(status["mode"], "SHADOW")
         self.assertEqual(status["joint_names"], list(JOINT_NAMES))
         self.assertEqual(status["model_qualification"], "simulation_only")
         np.testing.assert_array_equal(status["issued_nm"], 0)
         status["issued_nm"][0] = 99
-        np.testing.assert_array_equal(env._arm_observer.issued_nm, 0)
+        np.testing.assert_array_equal(env._observer.issued_nm, 0)
         status["estimated_disturbance_nm"][0] = 99
-        np.testing.assert_array_equal(env._arm_observer.observer.estimated_disturbance_nm, 0)
+        np.testing.assert_array_equal(env._observer.observer.estimated_disturbance_nm, 0)
 
     def test_observer_logs_once_per_second_after_submission(self):
         for mode in ("SHADOW", "ACTIVE"):
@@ -386,7 +400,7 @@ class ArmObserverTests(unittest.TestCase):
                     log.isEnabledFor.return_value = True
                     for now in (10.0, 10.02, 11.01):
                         env._observer_feedback_time = now
-                        env._step_with_arm_observer(np.zeros(16), now)
+                        env._step_with_observer(np.zeros(16), now)
                     self.assertEqual(log.info.call_count, 2)
                     args = log.info.call_args.args
                     self.assertEqual(args[1], mode)
@@ -396,19 +410,19 @@ class ArmObserverTests(unittest.TestCase):
                     self.assertIn("bound=0 limited=0", message)
                     for values, key in zip(args[2:4], ("estimated_disturbance_nm", "issued_nm"), strict=True):
                         np.testing.assert_allclose(
-                            np.fromstring(values, sep=","), env.get_arm_observer_status()[key], atol=0.05
+                            np.fromstring(values, sep=","), env.get_observer_status()[key], atol=0.05
                         )
                     # Repeated feedback preserves the bounded estimate while
                     # the new PD target removes all compensation headroom.
-                    env._arm_observer.observer.estimated_disturbance_nm[:] = -1
-                    env._arm_observer.observer.effort[:] = 0.5
-                    env._arm_observer.last_time = 12.0
+                    env._observer.observer.estimated_disturbance_nm[:] = -1
+                    env._observer.observer.effort[:] = 0.5
+                    env._observer.last_time = 12.0
                     env._observer_feedback_time = 12.02
-                    env._step_with_arm_observer(np.ones(16), 12.02)
+                    env._step_with_observer(np.ones(16), 12.02)
                     self.assertEqual(log.info.call_count, 3)
                     args = log.info.call_args.args
                     self.assertIn("bound=14 limited=14", args[0] % args[1:])
-                    np.testing.assert_array_equal(env._arm_observer.issued_nm, 0)
+                    np.testing.assert_array_equal(env._observer.issued_nm, 0)
                 self.assertEqual(len(env.aimdk.commands), 4)
                 np.testing.assert_array_equal(env.aimdk.effort, 0)
 
@@ -421,7 +435,7 @@ class ArmObserverTests(unittest.TestCase):
         ):
             with self.subTest(mode=cfg.mode, eligible=eligible, fresh=fresh):
                 env = environment(cfg)
-                env._arm_observer_eligible = eligible
+                env._observer_eligible = eligible
                 env.aimdk.fresh = fresh
                 with patch("robojudo.environment.agibot_cpp_env.logger") as log:
                     env.step(np.zeros(16))
@@ -433,12 +447,12 @@ class ArmObserverTests(unittest.TestCase):
         env._dof_vel[:] = np.nan
         with self.assertRaises(ValueError):
             env.step(np.zeros(16))
-        self.assertIsNone(env._arm_observer.observer.previous_position)
+        self.assertIsNone(env._observer.observer.previous_position)
         env._dof_vel[:] = 0
         env.aimdk.step = Mock(side_effect=RuntimeError("rejected"))
         with self.assertRaises(RuntimeError):
             env.step(np.zeros(16))
-        self.assertIsNone(env._arm_observer.observer.previous_position)
+        self.assertIsNone(env._observer.observer.previous_position)
         np.testing.assert_array_equal(env.aimdk.effort, 0)
 
 
@@ -503,12 +517,12 @@ class ObserverPolicyGateTests(unittest.TestCase):
         pipeline._rl_damping = pipeline._joint_default_damping = [2] * 16
         for mode in ControlMode:
             pipeline.mode = ControlMode.RL_DEFAULT
-            pipeline.env._arm_observer_eligible = True
-            pipeline.env._arm_observer.observer.effort[:] = 0.5
+            pipeline.env._observer_eligible = True
+            pipeline.env._observer.observer.effort[:] = 0.5
             pipeline.env.aimdk.effort[:] = 0.5
             pipeline._enter_mode(mode, force=True)
-            self.assertFalse(pipeline.env._arm_observer_eligible)
-            self.assertIsNone(pipeline.env._arm_observer.observer.previous_position)
+            self.assertFalse(pipeline.env._observer_eligible)
+            self.assertIsNone(pipeline.env._observer.observer.previous_position)
             np.testing.assert_array_equal(pipeline.env.aimdk.effort, 0)
 
     def test_mimic_request_clears_effort_in_the_same_control_cycle(self):
@@ -529,9 +543,9 @@ class ObserverPolicyGateTests(unittest.TestCase):
             InterpState=PolicyInterpManager.InterpState,
         )
         pipeline.policy_manager = manager
-        pipeline._sync_arm_observer_eligibility()
+        pipeline._sync_observer_eligibility()
         pipeline.env.aimdk.effort[:] = 0.5
-        pipeline.env._arm_observer.observer.effort[:] = 0.5
+        pipeline.env._observer.observer.effort[:] = 0.5
 
         def switch():
             manager.interp_state = PolicyInterpManager.InterpState.START
@@ -539,9 +553,9 @@ class ObserverPolicyGateTests(unittest.TestCase):
 
         manager.switch_to_mimic = switch
         pipeline._process_policy_commands(["[POLICY_MIMIC]"], {})
-        self.assertFalse(pipeline.env._arm_observer_eligible)
+        self.assertFalse(pipeline.env._observer_eligible)
         np.testing.assert_array_equal(pipeline.env.aimdk.effort, 0)
-        self.assertIsNone(pipeline.env._arm_observer.observer.previous_position)
+        self.assertIsNone(pipeline.env._observer.observer.previous_position)
 
     def test_only_idle_locomanipulation_family_in_rl_default(self):
         from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager
@@ -565,11 +579,11 @@ class ObserverPolicyGateTests(unittest.TestCase):
                     pipeline._send_policy_target(np.zeros(16))
                     expected = policy_class is not object and mode == ControlMode.RL_DEFAULT
                     expected = expected and state == PolicyInterpManager.InterpState.IDLE
-                    self.assertEqual(pipeline.env._arm_observer_eligible, expected)
+                    self.assertEqual(pipeline.env._observer_eligible, expected)
             pipeline.mode = ControlMode.RL_DEFAULT
             pipeline.policy_manager.current_policy_id = 1
             pipeline._send_policy_target(np.zeros(16))
-            self.assertFalse(pipeline.env._arm_observer_eligible)
+            self.assertFalse(pipeline.env._observer_eligible)
 
 
 if __name__ == "__main__":

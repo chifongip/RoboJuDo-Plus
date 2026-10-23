@@ -2,12 +2,14 @@
 
 import tempfile
 import unittest
+from itertools import product
 from pathlib import Path
 
 import numpy as np
 
+from robojudo.config.observer_cfg import JointObserverCfg
 from robojudo.environment import env_registry
-from robojudo.environment.env_cfgs import JointObserverCfg, ObserverMujocoEnvCfg
+from robojudo.environment.env_cfgs import ObserverMujocoEnvCfg
 from robojudo.tools.tool_cfgs import DoFConfig
 
 MODEL = """
@@ -41,7 +43,7 @@ MODEL = """
 
 
 class GenericObserverTests(unittest.TestCase):
-    def config(self, names, mode="ACTIVE"):
+    def config(self, names, mode="ACTIVE", algorithm="linearized"):
         return ObserverMujocoEnvCfg(
             xml="unused.xml",
             headless=True,
@@ -58,6 +60,7 @@ class GenericObserverTests(unittest.TestCase):
             ),
             feedforward_effort_limits=dict.fromkeys(names, 0.5),
             observer=JointObserverCfg(
+                algorithm=algorithm,
                 mode=mode,
                 joint_names=names,
                 inertia=0.1,
@@ -78,9 +81,9 @@ class GenericObserverTests(unittest.TestCase):
 
     def test_arbitrary_joint_count_order_and_modes(self):
         for names in (["wrist", "hinge"], ["middle"]):
-            for mode in ("ACTIVE", "SHADOW", "OFF"):
-                with self.subTest(names=names, mode=mode):
-                    env = self.plant(self.config(names, mode))
+            for mode, algorithm in product(("ACTIVE", "SHADOW", "OFF"), ("linearized", "nonlinear")):
+                with self.subTest(names=names, mode=mode, algorithm=algorithm):
+                    env = self.plant(self.config(names, mode, algorithm))
                     indices = [env.joint_names.index(name) for name in names]
                     for name in names:
                         env.data.qfrc_applied[env.model.joint(name).dofadr[0]] = 0.3

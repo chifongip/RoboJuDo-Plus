@@ -1,53 +1,57 @@
-"""Hardware-independent lifecycle and command limiting for the X2 arm observer."""
+"""Shared synchronous/timestamped observer lifecycle and accepted-command replay."""
 
 import numpy as np
 
-from robojudo.utils.deployment_disturbance_observer import DeploymentDisturbanceObserver
-from robojudo.utils.x2_observer_reference import JOINT_NAMES, selected_observer_parameters
+from .linearized import LinearizedDisturbanceObserver
+from .nonlinear import NonlinearDisturbanceObserver
 
 
-class X2ArmObserver:
-    def __init__(self, cfg, joint_names, arm_joint_names, stiffness, damping, simulation_limits, max_dt):
-        # Pydantic instances can be mutated or model_construct'ed without validation.
-        # Revalidate at the deployment boundary, before any simulation fallback.
+class JointObserver:
+    def __init__(self, cfg, joint_names, stiffness, damping, *, max_dt, actuator_limits=None, control_dt=0.02):
+        # Revalidate mutable Pydantic configurations at the runtime boundary.
         cfg = type(cfg).model_validate(cfg.model_dump())
         if not np.isscalar(max_dt) or not np.isfinite(max_dt) or max_dt <= 0:
             raise ValueError("Observer maximum interval must be positive and finite")
+        if not np.isscalar(control_dt) or not np.isfinite(control_dt) or control_dt <= 0:
+            raise ValueError("Observer control interval must be positive and finite")
+        if len(set(joint_names)) != len(joint_names):
+            raise ValueError("Environment joint names must be unique")
+        if set(cfg.joint_names) - set(joint_names):
+            raise ValueError("Observer joints must belong to the environment")
         self._mode = cfg.mode
+        self.algorithm = cfg.algorithm
         self._feedback_shape = (len(joint_names),)
-        if len(set(joint_names)) != len(joint_names) or set(arm_joint_names) != set(JOINT_NAMES):
-            raise ValueError("Observer requires the unique 14 X2 arm names")
-        if len(arm_joint_names) != 14:
-            raise ValueError("Observer requires exactly 14 arms")
-        self.indices = np.asarray([joint_names.index(name) for name in JOINT_NAMES])
-        self.adapter_order = np.asarray([JOINT_NAMES.index(name) for name in arm_joint_names])
-        self.reference_order = np.argsort(self.adapter_order)
-        # A mode change is a lifecycle change, never an in-place model/limit mutation.
+        self.joint_names = list(cfg.joint_names)
+        self._shape = (len(self.joint_names),)
+        self.indices = np.array([joint_names.index(name) for name in self.joint_names])
         self.cfg = cfg
-        self.max_dt = max_dt
+        self.max_dt, self.control_dt = max_dt, control_dt
         limits = cfg.actuator_limits_nm
         if limits is None:
-            limits = np.asarray(simulation_limits, dtype=float)
-            if limits.shape != self._feedback_shape:
-                raise ValueError("Simulation torque limits must match joint_names")
-            limits = limits[self.indices]
-        parameters = selected_observer_parameters()
-        parameters.pop("method")
-        self.observer = DeploymentDisturbanceObserver(
-            self._arm_vector(stiffness), self._arm_vector(damping), limits, **parameters
+            limits = self._joint_vector(actuator_limits)
+        observer_type = NonlinearDisturbanceObserver if cfg.algorithm == "nonlinear" else LinearizedDisturbanceObserver
+        self.observer = observer_type(
+            self._joint_vector(stiffness),
+            self._joint_vector(damping),
+            limits,
+            inertia=cfg.inertia,
+            friction_limit=cfg.friction_limit,
+            friction_viscosity=cfg.friction_viscosity,
+            bandwidth_rad_s=cfg.bandwidth_rad_s,
         )
-        if cfg.correction_limits_nm is not None:
-            self.observer.limits = np.asarray(cfg.correction_limits_nm, dtype=float).copy()
-        if cfg.slew_nm_s is not None:
-            self.observer.slew = cfg.slew_nm_s
-        self.observer.release_slew = cfg.release_slew_nm_s
+        self.observer.limits = np.broadcast_to(cfg.correction_limits_nm, self._shape).copy()
+        if np.any(self.observer.limits > self.observer.torque_limits):
+            raise ValueError("Correction limits must not exceed actuator limits")
+        self.observer.slew = cfg.slew_nm_s
+        if cfg.algorithm == "nonlinear":
+            self.observer.release_slew = cfg.release_slew_nm_s
         self.reset()
 
     @property
     def mode(self):
         return self._mode
 
-    def _arm_vector(self, value):
+    def _joint_vector(self, value):
         vector = np.asarray(value, dtype=float)
         if vector.shape != self._feedback_shape:
             raise ValueError("Observer inputs must match joint_names")
@@ -60,26 +64,23 @@ class X2ArmObserver:
         self.sample_position = self.sample_velocity = None
         self.command_history = []
         self.pending_target = None
-        self.proposed_nm = np.zeros(14)
-        self.limited_nm = np.zeros(14)
-        self.issued_nm = np.zeros(14)
+        self.proposed_nm = np.zeros(self._shape)
+        self.limited_nm = np.zeros(self._shape)
+        self.issued_nm = np.zeros(self._shape)
 
-    def adapter_limits(self):
-        return self.observer.limits[self.adapter_order].tolist()
-
-    def _predict_history(self, q, qd, stamps, disturbance=None):
+    def _predict_history(self, qd, stamps, disturbance=None):
         """Replay accepted commands only over each joint's observed receive interval.
 
         Receive time is not physical acquisition time. No assumption that Python's
         monotonic clock shares an epoch with the native clock is needed.
         """
         if self.sample_times is None:
-            return (qd.copy(), np.ones(14)), np.zeros(14), np.zeros(14, dtype=bool)
+            return (qd.copy(), np.ones(self._shape)), np.zeros(self._shape), np.zeros(self._shape, dtype=bool)
         elapsed = stamps - self.sample_times
         fresh = (elapsed > 0) & (elapsed <= self.max_dt)
         position, velocity = self.sample_position.copy(), self.sample_velocity.copy()
-        dq, dv = np.zeros(14), np.zeros(14)
-        covered = np.zeros(14)
+        dq, dv = np.zeros(self._shape), np.zeros(self._shape)
+        covered = np.zeros(self._shape)
         for i, (start, goal, effort) in enumerate(self.command_history):
             end = self.command_history[i + 1][0] if i + 1 < len(self.command_history) else np.inf
             duration = np.maximum(0, np.minimum(stamps, end) - np.maximum(self.sample_times, start))
@@ -116,19 +117,24 @@ class X2ArmObserver:
             if dt is None or dt <= 0 or dt > self.max_dt:
                 self.reset()
                 # First sample initializes history only; this interval cannot issue torque.
-                dt = min(self.max_dt, 0.02)
-            q, qd, goal = [self._arm_vector(value) for value in (position, velocity, target)]
+                dt = min(self.max_dt, self.control_dt)
+            q, qd, goal = [self._joint_vector(value) for value in (position, velocity, target)]
             with np.errstate(over="raise", invalid="raise", divide="raise"):
                 if sample_times is None:
                     # Synchronous callers use one clock and one sample per command.
                     self.proposed_nm = self.observer.update(goal, q, qd, dt)
                 else:
-                    stamps = self._arm_vector(sample_times)
+                    stamps = self._joint_vector(sample_times)
                     if not np.isfinite(stamps).all():
                         raise ValueError("Feedback timestamps must be finite")
                     if self.sample_times is not None and np.any(stamps < self.sample_times):
                         self.reset()
-                    prediction, elapsed, fresh = self._predict_history(q, qd, stamps)
+                    prediction, elapsed, fresh = self._predict_history(qd, stamps)
+                    nonlinear = (
+                        {}
+                        if self.algorithm == "linearized"
+                        else {"predictor": lambda disturbance: self._predict_history(qd, stamps, disturbance)[0]}
+                    )
                     self.proposed_nm = self.observer.update(
                         goal,
                         q,
@@ -137,7 +143,7 @@ class X2ArmObserver:
                         prediction=prediction,
                         feedback_dt=elapsed,
                         fresh=fresh,
-                        predictor=lambda disturbance: self._predict_history(q, qd, stamps, disturbance)[0],
+                        **nonlinear,
                     )
                     self.sample_times = stamps.copy()
                     self.sample_position, self.sample_velocity = q.copy(), qd.copy()
@@ -155,18 +161,18 @@ class X2ArmObserver:
             raise
         # Safety headroom may remove effort faster than the normal slew rate.
         # Reconcile that removal before the next predictor/update.
-        return (self.limited_nm if self.mode == "ACTIVE" else np.zeros(14))[self.adapter_order].tolist()
+        return (self.limited_nm if self.mode == "ACTIVE" else np.zeros(self._shape)).copy()
 
-    def acknowledge(self, adapter_effort, *, command_time=None):
+    def acknowledge(self, effort, *, command_time=None):
         try:
-            issued = np.asarray(adapter_effort, dtype=float)
-            if issued.shape != (14,):
-                raise ValueError("Arm command receipt must contain exactly 14 values")
-            issued = issued[self.reference_order].copy()
+            issued = np.asarray(effort, dtype=float)
+            if issued.shape != self._shape:
+                raise ValueError("Command receipt must match observer joints")
+            issued = issued.copy()
             if self.mode == "ACTIVE" and (
                 np.any(issued < np.minimum(0, self.limited_nm)) or np.any(issued > np.maximum(0, self.limited_nm))
             ):
-                raise ValueError("Arm command receipt exceeds or reverses the requested correction")
+                raise ValueError("Command receipt exceeds or reverses the requested correction")
             if self.mode != "ACTIVE" and np.any(issued != 0):
                 raise ValueError("Non-active observer cannot acknowledge nonzero torque")
             self.observer.acknowledge_effort(issued, freeze_limited_estimate=self.mode != "SHADOW")
@@ -186,3 +192,34 @@ class X2ArmObserver:
         except (TypeError, ValueError):
             self.reset()
             raise
+
+    def get_status(self):
+        """Return copied command diagnostics in configured observer joint order."""
+        model = self.observer
+        status = {
+            "mode": self.mode,
+            "algorithm": self.algorithm,
+            "joint_names": self.joint_names.copy(),
+            "estimated_disturbance_nm": model.estimated_disturbance_nm.tolist(),
+            "proposed_nm": self.proposed_nm.tolist(),
+            "limited_nm": self.limited_nm.tolist(),
+            "issued_nm": self.issued_nm.tolist(),
+            "velocity_prediction_rad_s": model.velocity_prediction.tolist(),
+            "velocity_innovation_rad_s": model.velocity_innovation.tolist(),
+            "antiwindup": model.antiwindup.tolist(),
+            "estimate_at_bound": np.isclose(
+                abs(model.estimated_disturbance_nm), model.limits, rtol=0, atol=1e-3
+            ).tolist(),
+            "headroom_limited": (self.proposed_nm != self.limited_nm).tolist(),
+            "downstream_limited": (self.limited_nm != self.issued_nm).tolist(),
+        }
+        for attribute in (
+            "desired_nm",
+            "instantaneous_disturbance_nm",
+            "inversion_residual_rad_s",
+            "fresh",
+            "release_limited",
+        ):
+            if hasattr(model, attribute):
+                status[attribute] = getattr(model, attribute).tolist()
+        return status

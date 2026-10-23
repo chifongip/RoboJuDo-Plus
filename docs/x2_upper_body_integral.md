@@ -17,9 +17,9 @@ below does not extend their hardware qualification.
 
 | File | Purpose |
 | --- | --- |
-| `robojudo/utils/disturbance_observer.py` | Bounded model-based observer |
+| `robojudo/utils/observers/linearized.py` | Bounded model-based observer |
 | `robojudo/utils/bounded_integral.py` | Original integral baseline |
-| `scripts/x2_observer_reference.py` | Selected fixed coefficients and joint order |
+| `robojudo/config/x2/observer_parameters.py` | Selected fixed coefficients and joint order |
 | `scripts/x2_integral_sim.py` | Shared simulation, hand-center loads and telemetry |
 | `scripts/evaluate_x2_transitions.py` | PD/integral/observer benchmark |
 | `scripts/plot_x2_transitions.py` | Comparison and all-14-joint plots |
@@ -63,7 +63,7 @@ correction = bounded_and_slew_limited(-estimate)
 
 The predictor uses four implicit substeps per control interval. The selected
 bandwidth is **8 rad/s**. All 14 nominal inertia/viscosity coefficients are fixed
-in `x2_observer_reference.py`; there is no task-dependent scheduling. Nominal
+in `robojudo/config/x2/observer_parameters.py`; there is no task-dependent scheduling. Nominal
 friction magnitude is 0.3 Nm. The observer retains nominal friction instead of
 intentionally canceling its damping. Its estimate is bounded, and conditional
 anti-windup freezes outward effort/estimate updates during modeled saturation.
@@ -99,14 +99,24 @@ PYTHONPATH="" OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
 python scripts/plot_x2_transitions.py logs/x2_transitions/my-observer-comparison
 ```
 
-The default comparison runs all three methods on unloaded, constant-load and
-sway profiles: 27 trials for three repetitions. `--repetitions 1` runs nine trials
+The default comparison runs PD-only, integral, linearized (`observer`) and
+`nonlinear_observer` methods on unloaded, constant-load and compliant-payload
+profiles: 36 trials for three repetitions. `--repetitions 1` runs twelve trials
 with the default 5 s warmup. Output directories must be new. Repeated
-`--condition pd_only|integral|observer` and `--profile unloaded|constant|sway`
+`--condition pd_only|integral|observer|nonlinear_observer` and
+`--profile unloaded|constant|compliant_payload|sway`
 arguments restrict the run. Loaded displacement comparisons require matching
 unloaded trials. For example, `--condition observer --repetitions 1 --viewer
 --jobs 1` displays the selected method without creating a network controller.
 Plotting requires Matplotlib in the Python environment used for that command.
+
+The nonlinear condition uses the same frozen 8 rad/s model and correction bounds,
+with 2 Nm/s growth and 16 Nm/s release. All methods use the synchronous correction
+core in this benchmark, under identical final-target filtering and total-torque
+clipping; native command transport is not emulated. Generate a compact comparison
+with `python scripts/report_x2_transition_methods.py <output-directory>`.
+The [four-method transition comparison](x2_transition_methods_comparison.md)
+records the 36-trial rerun with compliant load replacing prescribed sway.
 
 Outputs include raw CSV traces, per-trial JSON, `summary.json`, `summary.csv`,
 `joint_errors.csv`, and comparison/all-joint PNGs after plotting. All 14 joints'
@@ -405,8 +415,12 @@ The final cleanup preserves removed sources and hashes in
 
 ## Optional deployment integration
 
-The real X2 environment now supports `arm_observer.mode` values `OFF`, `SHADOW`
-and `ACTIVE`; every preset defaults to `OFF`. Eligibility additionally requires
+The [shared observer API](joint_observer.md) now separates algorithm selection,
+robot parameters and environment integration. Historical measurements above
+remain the validated linearized simulation reference.
+
+The real X2 environment now supports `observer.mode` values `OFF`, `SHADOW`
+and `ACTIVE`; the deployment observer preset defaults to `OFF` and base hardware presets use `observer=None`. Eligibility additionally requires
 `RL_DEFAULT` with an active `X2LocomanipulationPolicy` or its GR00T subclass.
 Loco-mimic pipelines permit only idle locomanipulation: interpolation, mimic,
 recovery and joint-default preparation remain uncompensated. Arm target ownership
@@ -415,7 +429,7 @@ and the existing upper-body filtering are unchanged.
 `SHADOW` is opt-in and always transmits zero additive effort. Its predictor uses
 zero issued correction, even when its proposed correction is nonzero. It uses the
 frozen simulation reference and configured simulation torque limits unless
-explicit limits are supplied. `env.get_arm_observer_status()` exposes named,
+explicit limits are supplied. `env.get_observer_status()` exposes named,
 reference-order proposed, headroom-limited and issued command vectors. These are
 command diagnostics, not measured torque or a counterfactual compensated rollout.
 
@@ -441,8 +455,8 @@ appear fresh. These are receive ages, not verified physical acquisition ages. It
 bounded and slew-limited, then restricted to modeled PD torque headroom. If PD
 already exceeds a configured limit, only correction reducing saturation is
 permitted. Safety removal can reduce correction faster than the normal slew
-limit. Accepted effort is reconciled into the next predictor; downstream limiting
-freezes the affected estimate updates. The predictor models total actuator
+limit. Accepted effort is reconciled into the next predictor; the nonlinear observer allows estimate
+unwinding under downstream limiting while blocking outward adaptation. The predictor models total actuator
 clipping, but cannot verify proprietary servo clipping between host updates.
 The selected nominal model remains simulation-derived, including in active mode.
 

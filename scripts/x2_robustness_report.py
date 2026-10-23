@@ -273,8 +273,9 @@ def analyze_study(root):
                         "scripts/x2_integral_sim.py",
                         "scripts/x2_robustness_sim.py",
                         "scripts/x2_feedback_perturbations.py",
-                        "scripts/x2_observer_reference.py",
-                        "robojudo/utils/disturbance_observer.py",
+                        "robojudo/config/x2/observer_parameters.py",
+                        "robojudo/utils/observers/linearized.py",
+                        "robojudo/utils/observers/model.py",
                         "robojudo/utils/bounded_integral.py",
                     )
                 ),

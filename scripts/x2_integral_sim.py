@@ -105,6 +105,7 @@ class X2IntegralEvaluationEnv(MujocoEnv):
         self.force = np.zeros(3)
         self.command_vx = 0.0
         self.last_slew = np.zeros(len(self.arm_indices))
+        self.last_slew_limits = np.full(len(self.arm_indices), self.integral.slew)
         self.max_effort_slew = 0.0
         self.max_effort_bound_excess = 0.0
 
@@ -206,6 +207,12 @@ class X2IntegralEvaluationEnv(MujocoEnv):
                 self.control_dt,
             )
         self.last_slew = (self.integral.effort - previous) / self.control_dt
+        self.last_slew_limits = np.full(previous.shape, self.integral.slew)
+        release_slew = getattr(self.integral, "release_slew", None)
+        if release_slew is not None:
+            desired = self.integral.desired_nm
+            releasing = (previous != 0) & ((desired * previous <= 0) | (abs(desired) < abs(previous)))
+            self.last_slew_limits = np.where(releasing, release_slew, self.integral.slew)
         self.max_effort_slew = max(self.max_effort_slew, float(np.max(np.abs(self.last_slew))))
         self.max_effort_bound_excess = max(
             self.max_effort_bound_excess, float(np.max(np.abs(self.integral.effort) - self.integral.limits))
@@ -327,7 +334,7 @@ def integral_sample(env, t):
         row[f"{joint}_effort_slew_nm_s"] = float(env.last_slew[i])
         row[f"{joint}_antiwindup"] = int(env.integral.antiwindup[i])
         row[f"{joint}_at_bound"] = int(abs(env.integral.effort[i]) >= env.integral.limits[i] - 1e-10)
-        row[f"{joint}_at_slew_limit"] = int(abs(env.last_slew[i]) >= env.integral.slew - 1e-10)
+        row[f"{joint}_at_slew_limit"] = int(abs(env.last_slew[i]) >= env.last_slew_limits[i] - 1e-10)
     return row
 
 

@@ -1,5 +1,10 @@
 # X2 observer in interactive simulation
 
+Both simulation and hardware use the [shared observer config and runtime](joint_observer.md).
+This preset selects the same `nonlinear` algorithm and parameters as
+`x2_locomimic_real_observer`, with compensation ACTIVE in simulation and OFF by
+default in the real preset.
+
 Run from the repository root in the normal RoboJuDo environment, with the same
 X2 assets and policy checkpoints required by `x2_locomimic`:
 
@@ -22,7 +27,8 @@ the first observer sample after reset issues zero correction.
 The observer updates at 50 Hz using simulation time and the final arm targets.
 Its arm correction is held across four 5 ms physics substeps. It uses the shared
 simulation reference model (8 rad/s bandwidth), per-joint correction limits of
-`min(8 Nm, 0.8 × actuator limit)`, and a 2 Nm/s slew limit. Only the 14 arm joints
+`min(8 Nm, 0.8 × actuator limit)`, 2 Nm/s growth and 16 Nm/s release toward zero.
+Opposite-sign correction grows on a later update at 2 Nm/s. Only the 14 arm joints
 receive compensation; total PD plus correction still passes through MuJoCo's
 torque limits. These settings are simulation parameters.
 
@@ -33,7 +39,7 @@ are available through `pipeline.env.get_observer_status()`; `issued_nm` is
 admitted feedforward effort, not measured actuator torque after total clipping.
 
 To evaluate SHADOW (estimation with zero applied correction) or OFF, change
-`observer=JointObserverCfg(mode="ACTIVE", ...)` in the `x2_locomimic_observer` preset in
+`observer=JointObserverCfg(algorithm="nonlinear", mode="ACTIVE", ...)` in the `x2_locomimic_observer` preset in
 `robojudo/config/x2/x2_locomimic_observer_cfg.py`, then restart the pipeline.
 There is no runtime mode-switch control. The original `x2_locomimic` preset has
 no observer, and the real-robot observer preset remains OFF by default.
@@ -48,7 +54,8 @@ python -m unittest discover -s tests -p 'test_x2_observer_mujoco_env.py'
 
 `ObserverMujocoEnv` is robot-independent. Use `ObserverMujocoEnvCfg` from
 `robojudo.environment.env_cfgs`, or combine it with a robot's MuJoCo config as
-the X2 preset does. Supply `observer=JointObserverCfg(...)` with the selected
+the X2 preset does. Import `JointObserverCfg` from `robojudo.config.observer_cfg`.
+Supply `observer=JointObserverCfg(...)` with an explicit `algorithm` and the selected
 `joint_names`, nominal `inertia`, optional friction parameters, `bandwidth_rad_s`,
 `correction_limits_nm`, and `slew_nm_s`. Scalar model parameters and correction
 limits apply to every selected joint; vectors follow the configured joint order.
@@ -61,5 +68,7 @@ position-control steps. Pipelines can call `set_observer_eligible(False)` to
 disable compensation and clear history, and `reset_observer()` to clear history
 without changing eligibility. Passive and damping commands always clear history
 and apply zero feedforward. X2-specific locomotion gating is implemented by its
-pipeline, outside the generic environment. The real-robot X2 adapter retains its
-existing arm-observer interface.
+pipeline, outside the generic environment. The real environment uses the same
+configuration type and observer methods; its transport and safety checks remain
+in the AimDK environment integration. The historical linearized algorithm remains
+available through `algorithm="linearized"` with symmetric growth/release slew.

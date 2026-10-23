@@ -11,10 +11,15 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from evaluate_x2_observer_release import SimulationAdapter, X2ReleaseEvaluationEnv, local_trial
 
-from robojudo.utils.x2_observer_reference import JOINT_NAMES
+from robojudo.config.x2.observer_parameters import JOINT_NAMES
 
 
 class ReleaseFeedbackTests(unittest.TestCase):
+    def test_external_effort_is_rejected_before_simulation(self):
+        env = X2ReleaseEvaluationEnv.__new__(X2ReleaseEvaluationEnv)
+        with self.assertRaisesRegex(ValueError, "owns feedforward effort"):
+            env.step(np.zeros(14), feedforward_effort=np.zeros(14))
+
     def assert_repeats_identical(self, records):
         seen, repeated = {}, 0
         for stamp, q, v in records:
