@@ -6,10 +6,16 @@ overshoot on load removal. The strongest code-level explanation is the symmetric
 aggressive tuning: finite velocity residuals crossing the friction-model regime,
 and estimate unwinding being frozen during torque limiting.
 
-This review leaves observer control logic and configuration unchanged. The supplied path
+The original review left observer control logic and configuration unchanged. The supplied path
 identifies the preset, whose checked-in mode is OFF; it does not provide an ACTIVE
 unloading recording. The results below establish reproducible mechanisms, not
 their relative contribution to the reported hardware transient.
+
+The deployment implementation now addresses these mechanisms. See
+[deployment release validation](x2_observer_release_validation.md) for the changes,
+abrupt-unloading comparisons, selected release rate and measured tradeoffs. The
+historical simulation reference and its coefficients remain unchanged; numerical
+examples below describe the original deployment implementation.
 
 ## 1. Output slew dominates unloading response
 

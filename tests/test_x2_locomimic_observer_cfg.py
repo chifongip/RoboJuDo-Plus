@@ -28,10 +28,12 @@ class TestX2LocomimicObserverConfig(unittest.TestCase):
         self.assertEqual(len(observer.actuator_limits_nm), 14)
         self.assertEqual(observer.correction_limits_nm, [min(8.0, 0.8 * limits[name]) for name in JOINT_NAMES])
         self.assertEqual(observer.slew_nm_s, 2.0)
+        self.assertEqual(observer.release_slew_nm_s, 16.0)
         self.assertEqual(x2_locomimic_real().env.arm_observer.mode, "OFF")
         shadow = X2ArmObserverCfg.model_validate({**observer.model_dump(), "mode": "SHADOW"})
         self.assertEqual(shadow.correction_limits_nm, observer.correction_limits_nm)
         self.assertEqual(shadow.slew_nm_s, observer.slew_nm_s)
+        self.assertEqual(shadow.release_slew_nm_s, observer.release_slew_nm_s)
 
     def test_mutations_do_not_leak_to_other_presets(self):
         cfg = x2_locomimic_real_observer()

@@ -24,6 +24,9 @@ class X2ArmObserverCfg(Config):
     actuator_limits_nm: list[float] | None = None
     correction_limits_nm: list[float] | None = None
     slew_nm_s: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
+    # None preserves the growth rate for removal. Faster release never enables
+    # faster growth or an immediate change of correction sign.
+    release_slew_nm_s: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_limits(self):

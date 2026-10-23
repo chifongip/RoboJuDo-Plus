@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from robojudo.utils.disturbance_observer import BoundedDisturbanceObserver
+from robojudo.utils.deployment_disturbance_observer import DeploymentDisturbanceObserver
 from robojudo.utils.x2_observer_reference import JOINT_NAMES, selected_observer_parameters
 
 
@@ -33,13 +33,14 @@ class X2ArmObserver:
             limits = limits[self.indices]
         parameters = selected_observer_parameters()
         parameters.pop("method")
-        self.observer = BoundedDisturbanceObserver(
+        self.observer = DeploymentDisturbanceObserver(
             self._arm_vector(stiffness), self._arm_vector(damping), limits, **parameters
         )
         if cfg.correction_limits_nm is not None:
             self.observer.limits = np.asarray(cfg.correction_limits_nm, dtype=float).copy()
         if cfg.slew_nm_s is not None:
             self.observer.slew = cfg.slew_nm_s
+        self.observer.release_slew = cfg.release_slew_nm_s
         self.reset()
 
     @property
@@ -66,7 +67,7 @@ class X2ArmObserver:
     def adapter_limits(self):
         return self.observer.limits[self.adapter_order].tolist()
 
-    def _predict_history(self, q, qd, stamps):
+    def _predict_history(self, q, qd, stamps, disturbance=None):
         """Replay accepted commands only over each joint's observed receive interval.
 
         Receive time is not physical acquisition time. No assumption that Python's
@@ -90,7 +91,7 @@ class X2ArmObserver:
                 velocity,
                 goal,
                 effort,
-                self.observer.estimated_disturbance_nm,
+                self.observer.estimated_disturbance_nm if disturbance is None else disturbance,
                 np.where(active, duration, 0.02),
                 dq,
                 dv,
@@ -99,7 +100,12 @@ class X2ArmObserver:
                 np.where(active, new, old) for new, old in zip(result, (position, velocity, dq, dv), strict=True)
             ]
             covered += duration
-        fresh &= np.isclose(covered, elapsed, rtol=0, atol=1e-9) & (dv > 0)
+        covered_interval = fresh & np.isclose(covered, elapsed, rtol=0, atol=1e-9)
+        if disturbance is not None:
+            # Candidate solves must see the actual replay, including an invalid
+            # gain. Substituting measured velocity would invent a perfect fit.
+            return (velocity, np.where(covered_interval, dv, 1)), np.maximum(elapsed, 0), covered_interval
+        fresh = covered_interval & (dv > 0)
         return (np.where(fresh, velocity, qd), np.where(fresh, dv, 1)), np.maximum(elapsed, 0), fresh
 
     def propose(self, target, position, velocity, now, *, sample_times=None):
@@ -124,7 +130,14 @@ class X2ArmObserver:
                         self.reset()
                     prediction, elapsed, fresh = self._predict_history(q, qd, stamps)
                     self.proposed_nm = self.observer.update(
-                        goal, q, qd, dt, prediction=prediction, feedback_dt=elapsed, fresh=fresh
+                        goal,
+                        q,
+                        qd,
+                        dt,
+                        prediction=prediction,
+                        feedback_dt=elapsed,
+                        fresh=fresh,
+                        predictor=lambda disturbance: self._predict_history(q, qd, stamps, disturbance)[0],
                     )
                     self.sample_times = stamps.copy()
                     self.sample_position, self.sample_velocity = q.copy(), qd.copy()

@@ -51,5 +51,8 @@ class x2_locomimic_real_observer(x2_locomimic_real):
             # Simulation settings for optional SHADOW evaluation; not hardware-qualified ACTIVE limits.
             correction_limits_nm=[_CORRECTION_LIMITS_BY_NAME[name] for name in JOINT_NAMES],
             slew_nm_s=2.0,
+            # Abrupt-unloading simulation selection; mode remains OFF.
+            # Release toward zero only; opposite torque still grows at 2 Nm/s.
+            release_slew_nm_s=16.0,
         ),
     )
