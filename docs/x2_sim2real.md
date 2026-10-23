@@ -321,11 +321,14 @@ locomotion, `Start` selects mimic, `B` selects damping, and `LB+RB+A` shuts down
 The base preset's mode and policy gates still apply.
 
 For observer diagnostics, change `mode` in `_observer_env()` to `SHADOW` before
-construction; it sends zero additive effort. During eligible SHADOW updates,
-the existing environment INFO logger prints named disturbance estimates, proposed
-and headroom-limited corrections, issued corrections and reset generation at most
-once per second. No extra script is needed; use the normal pipeline command below.
-OFF and ACTIVE do not emit these SHADOW diagnostics. These console lines are
+construction; it sends zero additive effort. During eligible SHADOW and ACTIVE
+updates, the existing environment INFO logger prints the same compact format at
+most once per second, with the mode in the prefix. No extra script is needed;
+use the normal pipeline command below. `est` and `issued` are Nm vectors
+in left-seven/right-seven observer order; `bound` counts estimates at their
+correction bounds, and `limited` counts joints affected by saturation or command
+limiting, including deliberate zero effort in SHADOW. Issued effort is commanded
+compensation, not measured torque. OFF emits no observer diagnostics. These console lines are
 throttled diagnostics, not a complete recording for timing or tracking analysis;
 normal logging can add I/O latency, so avoid slow console or network log sinks.
 For ACTIVE, first verify the
