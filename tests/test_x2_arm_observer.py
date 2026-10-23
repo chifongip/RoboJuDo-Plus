@@ -375,6 +375,37 @@ class ArmObserverTests(unittest.TestCase):
         np.testing.assert_array_equal(status["issued_nm"], 0)
         status["issued_nm"][0] = 99
         np.testing.assert_array_equal(env._arm_observer.issued_nm, 0)
+        status["estimated_disturbance_nm"][0] = 99
+        np.testing.assert_array_equal(env._arm_observer.observer.estimated_disturbance_nm, 0)
+
+    def test_shadow_prints_named_estimates_once_per_second_after_submission(self):
+        env = environment(config("SHADOW"))
+        with patch("robojudo.environment.agibot_cpp_env.logger") as log:
+            log.isEnabledFor.return_value = True
+            for now in (10.0, 10.02, 11.01):
+                env._observer_feedback_time = now
+                env._step_with_arm_observer(np.zeros(16), now)
+            self.assertEqual(log.info.call_count, 2)
+            args = log.info.call_args.args
+            self.assertIn("SHADOW", args[0])
+            self.assertEqual(args[1], list(JOINT_NAMES))
+            np.testing.assert_array_equal(args[5], 0)
+        self.assertEqual(len(env.aimdk.commands), 3)
+        np.testing.assert_array_equal(env.aimdk.effort, 0)
+
+    def test_shadow_logging_skips_active_ineligible_and_stale_feedback(self):
+        for cfg, eligible, fresh in (
+            (config(), True, True),
+            (config("SHADOW"), False, True),
+            (config("SHADOW"), True, False),
+        ):
+            with self.subTest(mode=cfg.mode, eligible=eligible, fresh=fresh):
+                env = environment(cfg)
+                env._arm_observer_eligible = eligible
+                env.aimdk.fresh = fresh
+                with patch("robojudo.environment.agibot_cpp_env.logger") as log:
+                    env.step(np.zeros(16))
+                    log.info.assert_not_called()
 
     def test_invalid_feedback_and_rejected_submission_clear(self):
         env = environment()

@@ -62,6 +62,7 @@ class AgiBotCppEnv(Environment):
         self._observer_reset_generation = None
         self._observer_feedback_time = None
         self._observer_sample_times = None
+        self._last_shadow_log_time = float("-inf")
         self._control_joint_names: set[str] = set()
         self._last_clamp_log_time = 0.0
         self._last_safety_state: str | None = None
@@ -349,6 +350,7 @@ class AgiBotCppEnv(Environment):
             "mode": observer.mode,
             "eligible": self._arm_observer_eligible,
             "joint_names": list(JOINT_NAMES),
+            "estimated_disturbance_nm": observer.observer.estimated_disturbance_nm.tolist(),
             "proposed_nm": observer.proposed_nm.tolist(),
             "limited_nm": observer.limited_nm.tolist(),
             "issued_nm": observer.issued_nm.tolist(),
@@ -405,6 +407,23 @@ class AgiBotCppEnv(Environment):
                 self.reset_arm_observer()
                 return
             observer.acknowledge(receipt.arm_efforts, command_time=receipt.command_time_sec)
+            if (
+                observer.mode == "SHADOW"
+                and now - getattr(self, "_last_shadow_log_time", float("-inf")) >= 1.0
+                and logger.isEnabledFor(logging.INFO)
+            ):
+                self._last_shadow_log_time = now
+                diagnostics = self.get_arm_observer_status()
+                logger.info(
+                    "X2 observer SHADOW (Nm; joint_names=%s): estimate=%s, proposed=%s, limited=%s, "
+                    "issued=%s, reset_generation=%s",
+                    diagnostics["joint_names"],
+                    np.round(diagnostics["estimated_disturbance_nm"], 4).tolist(),
+                    np.round(diagnostics["proposed_nm"], 4).tolist(),
+                    np.round(diagnostics["limited_nm"], 4).tolist(),
+                    diagnostics["issued_nm"],
+                    diagnostics["reset_generation"],
+                )
         except (TypeError, ValueError, RuntimeError, FloatingPointError):
             self.reset_arm_observer()
             raise
