@@ -321,7 +321,14 @@ locomotion, `Start` selects mimic, `B` selects damping, and `LB+RB+A` shuts down
 The base preset's mode and policy gates still apply.
 
 For observer diagnostics, change `mode` in `_observer_env()` to `SHADOW` before
-construction; it sends zero additive effort. For ACTIVE, first verify the
+construction; it sends zero additive effort. During eligible SHADOW updates,
+the existing environment INFO logger prints named disturbance estimates, proposed
+and headroom-limited corrections, issued corrections and reset generation at most
+once per second. No extra script is needed; use the normal pipeline command below.
+OFF and ACTIVE do not emit these SHADOW diagnostics. These console lines are
+throttled diagnostics, not a complete recording for timing or tracking analysis;
+normal logging can add I/O latency, so avoid slow console or network log sinks.
+For ACTIVE, first verify the
 existing actuator bounds against the actual hardware/firmware, qualify or replace
 the configured correction limits and slew, and then select `ACTIVE`. Changing
 the mode to ACTIVE now passes numeric validation; that validation does not
