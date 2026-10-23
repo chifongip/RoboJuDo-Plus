@@ -407,22 +407,27 @@ class AgiBotCppEnv(Environment):
                 self.reset_arm_observer()
                 return
             observer.acknowledge(receipt.arm_efforts, command_time=receipt.command_time_sec)
-            if (
-                observer.mode == "SHADOW"
-                and now - getattr(self, "_last_shadow_log_time", float("-inf")) >= 1.0
-                and logger.isEnabledFor(logging.INFO)
+            if now - getattr(self, "_last_arm_observer_log_time", float("-inf")) >= 1.0 and logger.isEnabledFor(
+                logging.INFO
             ):
-                self._last_shadow_log_time = now
+                self._last_arm_observer_log_time = now
                 diagnostics = self.get_arm_observer_status()
+                at_bound = np.isclose(
+                    np.abs(observer.observer.estimated_disturbance_nm),
+                    observer.observer.limits,
+                    rtol=0,
+                    atol=1e-3,
+                )
+                limited = observer.observer.antiwindup | ~np.isclose(
+                    observer.proposed_nm, observer.issued_nm, rtol=0, atol=1e-6
+                )
                 logger.info(
-                    "X2 observer SHADOW (Nm; joint_names=%s): estimate=%s, proposed=%s, limited=%s, "
-                    "issued=%s, reset_generation=%s",
-                    diagnostics["joint_names"],
-                    np.round(diagnostics["estimated_disturbance_nm"], 4).tolist(),
-                    np.round(diagnostics["proposed_nm"], 4).tolist(),
-                    np.round(diagnostics["limited_nm"], 4).tolist(),
-                    diagnostics["issued_nm"],
-                    diagnostics["reset_generation"],
+                    "X2 observer %s Nm (L7/R7): est=[%s] issued=[%s] bound=%d limited=%d",
+                    observer.mode,
+                    ",".join(f"{value:.1f}" for value in diagnostics["estimated_disturbance_nm"]),
+                    ",".join(f"{value:.1f}" for value in diagnostics["issued_nm"]),
+                    np.count_nonzero(at_bound),
+                    np.count_nonzero(limited),
                 )
         except (TypeError, ValueError, RuntimeError, FloatingPointError):
             self.reset_arm_observer()

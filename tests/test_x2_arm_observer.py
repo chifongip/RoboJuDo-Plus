@@ -378,24 +378,44 @@ class ArmObserverTests(unittest.TestCase):
         status["estimated_disturbance_nm"][0] = 99
         np.testing.assert_array_equal(env._arm_observer.observer.estimated_disturbance_nm, 0)
 
-    def test_shadow_prints_named_estimates_once_per_second_after_submission(self):
-        env = environment(config("SHADOW"))
-        with patch("robojudo.environment.agibot_cpp_env.logger") as log:
-            log.isEnabledFor.return_value = True
-            for now in (10.0, 10.02, 11.01):
-                env._observer_feedback_time = now
-                env._step_with_arm_observer(np.zeros(16), now)
-            self.assertEqual(log.info.call_count, 2)
-            args = log.info.call_args.args
-            self.assertIn("SHADOW", args[0])
-            self.assertEqual(args[1], list(JOINT_NAMES))
-            np.testing.assert_array_equal(args[5], 0)
-        self.assertEqual(len(env.aimdk.commands), 3)
-        np.testing.assert_array_equal(env.aimdk.effort, 0)
+    def test_observer_logs_once_per_second_after_submission(self):
+        for mode in ("SHADOW", "ACTIVE"):
+            with self.subTest(mode=mode):
+                env = environment(config(mode))
+                with patch("robojudo.environment.agibot_cpp_env.logger") as log:
+                    log.isEnabledFor.return_value = True
+                    for now in (10.0, 10.02, 11.01):
+                        env._observer_feedback_time = now
+                        env._step_with_arm_observer(np.zeros(16), now)
+                    self.assertEqual(log.info.call_count, 2)
+                    args = log.info.call_args.args
+                    self.assertEqual(args[1], mode)
+                    message = args[0] % args[1:]
+                    self.assertNotIn("\n", message)
+                    self.assertLess(len(message), 300)
+                    self.assertIn("bound=0 limited=0", message)
+                    for values, key in zip(args[2:4], ("estimated_disturbance_nm", "issued_nm"), strict=True):
+                        np.testing.assert_allclose(
+                            np.fromstring(values, sep=","), env.get_arm_observer_status()[key], atol=0.05
+                        )
+                    # Repeated feedback preserves the bounded estimate while
+                    # the new PD target removes all compensation headroom.
+                    env._arm_observer.observer.estimated_disturbance_nm[:] = -1
+                    env._arm_observer.observer.effort[:] = 0.5
+                    env._arm_observer.last_time = 12.0
+                    env._observer_feedback_time = 12.02
+                    env._step_with_arm_observer(np.ones(16), 12.02)
+                    self.assertEqual(log.info.call_count, 3)
+                    args = log.info.call_args.args
+                    self.assertIn("bound=14 limited=14", args[0] % args[1:])
+                    np.testing.assert_array_equal(env._arm_observer.issued_nm, 0)
+                self.assertEqual(len(env.aimdk.commands), 4)
+                np.testing.assert_array_equal(env.aimdk.effort, 0)
 
-    def test_shadow_logging_skips_active_ineligible_and_stale_feedback(self):
+    def test_observer_logging_skips_ineligible_and_stale_feedback(self):
         for cfg, eligible, fresh in (
-            (config(), True, True),
+            (config(), False, True),
+            (config(), True, False),
             (config("SHADOW"), False, True),
             (config("SHADOW"), True, False),
         ):
