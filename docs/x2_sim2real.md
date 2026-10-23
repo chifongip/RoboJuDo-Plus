@@ -280,6 +280,46 @@ finally:
 
 ## Startup Sequence
 
+The `x2_locomimic_real_observer` preset inherits `x2_locomimic_real` policies,
+PD gains, startup preparation, watchdogs, ROS joystick mapping and ZMQ controllers.
+It runs position control with observer compensation **OFF** by default. Its
+editable configuration is `robojudo/config/x2/x2_locomimic_observer_cfg.py`.
+It maps the existing DoF torque bounds into the observer's named 14-arm order:
+`[36, 36, 24, 24, 24, 2.2, 2.2]` Nm per side. These remain configured bounds,
+not newly verified hardware ratings. All observer fields are populated: correction
+limits use `min(8 Nm, 0.8 * actuator_limit)`, giving
+`[8, 8, 8, 8, 8, 1.76, 1.76]` Nm per side, and slew is 2 Nm/s.
+These are the selected simulation settings for optional SHADOW evaluation, not
+hardware-qualified ACTIVE settings. The preset keeps `mode="OFF"`.
+
+Before launching this preset, use the correct ROS/AimDK environment and installed
+native adapter, check the configured policy assets, ROS joystick `/joy` and
+`ps5_bluetooth_jetson` profile, and arrange a single arm command owner. The inherited
+upper-body subscriber uses `tcp://127.0.0.1:8559` (publisher on the same host),
+0.25 s timeout, EMA alpha 0.95 and 1 rad/s target speed limit. Velocity and posture
+ZMQ inputs are inherited unchanged. Configure a remote publisher's endpoint in a
+site-specific copy; do not commit private network settings.
+
+After startup preparation, joystick `Y` selects joint defaults and `X` requests
+RL control once preparation is complete. `L` toggles external arm targets while
+locomotion is eligible; publish continuously after enabling. `Back` selects
+locomotion, `Start` selects mimic, `B` selects damping, and `LB+RB+A` shuts down.
+The base preset's mode and policy gates still apply.
+
+For observer diagnostics, change `mode` in `_observer_env()` to `SHADOW` before
+construction; it sends zero additive effort. For ACTIVE, first verify the
+existing actuator bounds against the actual hardware/firmware, qualify or replace
+the configured correction limits and slew, and then select `ACTIVE`. Changing
+the mode to ACTIVE now passes numeric validation; that validation does not
+establish hardware safety. The simulation reference is not hardware qualification; see
+[observer deployment requirements](x2_upper_body_integral.md#optional-deployment-integration).
+
+The deployment command, shown for operator use only, is:
+
+```bash
+python scripts/run_pipeline.py -c x2_locomimic_real_observer
+```
+
 Run the real configuration only with the robot supported and an operator holding the emergency stop:
 
 ```bash
