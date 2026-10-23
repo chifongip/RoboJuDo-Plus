@@ -12,7 +12,7 @@ from .x2_cfg import (
     x2_omnihand_locomanipulation_real,
     x2_real,
 )
-from .x2_locomimic_observer_cfg import x2_locomimic_real_observer
+from .x2_locomimic_observer_cfg import x2_locomimic_observer, x2_locomimic_real_observer
 
 __all__ = [
     "x2",
@@ -24,6 +24,7 @@ __all__ = [
     "x2_locomanipulation",
     "x2_locomanipulation_real",
     "x2_locomimic",
+    "x2_locomimic_observer",
     "x2_locomimic_real",
     "x2_locomimic_real_observer",
     "x2_omnihand_locomanipulation_real",

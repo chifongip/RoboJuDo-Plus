@@ -411,21 +411,17 @@ class AgiBotCppEnv(Environment):
                 logging.INFO
             ):
                 self._last_arm_observer_log_time = now
-                diagnostics = self.get_arm_observer_status()
                 at_bound = np.isclose(
-                    np.abs(observer.observer.estimated_disturbance_nm),
-                    observer.observer.limits,
-                    rtol=0,
-                    atol=1e-3,
+                    np.abs(observer.observer.estimated_disturbance_nm), observer.observer.limits, rtol=0, atol=1e-3
                 )
                 limited = observer.observer.antiwindup | ~np.isclose(
                     observer.proposed_nm, observer.issued_nm, rtol=0, atol=1e-6
                 )
                 logger.info(
-                    "X2 observer %s Nm (L7/R7): est=[%s] issued=[%s] bound=%d limited=%d",
+                    "Observer %s Nm: est=[%s] issued=[%s] bound=%d limited=%d",
                     observer.mode,
-                    ",".join(f"{value:.1f}" for value in diagnostics["estimated_disturbance_nm"]),
-                    ",".join(f"{value:.1f}" for value in diagnostics["issued_nm"]),
+                    ",".join(f"{value:.1f}" for value in observer.observer.estimated_disturbance_nm),
+                    ",".join(f"{value:.1f}" for value in observer.issued_nm),
                     np.count_nonzero(at_bound),
                     np.count_nonzero(limited),
                 )
