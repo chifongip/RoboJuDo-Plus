@@ -45,7 +45,7 @@ class x2_locomimic_real_observer(x2_locomimic_real):
     env: X2RealEnvCfg = X2RealEnvCfg(
         dof=X2LocomanipulationEnvDoF(),
         odometry_type="NONE",
-        aimdk=X2AimdkCfg(startup_state_timeout=10.0),
+        aimdk=X2AimdkCfg(startup_state_timeout=10.0, publish_dt=0.02),
         observer=JointObserverCfg(
             algorithm="nonlinear",
             joint_names=list(JOINT_NAMES),
