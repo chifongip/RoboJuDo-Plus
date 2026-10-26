@@ -1,8 +1,12 @@
 """Bounded nonlinear disturbance estimation, independent of robot and environment."""
 
+import logging
+
 import numpy as np
 
 from .model import JointDynamics
+
+logger = logging.getLogger(__name__)
 
 
 class NonlinearDisturbanceObserver(JointDynamics):
@@ -13,9 +17,36 @@ class NonlinearDisturbanceObserver(JointDynamics):
     proposed or current command substituted for a past interval.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, backend="auto", **kwargs):
         super().__init__(*args, **kwargs)
         self.release_slew = None
+        if backend not in ("auto", "numpy", "numba"):
+            raise ValueError("Unknown observer backend")
+        self.backend = "numpy"
+        self._compiled_predictor = None
+        if backend != "numpy":
+            try:
+                from .accelerated import CompiledPredictor, warmup
+            except ModuleNotFoundError as error:
+                if error.name != "numba":
+                    raise
+                if backend == "numba":
+                    raise ImportError("Install RoboJuDo[observer-fast] for the numba observer backend") from error
+            else:
+                warmup()
+                self._compiled_predictor = CompiledPredictor
+                self.backend = "numba"
+        logger.info("Nonlinear observer initialized with %s backend", self.backend)
+
+    def prepare_predictor(self, reference, position, velocity, segments, covered):
+        """Accelerate only the built-in dynamics; custom models retain their callback."""
+        if (
+            self._compiled_predictor is None
+            or getattr(self.predict_state, "__func__", None) is not JointDynamics.predict_state
+            or getattr(self.predict_velocity, "__func__", None) is not JointDynamics.predict_velocity
+        ):
+            return reference
+        return self._compiled_predictor(reference, self, position, velocity, segments, covered)
 
     def reset(self):
         super().reset()
@@ -34,6 +65,10 @@ class NonlinearDisturbanceObserver(JointDynamics):
         candidate (including the previous estimate), never an unbounded Newton
         step. Nonfinite predictions fail closed.
         """
+        if self._compiled_predictor is not None and isinstance(predictor, self._compiled_predictor):
+            estimate, residual = predictor.infer(velocity, fresh)
+            self.inversion_residual_rad_s = residual
+            return estimate
         lower, upper = -self.limits.copy(), self.limits.copy()
         low_v, _ = predictor(lower)
         high_v, _ = predictor(upper)
@@ -91,11 +126,20 @@ class NonlinearDisturbanceObserver(JointDynamics):
         previous = self.estimated_disturbance_nm.copy()
         self._estimate_before_update = previous.copy()
         self.fresh = np.ones_like(previous, dtype=bool) if fresh is None else np.asarray(fresh, dtype=bool).copy()
-        if predictor is None and self.previous_position is not None:
+        if predictor is None and self.previous_position is not None and self.fresh.any():
 
             def predictor(disturbance):
                 return self.predict_velocity(
                     self.previous_position, self.previous_velocity, self.previous_target, self.effort, disturbance, dt
+                )
+
+            if self._compiled_predictor is not None:
+                predictor = self.prepare_predictor(
+                    predictor,
+                    self.previous_position,
+                    self.previous_velocity,
+                    [(np.ones_like(previous, dtype=bool), self.previous_target, self.effort, dt)],
+                    np.ones_like(previous, dtype=bool),
                 )
 
         if predictor is None:

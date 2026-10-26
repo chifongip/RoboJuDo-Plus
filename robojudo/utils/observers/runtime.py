@@ -6,6 +6,26 @@ from .linearized import LinearizedDisturbanceObserver
 from .nonlinear import NonlinearDisturbanceObserver
 
 
+class _PreparedHistory:
+    """Pair prediction callbacks without a per-step reference cycle."""
+
+    def __init__(self, predict, candidate_predictor=None):
+        self.predict = predict
+        self._candidate_predictor = candidate_predictor
+
+    def __call__(self, disturbance=None):
+        return self.predict(disturbance)
+
+    def predict_candidate(self, disturbance):
+        return self.predict(disturbance)[0]
+
+    @property
+    def candidate_predictor(self):
+        if self._candidate_predictor is not None:
+            return self._candidate_predictor
+        return self.predict_candidate
+
+
 class JointObserver:
     def __init__(self, cfg, joint_names, stiffness, damping, *, max_dt, actuator_limits=None, control_dt=0.02):
         # Revalidate mutable Pydantic configurations at the runtime boundary.
@@ -38,6 +58,7 @@ class JointObserver:
             friction_limit=cfg.friction_limit,
             friction_viscosity=cfg.friction_viscosity,
             bandwidth_rad_s=cfg.bandwidth_rad_s,
+            **({"backend": cfg.backend} if cfg.algorithm == "nonlinear" else {}),
         )
         self.observer.limits = np.broadcast_to(cfg.correction_limits_nm, self._shape).copy()
         if np.any(self.observer.limits > self.observer.torque_limits):
@@ -68,46 +89,76 @@ class JointObserver:
         self.limited_nm = np.zeros(self._shape)
         self.issued_nm = np.zeros(self._shape)
 
-    def _predict_history(self, qd, stamps, disturbance=None):
-        """Replay accepted commands only over each joint's observed receive interval.
+    def _prepare_history(self, qd, stamps):
+        """Prepare receive-interval geometry once for all candidate disturbances.
 
-        Receive time is not physical acquisition time. No assumption that Python's
-        monotonic clock shares an epoch with the native clock is needed.
+        The returned predictor is local to one proposal. Only time-dependent
+        masks and segments are shared; state and sensitivities are replayed
+        independently for every candidate, including saturation transitions.
         """
         if self.sample_times is None:
-            return (qd.copy(), np.ones(self._shape)), np.zeros(self._shape), np.zeros(self._shape, dtype=bool)
+
+            def predict_initial(disturbance=None):
+                return (qd.copy(), np.ones(self._shape)), np.zeros(self._shape), np.zeros(self._shape, dtype=bool)
+
+            return _PreparedHistory(predict_initial)
         elapsed = stamps - self.sample_times
         fresh = (elapsed > 0) & (elapsed <= self.max_dt)
-        position, velocity = self.sample_position.copy(), self.sample_velocity.copy()
-        dq, dv = np.zeros(self._shape), np.zeros(self._shape)
         covered = np.zeros(self._shape)
+        segments = []
         for i, (start, goal, effort) in enumerate(self.command_history):
             end = self.command_history[i + 1][0] if i + 1 < len(self.command_history) else np.inf
             duration = np.maximum(0, np.minimum(stamps, end) - np.maximum(self.sample_times, start))
             active = fresh & (duration > 0)
             if not active.any():
                 continue
-            result = self.observer.predict_state(
-                position,
-                velocity,
-                goal,
-                effort,
-                self.observer.estimated_disturbance_nm if disturbance is None else disturbance,
-                np.where(active, duration, 0.02),
-                dq,
-                dv,
-            )
-            position, velocity, dq, dv = [
-                np.where(active, new, old) for new, old in zip(result, (position, velocity, dq, dv), strict=True)
-            ]
+            segments.append((active, goal, effort, np.where(active, duration, 0.02)))
             covered += duration
         covered_interval = fresh & np.isclose(covered, elapsed, rtol=0, atol=1e-9)
-        if disturbance is not None:
-            # Candidate solves must see the actual replay, including an invalid
-            # gain. Substituting measured velocity would invent a perfect fit.
-            return (velocity, np.where(covered_interval, dv, 1)), np.maximum(elapsed, 0), covered_interval
-        fresh = covered_interval & (dv > 0)
-        return (np.where(fresh, velocity, qd), np.where(fresh, dv, 1)), np.maximum(elapsed, 0), fresh
+        feedback_dt = np.maximum(elapsed, 0)
+
+        def predict(disturbance=None):
+            position, velocity = self.sample_position.copy(), self.sample_velocity.copy()
+            dq, dv = np.zeros(self._shape), np.zeros(self._shape)
+            for active, goal, effort, duration in segments:
+                result = self.observer.predict_state(
+                    position,
+                    velocity,
+                    goal,
+                    effort,
+                    self.observer.estimated_disturbance_nm if disturbance is None else disturbance,
+                    duration,
+                    dq,
+                    dv,
+                )
+                position, velocity, dq, dv = [
+                    np.where(active, new, old) for new, old in zip(result, (position, velocity, dq, dv), strict=True)
+                ]
+            if disturbance is not None:
+                # Candidate solves must expose invalid gains, never substitute
+                # measured velocity and invent a perfect fit.
+                return (velocity, np.where(covered_interval, dv, 1)), feedback_dt, covered_interval
+            valid = covered_interval & (dv > 0)
+            return (np.where(valid, velocity, qd), np.where(valid, dv, 1)), feedback_dt, valid
+
+        candidate = None
+        if self.algorithm == "nonlinear" and covered_interval.any():
+            candidate = self.observer.prepare_predictor(
+                lambda disturbance: predict(disturbance)[0],
+                self.sample_position,
+                self.sample_velocity,
+                segments,
+                covered_interval,
+            )
+        return _PreparedHistory(predict, candidate)
+
+    def _predict_history(self, qd, stamps, disturbance=None):
+        """Replay accepted commands over each joint's observed receive interval.
+
+        Receive time is not physical acquisition time. No assumption that Python's
+        monotonic clock shares an epoch with the native clock is needed.
+        """
+        return self._prepare_history(qd, stamps)(disturbance)
 
     def propose(self, target, position, velocity, now, *, sample_times=None):
         try:
@@ -129,11 +180,10 @@ class JointObserver:
                         raise ValueError("Feedback timestamps must be finite")
                     if self.sample_times is not None and np.any(stamps < self.sample_times):
                         self.reset()
-                    prediction, elapsed, fresh = self._predict_history(qd, stamps)
+                    predict_history = self._prepare_history(qd, stamps)
+                    prediction, elapsed, fresh = predict_history()
                     nonlinear = (
-                        {}
-                        if self.algorithm == "linearized"
-                        else {"predictor": lambda disturbance: self._predict_history(qd, stamps, disturbance)[0]}
+                        {} if self.algorithm == "linearized" else {"predictor": predict_history.candidate_predictor}
                     )
                     self.proposed_nm = self.observer.update(
                         goal,

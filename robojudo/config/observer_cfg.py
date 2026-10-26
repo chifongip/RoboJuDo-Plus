@@ -12,6 +12,8 @@ class JointObserverCfg(Config):
     """Robot-independent observer settings; vectors follow joint_names order."""
 
     algorithm: Literal["linearized", "nonlinear"]
+    # Nonlinear replay acceleration; auto uses NumPy when the optional extra is absent.
+    backend: Literal["auto", "numpy", "numba"] = "auto"
     mode: Literal["OFF", "SHADOW", "ACTIVE"] = "OFF"
     joint_names: list[str]
     inertia: float | list[float]
@@ -38,6 +40,8 @@ class JointObserverCfg(Config):
             positive = field in ("inertia", "actuator_limits_nm", "correction_limits_nm")
             if any(not math.isfinite(v) or v < 0 or (positive and v == 0) for v in values):
                 raise ValueError(f"Observer {field} contains invalid values")
+        if self.algorithm == "linearized" and self.backend == "numba":
+            raise ValueError("Numba backend supports only the nonlinear observer")
         if self.algorithm == "linearized" and self.release_slew_nm_s not in (None, self.slew_nm_s):
             raise ValueError("Linearized observer requires symmetric growth/release slew")
         if self.actuator_limits_nm is not None:
