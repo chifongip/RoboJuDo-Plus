@@ -430,13 +430,12 @@ class TestX2LocomanipulationLocoMimic(unittest.TestCase):
         self.assertEqual(sim_cfg.loco_policy.policy_type, "X2LocomanipulationPolicy")
         self.assertEqual(
             [policy.policy_type for policy in sim_cfg.mimic_policies],
-            ["X2DeployPolicy", "X2DeployPolicy"],
+            ["X2DeployPolicy"],
         )
-        self.assertIsNot(sim_cfg.mimic_policies[0], sim_cfg.mimic_policies[1])
         for policy in sim_cfg.mimic_policies:
             self.assertIn("x2_rl_deploy", policy.policy_file)
             self.assertEqual(policy.max_timestep, 2820)
-        self.assertEqual(len(real_cfg.mimic_policies), 2)
+        self.assertEqual(len(real_cfg.mimic_policies), 1)
         self.assertTrue(all(policy.max_timestep == 2820 for policy in real_cfg.mimic_policies))
         self.assertEqual(sim_cfg.upper_dof_num, 16)
         self.assertEqual(len(sim_cfg.upper_dof_pos_default), 16)

@@ -371,10 +371,11 @@ class x2_locomimic(X2LocomanipulationLocoMimicPipelineCfg):
     ]
     loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg(
         policy_name="policy_fine_tune",
+        max_height_command_rate_m_s=0.1,
     )
     mimic_policies: list[X2DeployPolicyCfg] = [
         X2DeployPolicyCfg(max_timestep=2820),
-        X2DeployPolicyCfg(max_timestep=2820),
+        # X2DeployPolicyCfg(max_timestep=2820),
     ]
     recovery_policy: X2AmpRecoveryPolicyCfg = X2AmpRecoveryPolicyCfg()
 
@@ -386,7 +387,10 @@ class x2_locomimic_real(x2_locomimic):
     env: X2RealEnvCfg = X2RealEnvCfg(
         dof=X2LocomanipulationEnvDoF(),
         odometry_type="NONE",
-        aimdk=X2AimdkCfg(startup_state_timeout=10.0),
+        aimdk=X2AimdkCfg(
+            startup_state_timeout=10.0,
+            publish_dt=0.02,
+        ),
     )
     ctrl: list[RosJoystickCtrlCfg | LocomanipulationPostureZmqCtrlCfg | UpperBodyZmqCtrlCfg | VelocityZmqCtrlCfg] = [
         RosJoystickCtrlCfg(
@@ -396,22 +400,25 @@ class x2_locomimic_real(x2_locomimic):
             topic="/joy",
             timeout_s=0.5,
             triggers={
-                "A": "[PASSIVE_DEFAULT]",
-                "B": "[DAMPING_DEFAULT]",
-                "Y": "[JOINT_DEFAULT]",
-                "X": "[RL_DEFAULT]",
+                "RB+A": "[PASSIVE_DEFAULT]",
+                "RB+B": "[DAMPING_DEFAULT]",
+                "RB+Y": "[JOINT_DEFAULT]",
+                "RB+X": "[RL_DEFAULT]",
                 "Back": "[POLICY_LOCO]",
                 "Start": "[POLICY_MIMIC]",
                 "RB": "[POLICY_SWITCH],NEXT",
                 "LB": "[POLICY_SWITCH],LAST",
                 "L": "[UPPER_BODY_TOGGLE]",
                 "R": "[POLICY_RECOVERY]",
-                "LB+RB+A": "[SHUTDOWN]",
+                # "LB+RB+A": "[SHUTDOWN]",
             },
         ),
         VelocityZmqCtrlCfg(velocity_priority=100),
         LocomanipulationPostureZmqCtrlCfg(posture_priority=100),
-        UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES),
+        UpperBodyZmqCtrlCfg(
+            joint_names=X2_ARM_JOINT_NAMES,
+            max_joint_velocity_rad_s=2.0,
+        ),
     ]
     do_safety_check: bool = True
 
