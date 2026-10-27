@@ -1,0 +1,37 @@
+control_endpoint: tcp://127.0.0.1:8560
+
+dataset:
+  root: record_data/g1_23dof_upper_body_pickup_mulcam_v2
+  raw_root: record_data/g1_23dof_upper_body_raw_pickup_mulcam_v2
+  repo_id: local/g1_23dof_upper_body_pickup_mulcam_v2
+  fps: 30
+  codec: libx264
+  jpeg_quality: 90
+  resume: true
+
+cameras:
+  - type: realsense
+    name: head_rgb
+    serial_number: "242222070519"
+    width: 640
+    height: 480
+    fps: 30
+  - type: realsense
+    name: right_wrist_rgb
+    serial_number: "130322273712"
+    width: 640
+    height: 480
+  - type: realsense
+    name: left_wrist_rgb
+    serial_number: "130322272857"
+    width: 640
+    height: 480
+    fps: 30
+
+sync:
+  # Use source when recorder and RoboJuDo share a monotonic clock. Use receive
+  # when control samples arrive over the network from another machine.
+  clock: receive
+  max_control_age_ms: 50
+  max_camera_delta_ms: 50
+  poll_timeout_ms: 10

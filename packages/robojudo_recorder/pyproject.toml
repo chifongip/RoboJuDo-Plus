@@ -20,7 +20,9 @@ dependencies = [
 
 [project.optional-dependencies]
 opencv = ["opencv-python>=4.8"]
-realsense = ["pyrealsense2>=2.55,<2.57; platform_system != 'Darwin'"]
+realsense = [
+    "pyrealsense2>=2.55,<2.57; platform_system != 'Darwin' and platform_machine != 'aarch64' and platform_machine != 'arm64'",
+]
 ros2 = ["opencv-python>=4.8"]
 hub = ["huggingface-hub>=0.25"]
 dev = ["pytest>=8", "ruff>=0.12"]

@@ -42,6 +42,21 @@ dex_teleop:
   installer: scripts/install_dex_teleop.py
 
 
+# AGILINK OmniHand Python SDK. The installer selects the bundled wheel for
+# the active CPython ABI and Linux architecture without modifying /usr/local.
+omnihand_sdk:
+  install: false
+  path: third_party/omnihand_sdk
+  installer: scripts/install_omnihand.py
+
+
+# CASIA Hand-M Python SDK. The editable install builds its bundled C++
+# extension for the active Linux architecture and Python environment.
+casiahand_sdk:
+  install: false
+  path: third_party/casiahand_sdk
+
+
 # For OmniH2O, motionlib controller
 phc:
   install: false

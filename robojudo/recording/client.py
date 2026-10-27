@@ -73,6 +73,7 @@ class RecorderClient:
         joint_position_commands: np.ndarray,
         velocity_height_command: np.ndarray,
         timestamp_ns: int | None = None,
+        dagger: dict | None = None,
     ) -> bool:
         episode_id = self._ensure_episode()
         payload = {
@@ -86,6 +87,10 @@ class RecorderClient:
             "joint_position_commands": np.asarray(joint_position_commands, dtype=np.float32).tolist(),
             "velocity_height_command": np.asarray(velocity_height_command, dtype=np.float32).tolist(),
         }
+        # Offline DAgger adds source/session labels without changing the state
+        # or joint-position action schema used by existing datasets.
+        if dagger is not None:
+            payload["dagger"] = dict(dagger)
         sent = self._send(payload)
         if not sent:
             self.dropped_samples += 1

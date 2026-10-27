@@ -25,6 +25,16 @@ DEFAULT_FEATURES = {
     "task_index": {"dtype": "int64", "shape": [1], "names": None},
 }
 
+# Offline DAgger labels are regular frame features so a finalized rollout can
+# be audited and filtered without inventing synthetic expert-only episodes.
+DAGGER_FEATURES = {
+    "expert_intervention": {"dtype": "bool", "shape": [1], "names": None},
+    "expert_applied": {"dtype": "bool", "shape": [1], "names": None},
+    "action_source": {"dtype": "string", "shape": [1], "names": None},
+    "intervention_session": {"dtype": "int64", "shape": [1], "names": None},
+    "expert_frame_id": {"dtype": "int64", "shape": [1], "names": None},
+}
+
 
 def _write_json(path: Path, value: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +95,7 @@ class _VectorStats:
 
 
 class _EpisodeVideoWriter:
-    def __init__(self, path: Path, fps: int, shape: tuple[int, int, int], codec: str):
+    def __init__(self, path: Path, fps: int, shape: tuple[int, int, int], codec: str, threads: int = 0):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         height, width, channels = shape
@@ -100,6 +110,7 @@ class _EpisodeVideoWriter:
         self.stream.width = width
         self.stream.height = height
         self.stream.pix_fmt = "yuv420p"
+        self.stream.codec_context.thread_count = threads
         self.frame_count = 0
 
     def add(self, image: np.ndarray):
@@ -134,6 +145,8 @@ class LeRobotV3Writer:
         camera_shape: tuple[int, int, int] | None = None,
         codec: str = "libx264",
         resume: bool = False,
+        dagger_features: bool = False,
+        encoder_threads: int = 0,
     ):
         self.root = Path(root)
         has_existing_data = self.root.exists() and any(self.root.iterdir())
@@ -158,6 +171,8 @@ class LeRobotV3Writer:
         self.camera_shapes = {name: tuple(shape) for name, shape in camera_shapes.items()}
         self.camera_keys = {name: f"observation.images.{name}" for name in self.camera_shapes}
         self.codec = codec
+        self.encoder_threads = encoder_threads
+        self.dagger_features = dagger_features
         self._episode_index = 0
         self._total_frames = 0
         self._episode_rows: list[dict] = []
@@ -165,6 +180,7 @@ class LeRobotV3Writer:
         self._global_stats: dict[str, _VectorStats] = {}
         self._state_frames: list[np.ndarray] = []
         self._action_frames: list[np.ndarray] = []
+        self._dagger_frames: list[dict] = []
         self._task: str | None = None
         self._videos: dict[str, _EpisodeVideoWriter] = {}
         if has_existing_data:
@@ -216,6 +232,7 @@ class LeRobotV3Writer:
                 "shape": [len(self.action_names)],
                 "names": self.action_names,
             },
+            **(DAGGER_FEATURES if self.dagger_features else {}),
             **DEFAULT_FEATURES,
         }
 
@@ -254,6 +271,10 @@ class LeRobotV3Writer:
                 {key: tuple(feature["shape"]) for key, feature in existing_camera_features.items()},
                 {self.camera_keys[name]: shape for name, shape in self.camera_shapes.items()},
             ),
+            "dagger_features": (
+                all(name in info["features"] for name in DAGGER_FEATURES),
+                self.dagger_features,
+            ),
         }
         mismatches = {key: values for key, values in expected.items() if values[0] != values[1]}
         if mismatches:
@@ -290,7 +311,7 @@ class LeRobotV3Writer:
                     / f"chunk-{chunk_index:03d}"
                     / f"file-{file_index:03d}.mp4"
                 )
-                self._videos[name] = _EpisodeVideoWriter(video_path, self.fps, shape, self.codec)
+                self._videos[name] = _EpisodeVideoWriter(video_path, self.fps, shape, self.codec, self.encoder_threads)
         except Exception:
             self.discard_episode()
             raise
@@ -302,6 +323,7 @@ class LeRobotV3Writer:
         images: dict[str, np.ndarray] | np.ndarray | None = None,
         *,
         image: np.ndarray | None = None,
+        dagger: dict | None = None,
     ):
         if not self._videos or self._task is None:
             raise RuntimeError("start_episode() must be called before add_frame()")
@@ -329,24 +351,82 @@ class LeRobotV3Writer:
                 raise ValueError(f"camera {name!r} image shape {image.shape} does not match {self.camera_shapes[name]}")
         self._state_frames.append(state.copy())
         self._action_frames.append(action.copy())
+        if self.dagger_features:
+            self._dagger_frames.append(self._normalize_dagger(dagger))
+        elif dagger is not None:
+            raise ValueError("dagger labels require dagger_features=True")
         for name, image in normalized_images.items():
             self._videos[name].add(image)
 
-    def _write_data(self, states: np.ndarray, actions: np.ndarray, task_index: int):
+    @staticmethod
+    def _normalize_dagger(dagger: dict | None) -> dict:
+        # Offline DAgger defaults describe an ordinary policy frame.  This also
+        # keeps full-rollout finalization robust to a missing label on startup.
+        value = {
+            "expert_intervention": False,
+            "expert_applied": False,
+            "action_source": "policy",
+            "intervention_session": 0,
+            "expert_frame_id": -1,
+        }
+        if dagger is not None:
+            value.update(dagger)
+        for name in ("expert_intervention", "expert_applied"):
+            if not isinstance(value[name], bool):
+                raise ValueError(f"dagger {name} must be boolean")
+        if value["action_source"] not in {"policy", "expert"}:
+            raise ValueError("dagger action_source must be policy or expert")
+        if value["expert_applied"] != (value["action_source"] == "expert"):
+            raise ValueError("dagger expert_applied and action_source disagree")
+        session = value["intervention_session"]
+        if isinstance(session, bool) or not isinstance(session, int) or session < 0:
+            raise ValueError("dagger intervention_session must be non-negative")
+        frame_id = value["expert_frame_id"]
+        if frame_id is None:
+            frame_id = -1
+        if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < -1:
+            raise ValueError("dagger expert_frame_id must be null or at least -1")
+        # -1 keeps raw episodes recorded before expert_frame_id was introduced
+        # finalizable; the live protocol requires the ID for all new expert data.
+        value["expert_frame_id"] = frame_id
+        return value
+
+    def _write_data(
+        self,
+        states: np.ndarray,
+        actions: np.ndarray,
+        task_index: int,
+        dagger_frames: list[dict],
+    ):
         length = len(states)
         chunk_index, file_index = self._episode_location()
         frame_indices = np.arange(length, dtype=np.int64)
-        table = pa.table(
-            {
-                "observation.state": pa.array(states.tolist(), type=pa.list_(pa.float32(), len(self.state_names))),
-                "action": pa.array(actions.tolist(), type=pa.list_(pa.float32(), len(self.action_names))),
-                "timestamp": pa.array(frame_indices.astype(np.float32) / self.fps, type=pa.float32()),
-                "frame_index": pa.array(frame_indices, type=pa.int64()),
-                "episode_index": pa.array(np.full(length, self._episode_index), type=pa.int64()),
-                "index": pa.array(np.arange(self._total_frames, self._total_frames + length), type=pa.int64()),
-                "task_index": pa.array(np.full(length, task_index), type=pa.int64()),
-            }
-        )
+        columns = {
+            "observation.state": pa.array(states.tolist(), type=pa.list_(pa.float32(), len(self.state_names))),
+            "action": pa.array(actions.tolist(), type=pa.list_(pa.float32(), len(self.action_names))),
+            "timestamp": pa.array(frame_indices.astype(np.float32) / self.fps, type=pa.float32()),
+            "frame_index": pa.array(frame_indices, type=pa.int64()),
+            "episode_index": pa.array(np.full(length, self._episode_index), type=pa.int64()),
+            "index": pa.array(np.arange(self._total_frames, self._total_frames + length), type=pa.int64()),
+            "task_index": pa.array(np.full(length, task_index), type=pa.int64()),
+        }
+        if self.dagger_features:
+            if len(dagger_frames) != length:
+                raise RuntimeError("DAgger label count does not match episode frame count")
+            columns.update(
+                {
+                    "expert_intervention": pa.array(
+                        [frame["expert_intervention"] for frame in dagger_frames], type=pa.bool_()
+                    ),
+                    "expert_applied": pa.array([frame["expert_applied"] for frame in dagger_frames], type=pa.bool_()),
+                    "action_source": pa.array([frame["action_source"] for frame in dagger_frames], type=pa.string()),
+                    "intervention_session": pa.array(
+                        [frame["intervention_session"] for frame in dagger_frames], type=pa.int64()
+                    ),
+                    "expert_frame_id": pa.array([frame["expert_frame_id"] for frame in dagger_frames], type=pa.int64()),
+                }
+            )
+        table = pa.table(columns)
         path = self.root / "data" / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, path, compression="snappy", use_dictionary=True)
@@ -395,7 +475,7 @@ class LeRobotV3Writer:
         if task not in self._tasks:
             self._tasks.append(task)
         task_index = self._tasks.index(task)
-        self._write_data(states, actions, task_index)
+        self._write_data(states, actions, task_index, self._dagger_frames)
         episode_stats = self._episode_stats(states, actions)
         chunk_index, file_index = self._episode_location()
         length = len(states)
@@ -427,6 +507,75 @@ class LeRobotV3Writer:
         self._write_info()
         self._clear_buffer()
 
+    def append_preencoded_episode(self, source_root: Path):
+        """Consume a single-episode staging dataset without re-encoding its videos.
+
+        Only the parent finalizer calls this method. Workers never write shared
+        metadata, and frame/task indices are assigned at append time.
+        """
+        if self.episode_open or self.has_pending_frames:
+            raise RuntimeError("cannot append while an episode is open")
+        info = json.loads((source_root / "meta/info.json").read_text())
+        if (
+            info["total_episodes"] != 1
+            or info["features"] != self._features()
+            or info["robot_type"] != self.robot_type
+            or info["fps"] != self.fps
+        ):
+            raise ValueError("staged episode schema differs from the destination dataset")
+        table = pq.read_table(source_root / "data/chunk-000/file-000.parquet")
+        length = table.num_rows
+        if not length or length != info["total_frames"]:
+            raise ValueError("staged episode has an invalid frame count")
+        rows = pd.read_parquet(source_root / "meta/episodes/chunk-000/file-000.parquet")
+        if len(rows) != 1:
+            raise ValueError("staging dataset must contain exactly one episode")
+        row = rows.to_dict("records")[0]
+        task = row["tasks"][0]
+        task_index = self._tasks.index(task) if task in self._tasks else len(self._tasks)
+        for name, values in {
+            "episode_index": np.full(length, self._episode_index, dtype=np.int64),
+            "index": np.arange(self._total_frames, self._total_frames + length, dtype=np.int64),
+            "task_index": np.full(length, task_index, dtype=np.int64),
+        }.items():
+            table = table.set_column(table.schema.get_field_index(name), name, pa.array(values))
+        states = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
+        actions = np.asarray(table["action"].to_pylist(), dtype=np.float32)
+        episode_stats = self._episode_stats(states, actions)
+        chunk_index, file_index = self._episode_location()
+        row.update(
+            {
+                "episode_index": self._episode_index,
+                "data/chunk_index": chunk_index,
+                "data/file_index": file_index,
+                "dataset_from_index": self._total_frames,
+                "dataset_to_index": self._total_frames + length,
+            }
+        )
+        for camera_key in self.camera_keys.values():
+            source = source_root / "videos" / camera_key / "chunk-000/file-000.mp4"
+            if not source.is_file():
+                raise ValueError(f"staged episode video is missing: {source}")
+        for camera_key in self.camera_keys.values():
+            source = source_root / "videos" / camera_key / "chunk-000/file-000.mp4"
+            destination = self.root / "videos" / camera_key / f"chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+            row[f"videos/{camera_key}/chunk_index"] = chunk_index
+            row[f"videos/{camera_key}/file_index"] = file_index
+        path = self.root / "data" / f"chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, path, compression="snappy", use_dictionary=True)
+        if task not in self._tasks:
+            self._tasks.append(task)
+        self._episode_rows.append(row)
+        self._write_tasks()
+        self._write_episodes()
+        self._update_stats(episode_stats)
+        self._total_frames += length
+        self._episode_index += 1
+        self._write_info()
+
     def discard_episode(self):
         for video in self._videos.values():
             video.close()
@@ -437,6 +586,7 @@ class LeRobotV3Writer:
     def _clear_buffer(self):
         self._state_frames.clear()
         self._action_frames.clear()
+        self._dagger_frames.clear()
         self._task = None
         self._videos = {}
 

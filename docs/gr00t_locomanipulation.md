@@ -55,20 +55,59 @@ env_data.dof_pos
     -> return ctrl_data to the pipeline
 
 GR00T observation worker thread:
-camera frame
+independent camera capture threads
+    -> per-camera latest-only JPEG workers
+    -> timestamp matching with a maximum camera skew
     + latest upper-joint snapshot
     + task
-    -> msgpack/JPEG observation PUB :8561
+    -> one atomic msgpack/JPEG multipart observation PUB :8561
 ```
 
 The camera worker does not read the robot environment directly. Joint state is sampled by the control thread, then
 shared with the worker through the locked latest snapshot. Conversely, the worker only publishes observations; robot
 PD targets are still computed and applied synchronously by the pipeline control thread.
 
-The observation header is msgpack and the second multipart field is a JPEG payload. Camera capture, JPEG encoding, and
-publishing run outside the 50 Hz control thread. G1 uses the recorder's RealSense backend by default; both X2 simulation
-and X2 real use the ROS2 compressed-image topic configured in `x2_cfg.py`. All can be replaced through
-`Gr00tZmqCtrlCfg.camera`.
+The observation header is msgpack. A legacy single-camera configuration publishes protocol v1 as `[header, jpeg]`.
+A multi-camera configuration publishes protocol v2 as `[header, jpeg_0, ...]`, with payload order defined by
+`header["image_keys"]`. All image parts are sent by one `send_multipart()` call. Camera capture and per-camera JPEG
+encoding run outside the 50 Hz control thread, and bounded queues discard stale frames instead of accumulating deploy
+latency. `max_camera_skew_ms` rejects a candidate bundle when its earliest and latest image timestamps are too far
+apart.
+
+G1 uses recorder camera backends; both X2 simulation and X2 real use the ROS2 compressed-image topic configured in
+`x2_cfg.py`. Keep using `Gr00tZmqCtrlCfg.camera` for one camera, or set `Gr00tZmqCtrlCfg.cameras` for multiple cameras.
+For example, configure three RealSense devices by serial number in `g1_vla_cfg.py` (replace the placeholders with the
+serials reported by `rs-enumerate-devices -s`):
+
+```python
+cameras=[
+    Gr00tCameraCfg(
+        type="realsense",
+        name="head_rgb",
+        image_key="ego_view",
+        options={"serial_number": "HEAD_SERIAL", "width": 640, "height": 480, "fps": 30},
+    ),
+    Gr00tCameraCfg(
+        type="realsense",
+        name="left_wrist_rgb",
+        image_key="left_wrist_view",
+        options={"serial_number": "LEFT_WRIST_SERIAL", "width": 640, "height": 480, "fps": 30},
+    ),
+    Gr00tCameraCfg(
+        type="realsense",
+        name="right_wrist_rgb",
+        image_key="right_wrist_view",
+        options={"serial_number": "RIGHT_WRIST_SERIAL", "width": 640, "height": 480, "fps": 30},
+    ),
+],
+camera_pending_capacity=2,
+camera_encoder_queue_capacity=2,
+camera_poll_timeout_ms=2,
+max_camera_skew_ms=50,
+```
+
+The protocol v2 header additionally reports `image_shapes`, per-camera source/receive timestamps and sequences, and
+the selected bundle's `camera_skew_ns` for runtime diagnostics.
 
 Command messages remain JSON, and every message must contain all configured joints. Invalid positions,
 a command other than
@@ -130,12 +169,7 @@ Select the configuration matching the lower-body model and PD gains used during 
 ```bash
 conda activate robop
 
-# Simulation
-python scripts/run_pipeline.py -c g1_23_gr00t_locomanipulation_default
-python scripts/run_pipeline.py -c g1_23_gr00t_locomanipulation_stiff
-
 # Real G1 with Unitree remote
-python scripts/run_pipeline.py -c g1_23_gr00t_locomanipulation_default_real
 python scripts/run_pipeline.py -c g1_23_gr00t_locomanipulation_stiff_real
 ```
 
@@ -162,8 +196,75 @@ value. Arm targets return toward their configured defaults through the pipeline'
 The default limit is 4 rad/s, or 0.08 rad per 50 Hz control step.
 
 Actively disabling upper-body takeover restores the standard Locomanipulation joystick velocity/height controls and
-rate-limits the arms back to their defaults. A stream timeout while takeover remains enabled does not fall back to the
-joystick; it keeps zero velocity until the operator explicitly disables takeover.
+rate-limits the arms back to their defaults. On CASIA-equipped G1 configurations, the same disable edge also commands
+both hands to their zero/default pose before leaving the hardware command gate closed. A stream timeout while takeover
+remains enabled does not fall back to the joystick; it keeps zero velocity until the operator explicitly disables
+takeover.
+
+## Offline DAgger with dex-teleop
+
+The dedicated configuration keeps normal GR00T deployment unchanged and enables the offline DAgger transport:
+
+```text
+GR00T policy commands       :8559 -> RoboJuDo
+recorder RealSense JPEGs    :8571-8573 -> RoboJuDo GR00T observation worker
+RoboJuDo measured feedback :8561 -> GR00T deploy, dex-teleop
+dex-teleop expert targets  :8560 -> RoboJuDo
+RoboJuDo recording samples :8562 -> recorder
+```
+
+Start the recorder and dex-teleop in separate terminals, then run the dedicated RoboJuDo configuration:
+
+```bash
+# Recorder: owns all three RealSense devices and forwards JPEGs on loopback.
+robojudo-recorder \
+  --config packages/robojudo_recorder/recorder.g1_offline_dagger.yaml
+
+# dex-teleop (run in its own repository/environment).
+conda activate dex
+python teleop/robot_control/vr_arm_hand_teleop.py \
+  --robot g1_23 --backend real --hand casia --offline-dagger \
+  --dagger-feedback-endpoint tcp://192.168.123.164:8561
+
+# RoboJuDo-Plus.
+conda activate robop
+python scripts/run_pipeline.py \
+  -c g1_23_gr00t_offline_dagger_stiff_real \
+  --gr00t-task "pick up the the bag and put it into the tray"
+```
+
+Start the recorder before RoboJuDo: it owns the three RealSense devices and
+publishes each camera independently on loopback ports 8571–8573, even when no
+episode is being recorded. The GR00T observation worker subscribes to these
+streams, synchronizes them, and keeps its existing 8561 feedback protocol.
+Raw recording writes each camera independently, so observation bundle drops do
+not remove frames from the dataset.
+
+The dedicated DAgger configuration assumes RoboJuDo and the recorder run on
+`192.168.123.164`, while dex-teleop and GR00T deploy run on `192.168.123.222`.
+It therefore subscribes to GR00T policy commands at `192.168.123.222:8559`
+and expert targets at `192.168.123.222:8560`. The recorder remains local to
+RoboJuDo on loopback ports 8561 and 8562, with recorder camera feeds on
+8571–8573. After dex-teleop starts, wait for
+Quest hand tracking and press Enter manually to start publishing expert frames.
+
+RoboJuDo will not enable the GR00T upper-body takeover until dex-teleop has echoed fresh feedback from the current
+observation stream. A bare held `Select` starts VR intervention; releasing it returns to policy targets. The
+`L1+R1+Select` recorder chord is excluded from intervention. Each Select rising edge creates a new intervention session,
+freezes the current Quest `world_T_body`, and anchors both TCP targets at measured robot forward kinematics. The expert
+action atomically covers named targets for both arms and both hands plus the joystick-derived four-dimensional
+`[vx, vy, yaw_rate, height]` locomotion command. Waist remains at the trained default and is not part of the expert action.
+
+Recording and finalization both keep the complete physical rollout as one LeRobot episode. The finalized Parquet rows
+retain `expert_intervention`, `expert_applied`, `action_source`, `intervention_session`, and `expert_frame_id`; training
+can therefore build action-horizon-valid expert views without treating Select release as a terminal state. The supplied
+config writes a label-aware DAgger dataset separately from an existing unlabeled base dataset; combine them in the
+training dataset configuration rather than appending incompatible schemas:
+
+```bash
+robojudo-finalize \
+  --config packages/robojudo_recorder/recorder.g1_offline_dagger.yaml
+```
 
 ## Action-horizon scheduling
 
@@ -172,11 +273,19 @@ Run the double-buffered deploy client from Isaac-GR00T:
 ```bash
 uv run python examples/RoboJuDo/run_robojudo_client.py \
   --profile g1_23dof \
+  --camera-layout mulcam \
   --robot-endpoint tcp://<robot-ip>:8561 \
-  --policy-host <policy-server-ip>
+  --policy-host <policy-server-ip> \
+  --policy-port 5555 \
+  --command-endpoint tcp://*:8559 \
+  --execution-mode rtc \
+  --execution-horizon 8 \
+  --rtc-prefix-schedule exp \
+  --rtc-max-guidance-weight 10
 ```
 
-Use `--profile x2` for X2. Eight commands at 30 Hz cover approximately 267 ms. The client receives observations and
+Omit `--camera-layout mulcam` for a legacy single-camera deployment. Use `--profile x2` for X2. Eight commands at 30
+Hz cover approximately 267 ms. The client receives observations and
 requests the next action chunk in background threads while its command loop continues publishing at 30 Hz.
 
 ## Recording

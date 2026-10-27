@@ -16,7 +16,7 @@ class CameraConfig:
 class SyncConfig:
     clock: str = "receive"
     max_control_age_ms: float = 50.0
-    poll_timeout_ms: int = 10
+    poll_timeout_ms: int = 1
     pending_frame_capacity: int = 32
     throughput_log_interval_s: float = 5.0
     max_camera_delta_ms: float = 50.0
@@ -43,6 +43,15 @@ class DatasetConfig:
     resume: bool = False
     raw_root: Path | None = None
     jpeg_quality: int = 90
+    # Offline DAgger: persist per-frame intervention labels while keeping the
+    # complete rollout as one real LeRobot episode.
+    dagger_labels: bool = False
+    # Deprecated compatibility alias.  It no longer drops policy frames or
+    # creates synthetic expert-only episodes; use dagger_labels instead.
+    expert_only: bool = False
+    # Retained only so older YAML files still parse.  Full-rollout DAgger
+    # finalization does not discard short interventions.
+    expert_min_frames: int = 2
 
     def __post_init__(self):
         if self.fps <= 0:
@@ -51,10 +60,16 @@ class DatasetConfig:
             raise ValueError("dataset.repo_id must not be empty")
         if not 1 <= self.jpeg_quality <= 100:
             raise ValueError("dataset.jpeg_quality must be between 1 and 100")
+        if self.expert_min_frames <= 0:
+            raise ValueError("dataset.expert_min_frames must be positive")
         if self.raw_root is None:
             object.__setattr__(self, "raw_root", self.root.with_name(f"{self.root.name}_raw"))
         if self.raw_root == self.root:
             raise ValueError("dataset.raw_root must differ from dataset.root")
+
+    @property
+    def preserve_dagger_labels(self) -> bool:
+        return self.dagger_labels or self.expert_only
 
 
 @dataclass(frozen=True)
@@ -64,6 +79,7 @@ class RecorderConfig:
     camera: CameraConfig | None = None
     sync: SyncConfig = SyncConfig()
     cameras: tuple[CameraConfig, ...] = ()
+    camera_publish_endpoints: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         # ``camera`` remains an alias for the first entry so existing Python callers keep working.
@@ -77,6 +93,16 @@ class RecorderConfig:
             raise ValueError("camera names must not be empty")
         if len(set(names)) != len(names):
             raise ValueError(f"camera names must be unique: {names}")
+        unknown = set(self.camera_publish_endpoints) - set(names)
+        if unknown:
+            raise ValueError(f"camera publish endpoints reference unknown cameras: {sorted(unknown)}")
+        if len(set(self.camera_publish_endpoints.values())) != len(self.camera_publish_endpoints):
+            raise ValueError("camera publish endpoints must be unique")
+        if any(
+            not (endpoint.startswith("tcp://127.0.0.1:") or endpoint.startswith("inproc://"))
+            for endpoint in self.camera_publish_endpoints.values()
+        ):
+            raise ValueError("camera publish endpoints must bind to local TCP or inproc")
         object.__setattr__(self, "cameras", tuple(cameras))
         object.__setattr__(self, "camera", cameras[0])
 
@@ -112,4 +138,5 @@ def load_config(path: str | Path) -> RecorderConfig:
         dataset=dataset,
         cameras=cameras,
         sync=SyncConfig(**raw.get("sync", {})),
+        camera_publish_endpoints=raw.get("camera_publish_endpoints", {}),
     )

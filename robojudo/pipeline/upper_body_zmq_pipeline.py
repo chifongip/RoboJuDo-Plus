@@ -72,7 +72,13 @@ class UpperBodyZmqPipelineMixin:
             [self.env.joint_names.index(name) for name in self._upper_body_cfg.joint_names],
             dtype=np.int32,
         )
-        self._upper_body_default = self.env.default_pos[self._upper_body_indices].astype(np.float32)
+        if self._upper_body_cfg.upper_body_default_pose is None:
+            self._upper_body_default = self.env.default_pos[self._upper_body_indices].astype(np.float32)
+        else:
+            self._upper_body_default = np.asarray(
+                self._upper_body_cfg.upper_body_default_pose,
+                dtype=np.float32,
+            )
         self._upper_body_filtered = self.env.dof_pos[self._upper_body_indices].astype(np.float32)
 
     def _set_upper_body_enabled(self, enabled: bool):

@@ -1,0 +1,49 @@
+# Offline DAgger recorder: RoboJuDo binds control samples on 8562 because
+# dex-teleop uses 8560 for expert joint targets.
+control_endpoint: tcp://127.0.0.1:8562
+
+dataset:
+  # Offline DAgger uses a label-aware dataset schema. Keep it separate from an
+  # existing unlabeled base dataset and aggregate both datasets during training.
+  root: record_data/g1_23dof_upper_body_pickup_mulcam_dagger
+  raw_root: record_data/g1_23dof_upper_body_pickup_mulcam_dagger_raw
+  repo_id: local/g1_23dof_upper_body_pickup_mulcam_dagger
+  fps: 30
+  codec: libx264
+  jpeg_quality: 90
+  resume: true
+  # Offline DAgger keeps the complete rollout and writes per-frame labels.
+  dagger_labels: true
+
+# The recorder owns the RealSense devices and forwards each camera independently
+# to GR00T over loopback. Raw recording does not wait for synchronized bundles.
+cameras:
+  - type: realsense
+    name: head_rgb
+    serial_number: "242222070519"
+    width: 640
+    height: 480
+    fps: 30
+  - type: realsense
+    name: left_wrist_rgb
+    serial_number: "130322272857"
+    width: 640
+    height: 480
+    fps: 30
+  - type: realsense
+    name: right_wrist_rgb
+    serial_number: "130322273712"
+    width: 640
+    height: 480
+    fps: 30
+
+camera_publish_endpoints:
+  head_rgb: tcp://127.0.0.1:8571
+  left_wrist_rgb: tcp://127.0.0.1:8572
+  right_wrist_rgb: tcp://127.0.0.1:8573
+
+sync:
+  clock: receive
+  max_control_age_ms: 50
+  max_camera_delta_ms: 50
+  poll_timeout_ms: 10

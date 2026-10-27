@@ -41,5 +41,21 @@ class CameraSource(ABC):
     @abstractmethod
     def read(self, timeout_ms: int) -> CameraFrame | None: ...
 
+    def read_batch(self, max_frames: int) -> list[CameraFrame]:
+        """Return up to ``max_frames`` immediately, preserving source order."""
+        if max_frames <= 0:
+            return []
+        frame = self.read(timeout_ms=0)
+        return [] if frame is None else [frame]
+
+    def set_pending_capacity(self, capacity: int) -> None:
+        """Configure source buffering when the backend supports it."""
+        del capacity
+        return None
+
+    def clear_pending(self) -> None:
+        """Discard frames captured before a new episode is armed."""
+        return None
+
     @abstractmethod
     def close(self) -> None: ...

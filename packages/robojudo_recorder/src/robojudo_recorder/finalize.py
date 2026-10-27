@@ -4,7 +4,12 @@ import argparse
 import bisect
 import json
 import logging
-from dataclasses import dataclass
+import multiprocessing
+import shutil
+import tempfile
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import av
@@ -41,13 +46,16 @@ class _ControlMatch:
     state: np.ndarray
     action: np.ndarray
     age_ms: float
+    # Offline DAgger label associated with the zero-order-held action.
+    dagger: dict | None = None
 
 
 class RawDatasetFinalizer:
     """Convert committed raw episodes into a uniformly sampled LeRobot v3 dataset."""
 
-    def __init__(self, cfg: RecorderConfig):
+    def __init__(self, cfg: RecorderConfig, *, encoder_threads: int = 0):
         self.cfg = cfg
+        self.encoder_threads = encoder_threads
         self._writer: LeRobotV3Writer | None = None
         self._schema: tuple[str, tuple[str, ...], tuple[tuple[str, tuple[int, int, int]], ...]] | None = None
 
@@ -86,17 +94,17 @@ class RawDatasetFinalizer:
         ).astype(np.float32)
         age_ms = (target_ns - previous_timestamp) / 1_000_000
         if target_ns == previous_timestamp:
-            return _ControlMatch(state0, action, age_ms)
+            return _ControlMatch(state0, action, age_ms, previous.get("dagger"))
         if following_index >= len(controls):
             return None
         following = controls[following_index]
         following_timestamp = timestamps[following_index]
         if following_timestamp <= previous_timestamp:
-            return _ControlMatch(state0, action, age_ms)
+            return _ControlMatch(state0, action, age_ms, previous.get("dagger"))
         alpha = np.float32((target_ns - previous_timestamp) / (following_timestamp - previous_timestamp))
         state1 = np.asarray(following["joint_positions"], dtype=np.float32)
         state = state0 + alpha * (state1 - state0)
-        return _ControlMatch(state.astype(np.float32), action, age_ms)
+        return _ControlMatch(state.astype(np.float32), action, age_ms, previous.get("dagger"))
 
     def _load_episode(self, episode_path: Path):
         manifest = json.loads((episode_path / "manifest.json").read_text())
@@ -135,19 +143,26 @@ class RawDatasetFinalizer:
                 camera_shapes=camera_shapes,
                 codec=self.cfg.dataset.codec,
                 resume=self.cfg.dataset.resume,
+                dagger_features=self.cfg.dataset.preserve_dagger_labels,
+                encoder_threads=self.encoder_threads,
             )
             self._schema = schema
         return camera_shapes
 
-    def finalize_episode(self, episode_path: Path) -> dict:
+    def _existing_report(self, episode_path: Path) -> dict | None:
         report_path = episode_path / "finalize_report.json"
         if report_path.exists():
             report = json.loads(report_path.read_text())
-            output_file = self.cfg.dataset.root / report.get("data_file", "missing")
-            if report.get("status") == "finalized" and output_file.is_file():
+            data_files = report.get("data_files") or [report.get("data_file", "missing")]
+            output_files_exist = all((self.cfg.dataset.root / path).is_file() for path in data_files)
+            if report.get("status") == "finalized" and output_files_exist:
                 logger.info("Skipping already finalized raw episode %s", episode_path.name)
                 return report
+        return None
 
+    def finalize_episode(self, episode_path: Path, *, write_report: bool = True) -> dict:
+        if write_report and (report := self._existing_report(episode_path)) is not None:
+            return report
         manifest, controls, camera_records = self._load_episode(episode_path)
         if not controls:
             raise ValueError(f"raw episode {episode_path.name} contains no controls")
@@ -191,6 +206,7 @@ class RawDatasetFinalizer:
                 for name, timestamps in camera_timestamps.items()
             },
             "source_sequence_gaps": manifest.get("sequence_gaps", {}),
+            "writer_queue_drops": manifest.get("writer_queue_drops", {}),
             "target_slots": len(target_timestamps),
             "written_frames": 0,
             "dropped_camera_slots": 0,
@@ -200,10 +216,21 @@ class RawDatasetFinalizer:
             "control_age_ms": [],
             "camera_shapes": {name: list(shape) for name, shape in camera_shapes.items()},
         }
-        self._writer.start_episode(manifest["task"])
-        dataset_episode_index = self._writer.next_episode_index
         max_camera_delta_ms = self.cfg.sync.max_camera_delta_ms
         selected_frame_indices = {name: set() for name in camera_records}
+        # Offline DAgger keeps the physical rollout boundary. Expert sessions
+        # remain frame labels and never become synthetic LeRobot episodes.
+        dataset_episode_index = self._writer.next_episode_index
+        self._writer.start_episode(manifest["task"])
+        episode_open = True
+        report["dagger_labels"] = self.cfg.dataset.preserve_dagger_labels
+        report["preserve_full_rollout"] = True
+        report["legacy_expert_only_requested"] = self.cfg.dataset.expert_only
+        report["expert_frames"] = 0
+        report["policy_frames"] = 0
+        report["missing_dagger_labels"] = 0
+        report["missing_expert_frame_ids"] = 0
+        intervention_sessions = set()
         try:
             for target_ns in target_timestamps:
                 selected = {}
@@ -223,6 +250,19 @@ class RawDatasetFinalizer:
                 if control is None:
                     report["dropped_control_slots"] += 1
                     continue
+                dagger = control.dagger
+                if self.cfg.dataset.preserve_dagger_labels:
+                    if dagger is None:
+                        report["missing_dagger_labels"] += 1
+                    else:
+                        if dagger.get("expert_intervention", False):
+                            intervention_sessions.add(int(dagger["intervention_session"]))
+                        if dagger.get("expert_applied", False):
+                            report["expert_frames"] += 1
+                            if dagger.get("expert_frame_id") is None:
+                                report["missing_expert_frame_ids"] += 1
+                        else:
+                            report["policy_frames"] += 1
                 for name, record in selected.items():
                     report["camera_delta_ms"][name].append(selected_deltas[name])
                     selected_frame_indices[name].add(int(record["frame_index"]))
@@ -230,19 +270,31 @@ class RawDatasetFinalizer:
                 if control.age_ms > self.cfg.sync.max_control_age_ms:
                     report["over_age_frames"] += 1
                 images = {name: _decode_image(episode_path / record["path"]) for name, record in selected.items()}
-                self._writer.add_frame(control.state, control.action, images)
+                self._writer.add_frame(
+                    control.state,
+                    control.action,
+                    images,
+                    dagger=dagger if self.cfg.dataset.preserve_dagger_labels else None,
+                )
                 report["written_frames"] += 1
             if report["written_frames"] == 0:
                 raise ValueError(f"raw episode {episode_path.name} produced no synchronized output frames")
             self._writer.save_episode()
+            episode_open = False
         except Exception:
-            self._writer.discard_episode()
+            if episode_open:
+                self._writer.discard_episode()
             raise
 
         report["status"] = "finalized"
         chunk_index, file_index = divmod(dataset_episode_index, 1000)
+        data_files = [f"data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"]
+        report["dataset_episode_indices"] = [dataset_episode_index]
+        report["data_files"] = data_files
+        report["intervention_sessions"] = sorted(intervention_sessions)
+        # Preserve legacy singular report keys for downstream tooling.
         report["dataset_episode_index"] = dataset_episode_index
-        report["data_file"] = f"data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+        report["data_file"] = data_files[0]
         report["selected_unique_camera_frames"] = {
             name: len(indices) for name, indices in selected_frame_indices.items()
         }
@@ -267,7 +319,8 @@ class RawDatasetFinalizer:
         }
         del report["control_age_ms"]
         del report["camera_delta_ms"]
-        report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        if write_report:
+            self._write_report(episode_path, report)
         logger.info(
             "Finalized %s: written=%d/%d, camera_drops=%d, control_drops=%d, over_age=%d",
             episode_path.name,
@@ -279,30 +332,126 @@ class RawDatasetFinalizer:
         )
         return report
 
-    def run(self, episode_names: set[str] | None = None) -> list[dict]:
+    @staticmethod
+    def _write_report(episode_path: Path, report: dict):
+        path = episode_path / "finalize_report.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        temporary.replace(path)
+
+    def _run_parallel(self, paths: list[Path], workers: int) -> list[dict]:
+        reports = {}
+        pending = []
+        for path in paths:
+            report = self._existing_report(path)
+            if report is None:
+                pending.append(path)
+            else:
+                reports[path.name] = report
+        if not pending:
+            return [reports[path.name] for path in paths]
+
+        # Keep staging on the destination filesystem so videos can be renamed
+        # into place. At most `workers` episodes are staged at any time.
+        self.cfg.dataset.root.parent.mkdir(parents=True, exist_ok=True)
+        workers = min(workers, len(pending))
+        with tempfile.TemporaryDirectory(prefix=".robojudo-finalize-", dir=self.cfg.dataset.root.parent) as temporary:
+            with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+                queue = deque()
+                remaining = iter(pending)
+
+                def submit(path):
+                    stage_root = Path(temporary) / path.name
+                    future = pool.submit(_finalize_worker, self.cfg, path, stage_root, self.encoder_threads)
+                    queue.append((path, stage_root, future))
+
+                for _ in range(workers):
+                    submit(next(remaining))
+                try:
+                    while queue:
+                        path, stage_root, future = queue.popleft()
+                        report = future.result()
+                        manifest, _, camera_records = self._load_episode(path)
+                        self._ensure_writer(manifest, camera_records)
+                        index = self._writer.next_episode_index
+                        self._writer.append_preencoded_episode(stage_root)
+                        chunk, file = divmod(index, 1000)
+                        data_file = f"data/chunk-{chunk:03d}/file-{file:03d}.parquet"
+                        report.update(
+                            dataset_episode_index=index,
+                            dataset_episode_indices=[index],
+                            data_file=data_file,
+                            data_files=[data_file],
+                        )
+                        self._write_report(path, report)
+                        reports[path.name] = report
+                        logger.info(
+                            "Finalized %s: written=%d/%d, camera_drops=%d, control_drops=%d, over_age=%d",
+                            path.name,
+                            report["written_frames"],
+                            report["target_slots"],
+                            report["dropped_camera_slots"],
+                            report["dropped_control_slots"],
+                            report["over_age_frames"],
+                        )
+                        shutil.rmtree(stage_root)
+                        if (next_path := next(remaining, None)) is not None:
+                            submit(next_path)
+                finally:
+                    for _, _, future in queue:
+                        future.cancel()
+        return [reports[path.name] for path in paths]
+
+    def run(self, episode_names: set[str] | None = None, *, workers: int = 1) -> list[dict]:
+        if workers < 1:
+            raise ValueError("workers must be at least 1")
         if not self.episodes_root.exists():
             logger.warning("No committed raw episodes found at %s", self.episodes_root)
             return []
         paths = sorted(path for path in self.episodes_root.iterdir() if path.is_dir())
         if episode_names:
             paths = [path for path in paths if path.name in episode_names]
-        reports = [self.finalize_episode(path) for path in paths]
+        reports = self._run_parallel(paths, workers) if workers > 1 else [self.finalize_episode(path) for path in paths]
         if self._writer is not None:
             self._writer.finalize()
         return reports
+
+
+def _finalize_worker(cfg: RecorderConfig, episode_path: Path, stage_root: Path, encoder_threads: int) -> dict:
+    """Encode one episode in isolation; only the parent persists raw reports."""
+    staged_cfg = replace(cfg, dataset=replace(cfg.dataset, root=stage_root, resume=False))
+    finalizer = RawDatasetFinalizer(staged_cfg, encoder_threads=encoder_threads)
+    report = finalizer.finalize_episode(episode_path, write_report=False)
+    finalizer._writer.finalize()
+    return report
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Finalize raw RoboJuDo episodes into a LeRobot v3 dataset")
     parser.add_argument("--config", required=True, help="Recorder YAML configuration used during collection")
     parser.add_argument("--episode", action="append", default=[], help="Raw episode directory name; repeat as needed")
-    return parser.parse_args()
+    parser.add_argument("--workers", type=int, default=1, help="Concurrent episode processes (default: 1)")
+    parser.add_argument(
+        "--encoder-threads",
+        type=int,
+        default=None,
+        help="Threads per video encoder (default: 1 with parallel workers, otherwise FFmpeg auto)",
+    )
+    args = parser.parse_args()
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
+    if args.encoder_threads is not None and args.encoder_threads < 0:
+        parser.error("--encoder-threads must be non-negative")
+    return args
 
 
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    reports = RawDatasetFinalizer(load_config(args.config)).run(set(args.episode) or None)
+    threads = args.encoder_threads if args.encoder_threads is not None else (1 if args.workers > 1 else 0)
+    reports = RawDatasetFinalizer(load_config(args.config), encoder_threads=threads).run(
+        set(args.episode) or None, workers=args.workers
+    )
     logger.info("Finalization complete: %d raw episodes examined", len(reports))
 
 

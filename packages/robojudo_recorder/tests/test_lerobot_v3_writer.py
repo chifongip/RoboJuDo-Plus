@@ -85,6 +85,55 @@ class TestLeRobotV3Writer(unittest.TestCase):
         self.assertFalse(video_path.exists())
         self.assertFalse(self.writer.has_pending_frames)
 
+    def test_writes_offline_dagger_frame_features(self):
+        root = Path(self.temporary_dir.name) / "dagger-dataset"
+        writer = LeRobotV3Writer(
+            root=root,
+            repo_id="local/dagger",
+            robot_type="x2",
+            fps=10,
+            state_names=["left.pos", "right.pos"],
+            action_names=self.writer.action_names,
+            camera_name="head_rgb",
+            camera_shape=(48, 64, 3),
+            dagger_features=True,
+        )
+        writer.start_episode("dagger task")
+        writer.add_frame(
+            np.zeros(2),
+            np.zeros(6),
+            np.zeros((48, 64, 3), dtype=np.uint8),
+            dagger={
+                "expert_intervention": True,
+                "expert_applied": True,
+                "action_source": "expert",
+                "intervention_session": 3,
+                "expert_frame_id": 17,
+            },
+        )
+        writer.add_frame(
+            np.ones(2),
+            np.ones(6),
+            np.ones((48, 64, 3), dtype=np.uint8),
+            dagger={
+                "expert_intervention": False,
+                "expert_applied": False,
+                "action_source": "policy",
+                "intervention_session": 3,
+                "expert_frame_id": None,
+            },
+        )
+        writer.save_episode()
+
+        info = json.loads((root / "meta/info.json").read_text())
+        self.assertEqual(info["features"]["expert_applied"]["dtype"], "bool")
+        self.assertEqual(info["features"]["action_source"]["dtype"], "string")
+        data = pq.read_table(root / "data/chunk-000/file-000.parquet")
+        self.assertEqual(data["expert_applied"].to_pylist(), [True, False])
+        self.assertEqual(data["action_source"].to_pylist(), ["expert", "policy"])
+        self.assertEqual(data["intervention_session"].to_pylist(), [3, 3])
+        self.assertEqual(data["expert_frame_id"].to_pylist(), [17, -1])
+
     def test_writes_one_video_feature_per_camera(self):
         root = Path(self.temporary_dir.name) / "multi-camera-dataset"
         writer = LeRobotV3Writer(

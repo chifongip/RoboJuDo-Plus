@@ -196,12 +196,65 @@ class TwistRedisCtrlCfg(CtrlCfg):
     buffer_size: int = 5  # size of the data buffer to store recent commands
 
 
+class OmniHandCfg(Config):
+    """Direct dual OmniHand Pro hardware control embedded in an upper-body controller."""
+
+    transport: Literal["hcan", "zlgcan", "socketcan"] = "hcan"
+    left_adapter_index: int = Field(default=1, ge=0)
+    right_adapter_index: int = Field(default=0, ge=0)
+    zlgcan_left_channel_id: int | None = Field(default=None, ge=0)
+    zlgcan_right_channel_id: int | None = Field(default=None, ge=0)
+    left_interface: str = "can0"
+    right_interface: str = "can1"
+    hand_can_id: int | None = Field(default=None, ge=1, le=254)
+    command_timeout_s: float = Field(default=0.25, gt=0.0)
+    joint_state_fps: float = Field(default=100.0, gt=0.0)
+    joint_state_timeout_s: float = Field(default=0.25, gt=0.0)
+    startup_timeout_s: float = Field(default=5.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def validate_omnihand(self):
+        if self.transport == "socketcan" and (
+            not self.left_interface.strip() or not self.right_interface.strip()
+        ):
+            raise ValueError("OmniHand SocketCAN interfaces must not be empty")
+        return self
+
+
+class CasiaHandCfg(Config):
+    """Direct dual CASIA Hand-M hardware control embedded in an upper-body controller."""
+
+    left_hand_id: int = Field(default=2, ge=0, le=255)
+    right_hand_id: int = Field(default=0x20, ge=0, le=255)
+    baudrate: int = Field(default=115200, gt=0)
+    port_name: str = "/dev/ttyCH341USB0"
+    command_timeout_s: float = Field(default=0.25, gt=0.0)
+    joint_state_fps: float = Field(default=100.0, gt=0.0)
+    joint_state_timeout_s: float = Field(default=0.25, gt=0.0)
+    startup_timeout_s: float = Field(default=5.0, gt=0.0)
+    auto_reconnect: bool = False
+    reconnect_timeout_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    reconnect_interval_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_casia_hand(self):
+        if not self.port_name.strip():
+            raise ValueError("CASIA serial port_name must not be empty")
+        if self.left_hand_id == self.right_hand_id:
+            raise ValueError("CASIA left and right hand IDs must differ")
+        if self.reconnect_timeout_s < self.joint_state_timeout_s:
+            raise ValueError("CASIA reconnect timeout must not be shorter than joint state timeout")
+        return self
+
+
 class UpperBodyZmqCtrlCfg(CtrlCfg):
     """Named upper-body joint targets received from a ZMQ publisher."""
 
     ctrl_type: str = "UpperBodyZmqCtrl"
     endpoint: str = "tcp://127.0.0.1:8559"
     joint_names: list[str] = []
+    upper_body_default_pose: list[float] | None = None
+    """Optional controller-specific fallback pose, ordered like ``joint_names``."""
     timeout_s: float = Field(default=0.25, gt=0.0)
     ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
     max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
@@ -214,7 +267,28 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
             raise ValueError("Upper-body ZMQ joint_names must not be empty")
         if len(self.joint_names) != len(set(self.joint_names)):
             raise ValueError("Upper-body ZMQ joint_names must be unique")
+        if self.upper_body_default_pose is not None and len(self.upper_body_default_pose) != len(self.joint_names):
+            raise ValueError(
+                "Upper-body ZMQ upper_body_default_pose length "
+                f"{len(self.upper_body_default_pose)} must match joint_names length {len(self.joint_names)}"
+            )
         return self
+
+
+class UpperBodyOmniHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
+    """Atomic arm and dual-OmniHand targets received from synchronized teleoperation."""
+
+    ctrl_type: str = "UpperBodyOmniHandZmqCtrl"
+    endpoint: str = "tcp://127.0.0.1:8560"
+    omnihand: OmniHandCfg = OmniHandCfg()
+
+
+class UpperBodyCasiaHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
+    """Atomic arm and dual-CASIA-hand targets received from synchronized teleoperation."""
+
+    ctrl_type: str = "UpperBodyCasiaHandZmqCtrl"
+    endpoint: str = "tcp://127.0.0.1:8560"
+    casia_hand: CasiaHandCfg = CasiaHandCfg()
 
 
 class Gr00tCameraCfg(Config):
@@ -222,6 +296,7 @@ class Gr00tCameraCfg(Config):
 
     type: str = "realsense"
     name: str = "head_rgb"
+    image_key: str | None = None
     options: dict = {}
 
     @model_validator(mode="after")
@@ -230,28 +305,59 @@ class Gr00tCameraCfg(Config):
             raise ValueError("GR00T camera type must not be empty")
         if not self.name.strip():
             raise ValueError("GR00T camera name must not be empty")
+        if self.image_key is not None and not self.image_key.strip():
+            raise ValueError("GR00T camera image_key must not be empty")
         return self
+
+    @property
+    def resolved_image_key(self) -> str:
+        return self.name if self.image_key is None else self.image_key
 
 
 class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
     """Bidirectional GR00T command and observation transport."""
 
     ctrl_type: str = "Gr00tZmqCtrl"
+    casia_hand: CasiaHandCfg | None = None
     require_complete_positions: bool = True
     observation_enabled: bool = False
     observation_endpoint: str = "tcp://*:8561"
-    """observation_profile: Exact deployment schema identifier (for example, ``g1_23dof``), including joint layout and order."""
+    """observation_profile: Exact deployment schema identifier, including joint layout and order."""
     observation_profile: str = "custom"
     observation_task: str = "upper body manipulation"
     observation_fps: int = Field(default=30, gt=0)
     observation_jpeg_quality: int = Field(default=90, ge=1, le=100)
     observation_joint_timeout_s: float = Field(default=0.1, gt=0.0)
-    camera_poll_timeout_ms: int = Field(default=100, gt=0)
+    # Offline DAgger: receive dex-teleop expert candidates on a second stream
+    # and use a held joystick button as the human-intervention gate.
+    offline_dagger_enabled: bool = False
+    expert_endpoint: str = "tcp://127.0.0.1:8560"
+    expert_timeout_s: float = Field(default=0.25, gt=0.0)
+    intervention_button: str = "Select"
+    # Offline DAgger: Select used inside a recorder button chord must not start
+    # an expert session; Unitree and Xbox shoulder names are covered by default.
+    intervention_blocking_buttons: list[str] = ["L1", "R1", "LB", "RB"]
+    # Offline DAgger: rate-limit policy/expert hand-source transitions.
+    hand_max_joint_velocity_rad_s: float = Field(default=5.0, gt=0.0)
+    camera_poll_timeout_ms: int = Field(default=2, gt=0)
     camera_startup_timeout_s: float = Field(default=5.0, gt=0.0)
+    camera_pending_capacity: int = Field(default=2, gt=0)
+    camera_encoder_queue_capacity: int = Field(default=2, gt=0)
+    max_camera_skew_ms: float = Field(default=50.0, gt=0.0)
     camera: Gr00tCameraCfg = Gr00tCameraCfg()
+    cameras: list[Gr00tCameraCfg] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_gr00t_transport(self):
+        # These fields are inactive for the existing GR00T pipeline unless the
+        # offline DAgger mode is explicitly enabled.
+        if self.offline_dagger_enabled:
+            if not self.expert_endpoint.startswith("tcp://"):
+                raise ValueError("offline DAgger expert endpoint must use tcp://")
+            if not self.intervention_button.strip():
+                raise ValueError("offline DAgger intervention_button must not be empty")
+            if any(not button.strip() for button in self.intervention_blocking_buttons):
+                raise ValueError("offline DAgger intervention_blocking_buttons must not be empty")
         if self.observation_enabled:
             if not self.observation_endpoint.startswith("tcp://"):
                 raise ValueError("GR00T observation endpoint must use tcp://")
@@ -259,7 +365,19 @@ class Gr00tZmqCtrlCfg(UpperBodyZmqCtrlCfg):
                 raise ValueError("GR00T observation profile must not be empty")
             if not self.observation_task.strip():
                 raise ValueError("GR00T observation task must not be empty")
+            cameras = self.observation_cameras
+            names = [camera.name for camera in cameras]
+            image_keys = [camera.resolved_image_key for camera in cameras]
+            if len(names) != len(set(names)):
+                raise ValueError("GR00T camera names must be unique")
+            if len(image_keys) != len(set(image_keys)):
+                raise ValueError("GR00T camera image_keys must be unique")
         return self
+
+    @property
+    def observation_cameras(self) -> tuple[Gr00tCameraCfg, ...]:
+        """Return explicit multi-camera config, or the legacy single camera."""
+        return tuple(self.cameras) if self.cameras else (self.camera,)
 
 
 class VelocityZmqCtrlCfg(VelocitySourceCfg):

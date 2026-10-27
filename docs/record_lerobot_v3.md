@@ -19,7 +19,13 @@ implementation while producing separate fixed-schema datasets.
 - `observation.images.<camera name>`: synchronized RGB video.
 - `action`: final joint position targets followed by `vx`, `vy`, yaw rate, and height command.
 
-Adding hand joints to `UpperBodyZmqCtrlCfg.joint_names` automatically extends state and action. 
+The dedicated `UpperBodyOmniHandZmqCtrlCfg` path appends the 24 measured OmniHand active joints and their final clipped
+commands to the arm schema. Hand joints remain separate from the X2/AimDK environment joint list; arm-only controllers
+and pipelines do not import or initialize the hand runtime.
+
+The symmetric `UpperBodyCasiaHandZmqCtrlCfg` path appends the 20 physical CASIA Hand-M motor positions and commands
+to a G1 arm schema. It accepts only dex teleop's 10-joint-per-hand `sim2real` layout; the 14-joint-per-hand MuJoCo
+layout is deliberately rejected.
 
 ## Stage 1: real-time capture
 
@@ -30,7 +36,7 @@ pip install -e "packages/robojudo_recorder[ros2]"
 robojudo-recorder --config packages/robojudo_recorder/recorder.ros2.example.yaml
 ```
 
-Then start a supported pipeline:
+Then start the arm-only X2 pipeline:
 
 ```bash
 python scripts/run_pipeline.py \
@@ -39,13 +45,76 @@ python scripts/run_pipeline.py \
   --record-task "pick up the red cup"
 ```
 
-The pipeline binds `tcp://*:8560` by default and the recorder connects to `tcp://127.0.0.1:8560`. Recording controls
-are documented in [the recorder README](../packages/robojudo_recorder/README.md).
+For the X2 OmniHand preset, install the vendor wheel once in the deployment environment:
+
+```bash
+python submodule_install.py omnihand_sdk
+sudo bash third_party/omnihand_sdk/linux/x64/setup_udev.sh  # use linux/aarch64 on ARM
+```
+
+Log out and back in after installing the udev rules. RoboJuDo then owns the OmniHand SDK and HCAN adapters directly;
+do not start the standalone `omnihand_zmq_server.py`. Start dex teleop with its synchronized arm-and-hand stream:
+
+```bash
+python teleop/robot_control/vr_arm_hand_teleop.py \
+  --backend real \
+  --robot x2 \
+  --hand omnihand \
+  --sync-frame-enable-zmq
+```
+
+Then run the dedicated OmniHand pipeline:
+
+```bash
+python scripts/run_pipeline.py \
+  -c x2_omnihand_locomanipulation_real \
+  --record \
+  --record-task "pick up the red cup"
+```
+
+RoboJuDo subscribes to the atomic 14-arm-plus-24-hand frames on dex teleop port 8560; the old per-hand ports are not
+used. Use a new dataset root/repository for this 38-joint schema; it cannot be appended to an existing arm-only dataset.
+
+For G1 with dual CASIA Hand-M hardware, install the source-built SDK in the deployment environment:
+
+```bash
+python submodule_install.py casiahand_sdk
+```
+
+Make sure the active user can access the configured serial device (default `/dev/ttyUSB0`). Start dex teleop with only
+the synchronized stream; the legacy ports 5555/5556 are unnecessary because RoboJuDo owns the CASIA SDK directly:
+
+```bash
+python teleop/robot_control/vr_arm_hand_teleop.py \
+  --backend real \
+  --robot g1_23 \
+  --hand casia \
+  --no-casia-enable-zmq \
+  --sync-frame-enable-zmq
+```
+
+Then run the matching real pipeline, for example:
+
+```bash
+python scripts/run_pipeline.py \
+  -c g1_23_casia_locomanipulation_stiff_real \
+  --record \
+  --record-task "pick up the red cup"
+```
+
+The available CASIA preset is `g1_23_casia_locomanipulation_stiff_real`. It records 10 arm joints followed by the same
+20 physical hand motors in both state and action. Do not start a standalone CASIA ZMQ
+receiver or hardware server alongside RoboJuDo.
+
+The recorder service binds `tcp://*:8560` by default and the pipeline connects to `tcp://127.0.0.1:8560`. Recording
+controls are documented in [the recorder README](../packages/robojudo_recorder/README.md).
 
 The real-time stage writes each control sample immediately to `controls.jsonl`, including source and receive timestamps,
 measured state, final action, and locomotion command. Camera frames are written independently per camera with both
 timestamps, sequence number, encoding, and shape. JPEG/PNG payloads are preserved byte-for-byte; raw RGB sources are
-JPEG-compressed but never H.264-encoded. No Parquet or MP4 is produced during capture.
+JPEG-compressed but never H.264-encoded. Each camera has a bounded capture FIFO and a dedicated ordered JPEG/write
+worker, so the recorder service loop only drains available frames and dispatches work without blocking on camera waits,
+encoding, or disk writes. `sync.pending_frame_capacity` bounds both queues. No Parquet or MP4 is produced during capture.
 
 Confirmed episodes are atomically moved from `dataset.raw_root/.pending` to `dataset.raw_root/episodes`. Discarded
 episodes are deleted. A crash leaves the current directory under `.pending` for inspection instead of exposing it as a
@@ -92,6 +161,7 @@ Each raw episode receives `finalize_report.json` with:
 
 - raw control and per-camera frame counts/FPS;
 - source sequence gaps;
+- writer queue drops;
 - requested, written, camera-dropped, and control-dropped target slots;
 - unique, duplicated, and unused camera-frame counts;
 - camera delta and control age mean/p95/max;

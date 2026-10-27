@@ -2,10 +2,12 @@ control_endpoint: tcp://127.0.0.1:8560
 
 dataset:
   root: record_data/g1_23dof_upper_body
+  raw_root: record_data/g1_23dof_upper_body_raw
   repo_id: local/g1_23dof_upper_body
   fps: 30
   codec: libx264
-  resume: false
+  jpeg_quality: 90
+  resume: true
 
 camera:
   type: realsense
@@ -20,4 +22,5 @@ sync:
   # when control samples arrive over the network from another machine.
   clock: receive
   max_control_age_ms: 50
+  max_camera_delta_ms: 50
   poll_timeout_ms: 10

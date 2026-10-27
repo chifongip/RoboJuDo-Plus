@@ -9,6 +9,7 @@ from .x2_cfg import (
     x2_locomanipulation_real,
     x2_locomimic,
     x2_locomimic_real,
+    x2_omnihand_locomanipulation_real,
     x2_real,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "x2_locomanipulation_real",
     "x2_locomimic",
     "x2_locomimic_real",
+    "x2_omnihand_locomanipulation_real",
     "x2_real",
 ]
