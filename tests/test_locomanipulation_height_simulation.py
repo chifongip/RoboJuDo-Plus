@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from robojudo.config.g1.g1_cfg import g1_23_gr00t_locomanipulation_stiff
+from robojudo.config.g1.g1_cfg import g1_23_locomanipulation_stiff
+from robojudo.config.g1.policy.g1_gr00t_locomanipulation_policy_cfg import G1Gr00tLocomanipulation23PolicyCfg
 from robojudo.config.x2.x2_cfg import x2_gr00t_locomanipulation
 from robojudo.environment.mujoco_env import MujocoEnv
 from robojudo.pipeline.rl_pipeline import PolicyWrapper
@@ -14,9 +15,13 @@ from robojudo.pipeline.rl_pipeline import PolicyWrapper
 
 class TestLocomanipulationHeightSimulation(unittest.TestCase):
     def test_height_rate_through_resets_and_source_changes(self):
-        for cfg_type in (g1_23_gr00t_locomanipulation_stiff, x2_gr00t_locomanipulation):
+        for cfg_type in (g1_23_locomanipulation_stiff, x2_gr00t_locomanipulation):
             with self.subTest(config=cfg_type.__name__):
                 cfg = cfg_type()
+                if cfg_type is g1_23_locomanipulation_stiff:
+                    # Exercise GR00T policy inference in the supported G1 simulator
+                    # without adding a deployment preset that requires physical hands.
+                    cfg.policy = G1Gr00tLocomanipulation23PolicyCfg(**cfg.policy.model_dump(exclude={"policy_type"}))
                 cfg.policy.command_status_interval_s = 0.0
                 # Only replace the window; physics, observations, inference, and PD control run normally.
                 viewer = SimpleNamespace(cam=SimpleNamespace(), is_alive=False, close=lambda: None)

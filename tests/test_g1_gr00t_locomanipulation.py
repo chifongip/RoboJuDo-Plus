@@ -23,8 +23,12 @@ class TestG1Gr00tLocomanipulation(unittest.TestCase):
         self.assertEqual(len(cfg.ctrl[-1].upper_body_default_pose), 10)
         self.assertTrue(cfg.ctrl[-1].observation_enabled)
         self.assertEqual(cfg.ctrl[-1].observation_profile, "g1_23dof")
-        self.assertEqual(cfg.ctrl[-1].camera.type, "opencv")
-        self.assertEqual(cfg.ctrl[-1].camera.options["device"], 0)
+        cameras = cfg.ctrl[-1].observation_cameras
+        self.assertEqual([camera.type for camera in cameras], ["realsense"] * 3)
+        self.assertEqual(
+            [camera.resolved_image_key for camera in cameras],
+            ["ego_view", "left_wrist_view", "right_wrist_view"],
+        )
         self.assertIsNotNone(cfg.ctrl[-1].casia_hand)
         self.assertEqual([controller.ctrl_type for controller in cfg.ctrl], ["UnitreeCtrl", "Gr00tZmqCtrl"])
 
@@ -95,7 +99,11 @@ class TestG1Gr00tLocomanipulation(unittest.TestCase):
             }
         )
 
-        observation, extras = policy.get_observation(env_data, ctrl_data)
+        with patch("robojudo.policy.locomanipulation_policy.time.monotonic") as clock:
+            clock.return_value = 10.0
+            policy.get_observation(env_data, ctrl_data)  # Establish the slew limiter clock.
+            clock.return_value = 11.0
+            observation, extras = policy.get_observation(env_data, ctrl_data)
         action = policy.get_action(observation)
 
         self.assertEqual(observation.shape, (360,))

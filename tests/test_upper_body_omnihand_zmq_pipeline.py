@@ -90,7 +90,9 @@ class TestUpperBodyOmniHandZmqPipeline(unittest.TestCase):
         self.pipeline._upper_body_cfg = SimpleNamespace(
             joint_names=["left_arm", "right_arm"],
             ema_alpha=0.0,
+            max_joint_velocity_rad_s=1.0,
         )
+        self.pipeline.dt = 0.02
         self.pipeline.env = SimpleNamespace(
             position_limits=np.asarray([[-1.0, 1.0], [-1.0, 1.0]], dtype=np.float32)
         )
@@ -100,7 +102,7 @@ class TestUpperBodyOmniHandZmqPipeline(unittest.TestCase):
             self.ctrl_data(),
         )
 
-        np.testing.assert_allclose(result, [0.1, 0.2])
+        np.testing.assert_allclose(result, [0.02, 0.02])
 
     def test_x2_real_config_selects_only_the_dedicated_hand_path(self):
         from robojudo.config.x2 import x2_locomanipulation, x2_omnihand_locomanipulation_real

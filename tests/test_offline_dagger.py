@@ -6,6 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import zmq
 
+from robojudo.controller.casia_hand_runtime import CASIA_JOINT_NAMES
 from robojudo.controller.ctrl_cfgs import Gr00tZmqCtrlCfg
 from robojudo.controller.gr00t_zmq_ctrl import Gr00tZmqCtrl
 from robojudo.pipeline.gr00t_locomanipulation_pipeline import Gr00tLocomanipulationPipelineMixin
@@ -181,6 +182,97 @@ class TestOfflineDaggerController(unittest.TestCase):
         self.assertEqual(data["action_source"], "policy")
         self.assertEqual(data["expert_frame_id"], 13)
         self.assertEqual(data["joint_positions"], {"left_arm": 0.1, "right_arm": -0.1})
+
+    def test_recorded_hand_action_matches_current_arbitration_before_worker_applies_it(self):
+        class DelayedHandRuntime:
+            def __init__(self):
+                self.snapshot = {
+                    "joint_names": list(CASIA_JOINT_NAMES),
+                    "joint_positions": np.zeros(20),
+                    "joint_position_commands": np.zeros(20),
+                    "enabled": True,
+                    "joint_state_fresh": True,
+                    "fresh": False,
+                }
+                self.accepted = None
+                self.command_count = 0
+
+            def get_data(self):
+                return self.snapshot
+
+            def set_joint_commands(self, left, right, timestamp_ns, frame_id):
+                # Model asynchronous execution and SDK clipping: feedback still
+                # reports the previous command after the new one is enqueued.
+                self.accepted = np.clip(np.concatenate((left, right)), -0.05, 0.05)
+                self.command_count += 1
+                return self.accepted.copy()
+
+        controller = self.make_controller()
+        controller._hand_runtime = DelayedHandRuntime()
+        controller._latest_expert_hands = (np.ones(10), np.ones(10))
+        controller._latest_policy_hands = (-np.ones(10), -np.ones(10))
+        controller._hand_command_filtered = None
+        controller._last_hand_command_at = None
+        pipeline = Gr00tLocomanipulationPipelineMixin()
+        pipeline._upper_body_cfg = SimpleNamespace(
+            offline_dagger_enabled=True, joint_names=list(controller._joint_names)
+        )
+        pipeline._upper_body_indices = np.asarray([0, 1])
+        pipeline._upper_body_enabled = True
+        pipeline._upper_body_stream_was_fresh = True
+        pipeline._recording_active = True
+        pipeline._recording_paused = False
+        pipeline._upper_body_control_available = lambda: True
+        pipeline._recorder_client = _Recorder()
+
+        for expert, enabled, feedback_fresh in (
+            (True, True, True),
+            (False, True, True),
+            (True, False, True),
+            (True, True, False),
+        ):
+            with self.subTest(expert=expert, enabled=enabled, feedback_fresh=feedback_fresh):
+                controller._expert_intervention = expert
+                controller._hand_command_filtered = None
+                controller._hand_runtime.snapshot.update(enabled=enabled, joint_state_fresh=feedback_fresh)
+                with patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=10.01):
+                    stream = controller.get_data()
+                self.assertEqual(stream["casia_hand"]["fresh"], enabled and feedback_fresh)
+                pipeline._gr00t_record_stream = stream
+                arms = np.asarray(list(stream["joint_positions"].values()))
+                sample_count = len(pipeline._recorder_client.samples)
+                pipeline._record_upper_body_sample(
+                    SimpleNamespace(dof_pos=np.zeros(2)),
+                    {"locomotion_command": stream["locomotion_command"]},
+                    arms,
+                    rl_active=True,
+                )
+                if not enabled or not feedback_fresh:
+                    self.assertEqual(len(pipeline._recorder_client.samples), sample_count)
+                    continue
+                self.assertEqual(len(pipeline._recorder_client.samples), sample_count + 1)
+                sample = pipeline._recorder_client.samples[-1]
+                self.assertEqual(sample["dagger"]["expert_applied"], expert)
+                np.testing.assert_allclose(sample["joint_position_commands"][:2], arms)
+                np.testing.assert_allclose(sample["joint_position_commands"][2:], 0.05 if expert else -0.05)
+                np.testing.assert_array_equal(sample["joint_positions"][2:], np.zeros(20))
+                np.testing.assert_array_equal(
+                    controller._hand_runtime.snapshot["joint_position_commands"], np.zeros(20)
+                )
+
+        command_count = controller._hand_runtime.command_count
+        with patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=11.0):
+            stream = controller.get_data()
+        self.assertFalse(stream["fresh"])
+        self.assertEqual(controller._hand_runtime.command_count, command_count)
+
+        # Ordinary GR00T preserves the runtime snapshot and its freshness; only
+        # offline DAgger substitutes the current arbitrated recording action.
+        controller.cfg_ctrl.offline_dagger_enabled = False
+        with patch("robojudo.controller.gr00t_zmq_ctrl.time.monotonic", return_value=10.01):
+            stream = controller.get_data()
+        self.assertIs(stream["casia_hand"], controller._hand_runtime.snapshot)
+        self.assertEqual(controller._hand_runtime.command_count, command_count)
 
     def test_restarted_expert_frame_sequence_is_accepted_after_timeout(self):
         controller = self.make_controller()

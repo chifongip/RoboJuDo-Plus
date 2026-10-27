@@ -4,8 +4,8 @@ from robojudo.controller.ctrl_cfgs import (
     Gr00tZmqCtrlCfg,
     JoystickCtrlCfg,
     KeyboardCtrlCfg,
-    OmniHandCfg,
     LocomanipulationPostureZmqCtrlCfg,
+    OmniHandCfg,
     RosJoystickCtrlCfg,
     UpperBodyOmniHandZmqCtrlCfg,
     UpperBodyZmqCtrlCfg,
@@ -272,6 +272,7 @@ class x2_gr00t_locomanipulation(x2_locomanipulation):
     policy: X2Gr00tLocomanipulationPolicyCfg = X2Gr00tLocomanipulationPolicyCfg()
     ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | Gr00tZmqCtrlCfg] = [
         JoystickCtrlCfg(
+            velocity_priority=300,
             triggers={
                 "A": "[PASSIVE_DEFAULT]",
                 "B": "[DAMPING_DEFAULT]",
@@ -284,6 +285,7 @@ class x2_gr00t_locomanipulation(x2_locomanipulation):
             }
         ),
         KeyboardCtrlCfg(
+            velocity_priority=200,
             triggers={
                 "k": "[PASSIVE_DEFAULT]",
                 "l": "[DAMPING_DEFAULT]",

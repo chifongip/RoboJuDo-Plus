@@ -661,7 +661,7 @@ class Gr00tZmqCtrl(ControllerHook):
 
     @staticmethod
     def _decode_locomotion_command(value) -> np.ndarray:
-        if not isinstance(value, (list, tuple)) or len(value) != 4:
+        if not isinstance(value, list | tuple) or len(value) != 4:
             raise ValueError("locomotion_command must be a four-element array [vx, vy, yaw_rate, height]")
         if any(isinstance(item, bool) or not isinstance(item, Real) for item in value):
             raise ValueError("locomotion_command values must be numeric")
@@ -975,8 +975,8 @@ class Gr00tZmqCtrl(ControllerHook):
         hands: tuple[np.ndarray, np.ndarray] | None,
         frame_id: int | None,
         now: float,
-    ) -> None:
-        """Rate-limit the selected offline DAgger hand source at takeover edges."""
+    ) -> np.ndarray | None:
+        """Rate-limit and return the accepted offline DAgger hand command."""
         hand_runtime = getattr(self, "_hand_runtime", None)
         if hand_runtime is None or hands is None:
             return
@@ -1000,13 +1000,14 @@ class Gr00tZmqCtrl(ControllerHook):
             self._hand_command_filtered + max_delta,
         )
         split = len(CASIA_LEFT_JOINT_NAMES)
-        hand_runtime.set_joint_commands(
+        accepted = hand_runtime.set_joint_commands(
             self._hand_command_filtered[:split],
             self._hand_command_filtered[split:],
             time.monotonic_ns(),
             frame_id,
         )
         self._last_hand_command_at = now
+        return np.asarray(accepted, dtype=np.float32).copy()
 
     def get_data(self):
         hand_runtime = getattr(self, "_hand_runtime", None)
@@ -1053,7 +1054,15 @@ class Gr00tZmqCtrl(ControllerHook):
         selected_frame_id = self._latest_expert_frame_id if expert_applied else self._latest_sequence
         fresh = expert_fresh if expert_applied else policy_fresh
         if self.cfg_ctrl.offline_dagger_enabled and fresh:
-            self._apply_dagger_hand_targets(selected_hands, selected_frame_id, now)
+            hand_commands = self._apply_dagger_hand_targets(selected_hands, selected_frame_id, now)
+            if hand_data is not None and hand_commands is not None:
+                # The measured snapshot predates arbitration. Record the accepted
+                # command from this frame, not the worker's previous applied action.
+                hand_data = dict(hand_data)
+                hand_data["joint_position_commands"] = hand_commands
+                hand_data["fresh"] = bool(
+                    hand_data.get("enabled", False) and hand_data.get("joint_state_fresh", False)
+                )
         observation_error = getattr(self, "_observation_error", None)
         observation_ready = getattr(self, "_observation_ready", None)
         result = {

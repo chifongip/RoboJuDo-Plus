@@ -87,13 +87,12 @@ class TestG1Locomanipulation(unittest.TestCase):
                 )
 
     def test_real_configs_use_native_unitree_layouts_and_safety_controls(self):
+        from robojudo.config.g1.env.g1_env_cfg import G1_23_DOF_INDICES
         from robojudo.config.g1.g1_cfg import (
             g1_23_locomanipulation_default_real,
             g1_23_locomanipulation_stiff_real,
             g1_29_locomanipulation_stiff_real,
         )
-
-        from robojudo.config.g1.env.g1_env_cfg import G1_23_DOF_INDICES
 
         motor_mapping_23 = [*range(13), *range(15, 20), *range(22, 27)]
         self.assertEqual(G1_23_DOF_INDICES, motor_mapping_23)
@@ -257,11 +256,11 @@ class TestG1Locomanipulation(unittest.TestCase):
         self.assertEqual(env.unitree.damping, [5.0])
 
     def test_unitree_real_backends_keep_reported_robot_frame_velocity(self):
+        from scipy.spatial.transform import Rotation
+
         from robojudo.environment.unitree_cpp_env import UnitreeCppEnv
         from robojudo.environment.unitree_env import UnitreeEnv
         from robojudo.utils.rotation import TransformAlignment
-
-        from scipy.spatial.transform import Rotation
 
         body_velocity = np.asarray([0.4, -0.2, 0.1], dtype=np.float32)
         sport_state = SimpleNamespace(position=np.zeros(3), velocity=body_velocity)
@@ -291,7 +290,7 @@ class TestG1Locomanipulation(unittest.TestCase):
                 cpp_env.RemoteControllerHandler = None
                 cpp_env._motor_to_logical = lambda values, dtype: np.asarray(values, dtype=dtype)
                 cpp_env.unitree = SimpleNamespace(
-                    get_robot_state=lambda: SimpleNamespace(
+                    get_robot_state=lambda imu=imu: SimpleNamespace(
                         motor_state=SimpleNamespace(q=[0.0], dq=[0.0]),
                         imu_state=imu,
                     ),
@@ -498,6 +497,7 @@ class TestG1Locomanipulation(unittest.TestCase):
         pipeline._upper_body_default = np.asarray(cfg.env.dof.default_pos)[pipeline._upper_body_indices]
         pipeline._upper_body_filtered = pipeline._upper_body_default.copy()
         pipeline.env = SimpleNamespace(position_limits=np.asarray(cfg.env.dof.position_limits))
+        pipeline.dt = cfg.env.sim_dt * cfg.env.sim_decimation
         target = np.asarray(cfg.env.dof.default_pos, dtype=np.float32)
         left_shoulder = cfg.env.dof.joint_names.index("left_shoulder_pitch_joint")
 
@@ -513,7 +513,8 @@ class TestG1Locomanipulation(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(result[left_shoulder], 0.8)
+        expected = min(0.8, target[left_shoulder] + pipeline._upper_body_cfg.max_joint_velocity_rad_s * pipeline.dt)
+        self.assertAlmostEqual(result[left_shoulder], expected)
         np.testing.assert_array_equal(result[:13], target[:13])
 
     def test_four_mode_sequence_and_upper_body_synchronization(self):

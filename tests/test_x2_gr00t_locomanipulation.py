@@ -440,7 +440,7 @@ class TestX2Gr00tLocomanipulationPipeline(unittest.TestCase):
         self.assertEqual(sim.pipeline_type, "X2Gr00tLocomanipulationPipeline")
         self.assertEqual(sim.policy.policy_type, "X2Gr00tLocomanipulationPolicy")
         self.assertEqual([cfg.ctrl_type for cfg in sim.ctrl], ["JoystickCtrl", "KeyboardCtrl", "Gr00tZmqCtrl"])
-        self.assertEqual([cfg.ctrl_type for cfg in real.ctrl], ["JoystickCtrl", "Gr00tZmqCtrl"])
+        self.assertEqual([cfg.ctrl_type for cfg in real.ctrl], ["RosJoystickCtrl", "Gr00tZmqCtrl"])
         for cfg in (sim.ctrl[-1], real.ctrl[-1]):
             self.assertTrue(cfg.observation_enabled)
             self.assertEqual(cfg.observation_profile, "x2")
@@ -448,7 +448,7 @@ class TestX2Gr00tLocomanipulationPipeline(unittest.TestCase):
             self.assertEqual(cfg.camera.type, "ros2")
             self.assertEqual(
                 cfg.camera.options["topic"],
-                "/aima/hal/sensor/stereo_head_front_right/rgb_image/compressed",
+                "/camera/color/image_raw/compressed",
             )
 
 

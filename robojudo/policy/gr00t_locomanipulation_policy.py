@@ -64,13 +64,15 @@ class Gr00tLocomanipulationPolicyMixin:
             for index in range(3):
                 commands[index] = self._clip_command(command[index], self.commands_map[index])
             self.current_vel_cmd[:] = commands[:3]
-            self._target_height = float(commands[3])
+            self._target_height = self._clip_command(float(command[3]), self.commands_map[3])
             stream["locomotion_source"] = "policy"
         else:
             # Do not fall back to joystick on a timeout while takeover remains enabled.
             self.current_vel_cmd[:] = 0.0
             commands[:3] = 0.0
-            commands[3] = self.cmd[3]
+            self._target_height = float(self.cmd[3])
+            # Hold the emitted height, including at rates below float32 resolution.
+            self._height_command = self._target_height
             stream["locomotion_source"] = "hold"
 
         commands[3] = self._get_height_command()
