@@ -61,7 +61,7 @@ class Gr00tLocomanipulationPolicyMixin:
             command = np.asarray(command, dtype=np.float32)
             if command.shape != (4,) or not np.isfinite(command).all():
                 raise ValueError("active GR00T locomotion_command must be a finite vector with shape (4,)")
-            for index in range(4):
+            for index in range(3):
                 commands[index] = self._clip_command(command[index], self.commands_map[index])
             self.current_vel_cmd[:] = commands[:3]
             self._target_height = float(commands[3])
@@ -73,6 +73,7 @@ class Gr00tLocomanipulationPolicyMixin:
             commands[3] = self.cmd[3]
             stream["locomotion_source"] = "hold"
 
+        commands[3] = self._get_height_command()
         # GR00T does not output waist yaw; keep the trained default command.
         commands[4] = self._command_defaults[4]
         self._target_waist_yaw = float(commands[4])

@@ -97,22 +97,25 @@ def make_profile(label: str, joint_names: list[str], default_pos: list[float], p
     elbow_sign = -1.0 if label == "X2" else 1.0
     poses = make_poses(default_pose, elbow_sign)
     if label == "X2":
+        # IK using assets/robots/x2/x2.xml with an upright torso: wrist-roll frames
+        # raised 0.30 m from the original pose, preserving hand orientations.
+        # Joint limits require ~0.051 m forward and ~0.029 m inward movement.
         poses["mirrored_arms"] = {
             **default_pose,
-            "left_shoulder_pitch_joint": 0.3943,
-            "left_shoulder_roll_joint": -0.0156,
-            "left_shoulder_yaw_joint": -0.5267,
-            "left_elbow_joint": -1.7322,
-            "left_wrist_pitch_joint": 0.4669,
-            "left_wrist_roll_joint": 0.55,
-            "left_wrist_yaw_joint": -1.4684,
-            "right_shoulder_pitch_joint": 0.3943,
-            "right_shoulder_roll_joint": 0.0156,
-            "right_shoulder_yaw_joint": 0.5267,
-            "right_elbow_joint": -1.7322,
-            "right_wrist_pitch_joint": 0.4669,
-            "right_wrist_roll_joint": -0.55,
-            "right_wrist_yaw_joint": 1.4684,
+            "left_shoulder_pitch_joint": -0.773413,
+            "left_shoulder_roll_joint": -0.061,
+            "left_shoulder_yaw_joint": -0.452642,
+            "left_elbow_joint": -2.3556,
+            "left_wrist_pitch_joint": 0.470259,
+            "left_wrist_roll_joint": -1.373439,
+            "left_wrist_yaw_joint": -1.944615,
+            "right_shoulder_pitch_joint": -0.778829,
+            "right_shoulder_roll_joint": 0.061,
+            "right_shoulder_yaw_joint": 0.457291,
+            "right_elbow_joint": -2.3556,
+            "right_wrist_pitch_joint": 0.465977,
+            "right_wrist_roll_joint": 1.384599,
+            "right_wrist_yaw_joint": 1.959332,
         }
     return TestProfile(
         label=label,

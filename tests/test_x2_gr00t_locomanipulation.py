@@ -214,6 +214,11 @@ class TestGr00tZmqCtrl(unittest.TestCase):
 
 
 class TestX2Gr00tLocomanipulationPolicy(unittest.TestCase):
+    def setUp(self):
+        clock = patch("robojudo.policy.locomanipulation_policy.time.monotonic", return_value=10.0)
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
+
     def make_policy(self):
         policy = X2Gr00tLocomanipulationPolicy.__new__(X2Gr00tLocomanipulationPolicy)
         policy.commands_map = [
@@ -227,6 +232,8 @@ class TestX2Gr00tLocomanipulationPolicy(unittest.TestCase):
         policy.cmd = policy._command_defaults.copy()
         policy.current_vel_cmd = np.zeros(3, dtype=np.float32)
         policy._target_height = 0.64
+        policy._last_height_command_at = 0.0
+        policy._height_command = float(policy.cmd[3])
         policy._target_waist_yaw = 0.0
         policy._held_keys = set()
         policy.cfg_policy = SimpleNamespace(
@@ -234,6 +241,8 @@ class TestX2Gr00tLocomanipulationPolicy(unittest.TestCase):
             standing_command_threshold=0.1,
             height_step=0.02,
             waist_yaw_step=0.1,
+            max_height_command_rate_m_s=0.10,
+            command_status_interval_s=0.0,
         )
         return policy
 
@@ -323,6 +332,8 @@ class TestX2Gr00tLocomanipulationPolicy(unittest.TestCase):
             }
         )
 
+        policy.get_observation(env_data, ctrl_data)  # Establish the height clock.
+        self.clock.return_value = 11.0
         observation, extras = policy.get_observation(env_data, ctrl_data)
         action = policy.get_action(observation)
 
@@ -360,9 +371,7 @@ class TestX2Gr00tLocomanipulationPipeline(unittest.TestCase):
         set_takeover_enabled.return_value = False
         pipeline.ctrl_manager = SimpleNamespace(
             controllers={
-                "Gr00tZmqCtrl": SimpleNamespace(
-                    inst=SimpleNamespace(set_takeover_enabled=set_takeover_enabled)
-                )
+                "Gr00tZmqCtrl": SimpleNamespace(inst=SimpleNamespace(set_takeover_enabled=set_takeover_enabled))
             }
         )
         stream = {"fresh": True, "joint_positions": {"left_arm": 0.2}}

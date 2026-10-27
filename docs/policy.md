@@ -299,6 +299,78 @@ Joystick controls:
 Keyboard controls use `w/s`, `a/d`, and `q/e` for velocity, `r/f` for height, `z/c` for waist yaw, and `x` to reset
 commands. Press `t` to toggle the upper-body stream, `o` to stop, and `i` to respawn.
 
+### Height-command rate
+
+G1 and X2 Locomanipulation policies, including their GR00T variants, use
+`max_height_command_rate_m_s=0.20` by default. Set a finite, strictly positive value on the policy configuration:
+
+```python
+from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import X2LocomanipulationPolicyCfg
+
+policy = X2LocomanipulationPolicyCfg(max_height_command_rate_m_s=0.05)
+```
+
+The same field is available on G1 Locomanipulation policy configurations. Height requests from keyboard, joystick,
+ROS joystick, Unitree remote, posture ZMQ, and GR00T are clipped to the trained range. The emitted height command
+then moves toward the target by at most `max_height_command_rate_m_s * elapsed_seconds` per update, using monotonic
+elapsed time and stopping at the target without overshoot. This replaces height's exponential smoothing;
+`command_decay` still controls waist-yaw smoothing and velocity decay. `height_step` still controls manual target
+increments, independently of the height rate. At `0.20 m/s`, a `0.20 m` command change takes at least one second.
+Progress accumulates across updates even when a step is smaller than the model's float32 height resolution;
+emitted commands can differ from the ideal ramp by float32 rounding.
+
+New policies initialize at the configured default height. Later full resets preserve the emitted height, request the
+default, and restart timing; the first update after initialization or reset holds height while establishing the clock.
+Command-reset buttons also request the default through the limiter. Changing sources retains the emitted height and
+timing. Posture-ZMQ timeout continues toward its last accepted target; stale GR00T holds the emitted height.
+
+This limits commanded height rate, **not guaranteed physical body speed**. Validate the chosen rate, checkpoint,
+resets, and source handoffs in simulation before hardware use.
+
+Run the deterministic command regressions and headless MuJoCo validation with the supplied G1 23-DOF stiff and X2
+checkpoints (MuJoCo and ONNX Runtime must be installed):
+
+```bash
+python -m unittest discover -s tests -p 'test_locomanipulation_height*.py'
+```
+
+The simulation check runs eight seconds per robot through posture ZMQ, manual input, GR00T takeover/timeout, and
+policy reset. It checks the emitted rate bound, no overshoot, reset continuity, and finite inference and simulation
+state. These checks do not establish physical body-speed limits or hardware readiness.
+
+### Locomanipulation posture ZMQ control
+
+`x2_locomimic` and `x2_locomimic_real` enable a posture-only ZMQ stream at `tcp://127.0.0.1:8557`. Add
+`LocomanipulationPostureZmqCtrlCfg(posture_priority=100)` to a custom G1 or X2 Locomanipulation configuration to use
+it elsewhere. The publisher binds the endpoint and continuously sends one complete absolute setpoint in metres and
+radians:
+
+```json
+{"height": 0.64, "waist_yaw": 0.20}
+```
+
+This is independent from `VelocityZmqCtrl` on port `8558`: velocity ZMQ still controls only forward, lateral, and yaw
+rate. The posture stream holds the last accepted target after its `0.25 s` timeout, while a stale velocity stream
+resolves independently according to its velocity-source arbitration. Height and waist yaw are clamped to the selected
+policy's trained ranges. Height uses the elapsed-time rate limit above; waist yaw retains exponential smoothing.
+
+Posture sources use the same priority-and-lease behavior as velocity sources, but with their own
+`posture_priority`. When posture ZMQ is configured, assign every posture source a unique priority; larger values win.
+For example, set `LocomanipulationPostureZmqCtrlCfg(posture_priority=100)`,
+`KeyboardCtrlCfg(posture_priority=200)`, and `JoystickCtrlCfg(posture_priority=300)`. Active local movement inputs
+(the left or right stick, or keyboard `w`/`s`/`a`/`d`/`q`/`e`) and posture inputs (D-pad or
+`r`/`f`/`z`/`c`/`x`) hold their selected source for `posture_lease_timeout_s`, which defaults to `0.5 s` after the
+input returns to neutral. The highest-priority fresh posture source is then selected. Validate a custom configuration
+in simulation before using it on a real robot:
+
+```bash
+python scripts/run_pipeline.py -c x2_locomimic
+# In another terminal:
+python scripts/test_locomanipulation_posture_zmq.py --robot x2
+```
+
+Select `JOINT_DEFAULT`, wait for the interpolation, then select `RL_DEFAULT` before commanding posture.
+
 The upper-body controller subscribes to `tcp://127.0.0.1:8559` by default and accepts partial named-joint updates:
 
 ```json

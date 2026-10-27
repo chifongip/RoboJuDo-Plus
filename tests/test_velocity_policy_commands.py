@@ -218,9 +218,16 @@ class TestVelocityPolicyCommands(unittest.TestCase):
         policy.cmd = np.asarray([0.0, 0.0, 0.0, 0.64, 0.0], dtype=np.float32)
         policy.current_vel_cmd = np.zeros(3, dtype=np.float32)
         policy._target_height = 0.64
+        policy._last_height_command_at = None
+        policy._height_command = float(policy.cmd[3])
         policy._target_waist_yaw = 0.0
         policy._held_keys = set()
-        policy.cfg_policy = SimpleNamespace(command_decay=0.5, standing_command_threshold=0.1)
+        policy.cfg_policy = SimpleNamespace(
+            command_decay=0.5,
+            standing_command_threshold=0.1,
+            max_height_command_rate_m_s=0.10,
+            command_status_interval_s=0.0,
+        )
         commands = policy._get_commands({"VelocityZmqCtrl": velocity_entry(2.0, -2.0, 2.0)})
         np.testing.assert_allclose(commands[:3], [1.0, -0.5, 1.0])
 
