@@ -133,6 +133,7 @@ The optional installers may require an active Conda environment and external SDK
 - [Unitree setup](docs/unitree_setup.md)
 - [X2 sim-to-real setup](docs/x2_sim2real.md)
 - [policy documentation](docs/policy.md)
+- [SuperMimic G1 motion and velocity tracking](docs/supermimic.md)
 
 ### Update submodules after pulling
 
