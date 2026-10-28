@@ -300,11 +300,12 @@ It runs position control with observer compensation **OFF** by default. Its
 editable configuration is `robojudo/config/x2/x2_locomimic_observer_cfg.py`.
 It maps the existing DoF torque bounds into the observer's named 14-arm order:
 `[36, 36, 24, 24, 24, 2.2, 2.2]` Nm per side. These remain configured bounds,
-not newly verified hardware ratings. All observer fields are populated: correction
-limits use `min(8 Nm, 0.8 * actuator_limit)`, giving
-`[8, 8, 8, 8, 8, 1.76, 1.76]` Nm per side, and slew is 2 Nm/s.
+not newly verified hardware ratings. With `correction_limit_fraction=0.8` and
+`correction_limit_nm=0.0` (no absolute cap), correction limits use `0.8 * actuator_limit`, giving
+`[28.8, 28.8, 19.2, 19.2, 19.2, 1.76, 1.76]` Nm per side, and slew is 2 Nm/s.
 These are the selected simulation settings for optional SHADOW evaluation, not
 hardware-qualified ACTIVE settings. The preset keeps `mode="OFF"`.
+Set a positive `correction_limit_nm`, such as `8.0`, to add an absolute Nm cap.
 
 Before launching this preset, use the correct ROS/AimDK environment and installed
 native adapter, check the configured policy assets, ROS joystick `/joy` and

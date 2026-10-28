@@ -64,7 +64,7 @@ class GenericObserverTests(unittest.TestCase):
                 mode=mode,
                 joint_names=names,
                 inertia=0.1,
-                correction_limits_nm=0.5,
+                correction_limit_nm=0.5,
                 slew_nm_s=1.0,
             ),
         )
@@ -125,7 +125,7 @@ class GenericObserverTests(unittest.TestCase):
                 ObserverMujocoEnvCfg.model_validate(
                     {**cfg.model_dump(), "observer": {**cfg.observer.model_dump(), **changes}}
                 )
-        cfg.observer.correction_limits_nm = 5.0
+        cfg.observer.correction_limit_fraction = 1.1
         with self.assertRaises(ValueError):
             self.plant(cfg)
 

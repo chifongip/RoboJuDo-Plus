@@ -33,16 +33,25 @@ observer = JointObserverCfg(
     friction_limit=0.3,
     friction_viscosity=[40.0, 30.0],
     bandwidth_rad_s=8.0,
-    correction_limits_nm=[1.0, 1.0],
+    correction_limit_fraction=0.8,
+    correction_limit_nm=1.0,
     slew_nm_s=2.0,
     release_slew_nm_s=16.0,
 )
 ```
 
-Model parameters and correction bounds accept scalars or vectors. Vectors follow
-`joint_names`, which also defines correction and status order. Actuator bounds,
-when supplied, are a vector in that same order. All configuration is validated
-again when constructing the runtime.
+Model parameters accept scalars or vectors. Vectors follow `joint_names`, which
+also defines correction and status order. Actuator bounds, when supplied, are a
+vector in that same order. All configuration is validated again when constructing
+the runtime.
+
+Correction bounds use `correction_limit_fraction * actuator_limit` for each selected
+joint. The fraction defaults to `0.8` and must be finite and in `(0, 1]`. `correction_limit_nm` defaults
+to `0.0`, meaning no absolute cap. A finite positive value adds an absolute Nm cap:
+`min(correction_limit_nm, correction_limit_fraction * actuator_limit)`.
+For example, `correction_limit_fraction=0.8, correction_limit_nm=8.0` restores the
+8 Nm cap. `resolve_correction_limits()` returns the effective bounds; supply selected
+environment actuator limits if the configuration omits them.
 
 `algorithm` is required. For `linearized`, release slew must be omitted or equal
 to growth slew. For `nonlinear`, omission uses the growth rate; a larger release
@@ -62,8 +71,9 @@ Base hardware presets use `observer=None` to disable the feature. A configured
 OFF observer also disables it. Simulation may use its model's actuator bounds
 when `actuator_limits_nm` is omitted. The hardware boundary calls
 `validate_hardware()` before constructing any native controller: ACTIVE requires
-explicit actuator bounds, and correction bounds and growth slew are required
-configuration fields. Configured bounds do not establish hardware qualification.
+explicit actuator bounds. Growth slew is required; correction bounds may be derived
+from the fraction and optional cap. Configured bounds do not establish hardware
+qualification.
 
 ## Runtime and environment contracts
 
@@ -119,6 +129,7 @@ This is a clean API break; old imports and aliases are removed:
 
 | Previous API | Replacement |
 | --- | --- |
+| `correction_limits_nm` | `correction_limit_fraction` and optional `correction_limit_nm` cap; zero disables the cap |
 | `X2ArmObserverCfg` | Shared `JointObserverCfg` with explicit joint names, model and algorithm |
 | `env.arm_observer` | `env.observer`; disabled base hardware configs use `None` |
 | `X2ArmObserver` and old utility modules | `JointObserver` from `robojudo.utils.observers` |
@@ -127,9 +138,9 @@ This is a clean API break; old imports and aliases are removed:
 | Arm-specific observer environment methods | `reset_observer`, `set_observer_eligible`, `get_observer_status` |
 | Utility/script X2 reference exports | `robojudo.config.x2.observer_parameters` |
 
-The removed `arm_observer` configuration key raises a migration error. Update
-external configuration overrides and scripts along with imports; parameters are
-no longer selected implicitly by an X2 wrapper. Another robot can provide its
+The removed `arm_observer` and `correction_limits_nm` configuration keys raise
+validation errors. Update external configuration overrides and scripts along with
+imports; parameters are no longer selected implicitly by an X2 wrapper. Another robot can provide its
 own parameter preset to the same config/runtime, but still needs model
 calibration and a compatible environment integration for hardware use.
 

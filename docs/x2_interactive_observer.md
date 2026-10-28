@@ -27,10 +27,16 @@ the first observer sample after reset issues zero correction.
 The observer updates at 50 Hz using simulation time and the final arm targets.
 Its arm correction is held across four 5 ms physics substeps. It uses the shared
 simulation reference model (8 rad/s bandwidth), per-joint correction limits of
-`min(8 Nm, 0.8 × actuator limit)`, 2 Nm/s growth and 16 Nm/s release toward zero.
+`0.8 × actuator limit`, 2 Nm/s growth and 16 Nm/s release toward zero.
 Opposite-sign correction grows on a later update at 2 Nm/s. Only the 14 arm joints
 receive compensation; total PD plus correction still passes through MuJoCo's
 torque limits. These settings are simulation parameters.
+
+Set `observer.correction_limit_fraction` (default `0.8`) to choose the fraction of
+each actuator's torque limit. `observer.correction_limit_nm=0.0` disables the absolute
+cap; a positive value such as `8.0` caps each correction at that many Nm. Rebuild the
+observer after changing these settings. The preset's feedforward command bounds
+use the actuator limits, so the observer's fraction and cap determine its correction bounds.
 
 INFO logs use the same compact single-line format as the real environment:
 mode, disturbance estimate, issued correction, and bound/limiter counts. They
@@ -57,8 +63,10 @@ python -m unittest discover -s tests -p 'test_x2_observer_mujoco_env.py'
 the X2 preset does. Import `JointObserverCfg` from `robojudo.config.observer_cfg`.
 Supply `observer=JointObserverCfg(...)` with an explicit `algorithm` and the selected
 `joint_names`, nominal `inertia`, optional friction parameters, `bandwidth_rad_s`,
-`correction_limits_nm`, and `slew_nm_s`. Scalar model parameters and correction
-limits apply to every selected joint; vectors follow the configured joint order.
+and `slew_nm_s`. Correction bounds default to `correction_limit_fraction=0.8` with
+`correction_limit_nm=0.0` (no absolute cap). A positive cap applies to every selected
+joint. Scalar model parameters apply to every selected joint; vectors follow the
+configured joint order.
 Optional `actuator_limits_nm` overrides the selected environment torque limits.
 Configure `feedforward_effort_limits` for those joints as well; omitted joints
 have zero admitted correction.

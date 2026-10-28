@@ -78,13 +78,14 @@ class DisturbanceObserverTests(unittest.TestCase):
 
     def test_bounds_slew_and_antiwindup(self):
         controller = observer()
+        np.testing.assert_array_equal(controller.limits, 0.8 * controller.torque_limits)
         previous = controller.effort.copy()
         controller.update([0], [0], [0], 0.02)
         for _ in range(500):
             effort = controller.update([0], [0], [-10], 0.02)
-            self.assertLessEqual(abs(effort[0]), 8)
+            self.assertLessEqual(abs(effort[0]), 0.8 * controller.torque_limits[0])
             self.assertLessEqual(abs(effort[0] - previous[0]), 0.04000000001)
-            self.assertLessEqual(abs(controller.estimated_disturbance_nm[0]), 8)
+            self.assertLessEqual(abs(controller.estimated_disturbance_nm[0]), 0.8 * controller.torque_limits[0])
             previous = effort
         self.assertTrue(controller.antiwindup[0])
 

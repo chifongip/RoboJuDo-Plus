@@ -27,7 +27,7 @@ def trace(kind):
             **parameters,
             mode="SHADOW" if shadow else "ACTIVE",
             actuator_limits_nm=[10.0] * 14,
-            correction_limits_nm=[1.0] * 14,
+            correction_limit_nm=1.0,
             slew_nm_s=2,
             release_slew_nm_s=16,
         )
@@ -42,7 +42,7 @@ def trace(kind):
             friction_limit=0.3,
             friction_viscosity=40,
             bandwidth_rad_s=8,
-            correction_limits_nm=0.8,
+            correction_limit_nm=0.8,
             slew_nm_s=2,
         )
         ctrl = JointObserver(cfg, names, [20.0] * 3, [2.0] * 3, actuator_limits=[10.0] * 3, max_dt=0.1)

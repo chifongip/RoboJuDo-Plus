@@ -26,7 +26,7 @@ def config(mode="ACTIVE"):
         **parameters,
         mode=mode,
         actuator_limits_nm=[10.0] * 14,
-        correction_limits_nm=[1.0] * 14,
+        correction_limit_nm=1.0,
         slew_nm_s=2.0,
     )
 
@@ -159,10 +159,10 @@ class ArmObserverTests(unittest.TestCase):
         self.assertEqual(config("SHADOW").mode, "SHADOW")
         for kwargs in (
             {"actuator_limits_nm": None},
-            {"correction_limits_nm": [1]},
+            {"actuator_limits_nm": [1]},
             {"actuator_limits_nm": [float("nan")] * 14},
             {"slew_nm_s": float("inf")},
-            {"actuator_limits_nm": [1] * 14, "correction_limits_nm": [2] * 14},
+            {"correction_limit_fraction": 1.1},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 candidate = JointObserverCfg.model_validate({**config().model_dump(), **kwargs})
@@ -173,7 +173,7 @@ class ArmObserverTests(unittest.TestCase):
         cfg.mode = "ACTIVE"
         with self.assertRaises(ValueError):
             runtime(cfg)
-        for field, invalid in (("correction_limits_nm", [float("nan")] * 14), ("slew_nm_s", -2)):
+        for field, invalid in (("correction_limit_nm", float("nan")), ("slew_nm_s", -2)):
             cfg = config()
             setattr(cfg, field, invalid)
             with self.subTest(field=field), self.assertRaises(ValueError):

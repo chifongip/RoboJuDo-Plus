@@ -162,11 +162,14 @@ class NonlinearObserverTests(unittest.TestCase):
             model.release_slew = 16
             q, v, target = np.zeros(1), np.zeros(1), np.zeros(1)
             model.update(target, q, v, 0.02)
-            for actual in (7.5 * sign, 0):
-                for _ in range(600):
+            # Allow the default growth slew to reach the larger correction bound,
+            # followed by the original settling interval.
+            steps = int(np.ceil(model.limits[0] / (model.slew * 0.02))) + 600
+            for actual in ((model.limits[0] - 0.5) * sign, 0):
+                for _ in range(steps):
                     q, v, _, _ = model.predict_state(q, v, target, model.effort, np.array([actual]), 0.02)
                     model.update(target, q, v, 0.02)
-                    self.assertLessEqual(abs(model.effort[0]), 8)
+                    self.assertLessEqual(abs(model.effort[0]), 0.8 * model.torque_limits[0])
                 self.assertAlmostEqual(model.estimated_disturbance_nm[0], actual, delta=2e-4)
                 self.assertLess(abs(q[0]), 0.002)
 

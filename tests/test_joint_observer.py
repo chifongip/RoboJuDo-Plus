@@ -19,12 +19,59 @@ def config(algorithm="nonlinear"):
         mode="ACTIVE",
         joint_names=["elbow", "shoulder"],
         inertia=[0.1, 0.2],
-        correction_limits_nm=0.5,
+        correction_limit_nm=0.5,
         slew_nm_s=2,
     )
 
 
 class JointObserverTests(unittest.TestCase):
+    def test_fraction_and_optional_cap_follow_selected_actuator_limits(self):
+        for algorithm in ("linearized", "nonlinear"):
+            for configured in (False, True):
+                for fraction, cap, expected in (
+                    (0.8, 0.0, [28.8, 1.76]),
+                    (0.8, 8.0, [8.0, 1.76]),
+                    (0.5, 10.0, [10.0, 1.1]),
+                    (1.0, 0.0, [36.0, 2.2]),
+                ):
+                    with self.subTest(algorithm=algorithm, configured=configured, fraction=fraction, cap=cap):
+                        cfg = JointObserverCfg.model_validate(
+                            {
+                                **config(algorithm).model_dump(),
+                                "correction_limit_fraction": fraction,
+                                "correction_limit_nm": cap,
+                                "actuator_limits_nm": [36.0, 2.2] if configured else None,
+                            }
+                        )
+                        ctrl = JointObserver(
+                            cfg,
+                            ["shoulder", "other", "elbow"],
+                            [10] * 3,
+                            [1] * 3,
+                            actuator_limits=[2.2, 100.0, 36.0],
+                            max_dt=0.1,
+                        )
+                        np.testing.assert_allclose(ctrl.observer.limits, expected)
+
+    def test_removed_per_joint_limits_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "correction_limits_nm"):
+            JointObserverCfg.model_validate({**config().model_dump(), "correction_limits_nm": [0.5, 0.5]})
+
+    def test_invalid_fraction_and_absolute_cap_are_rejected_at_runtime_boundary(self):
+        for field, values in (
+            ("correction_limit_fraction", (0, -0.1, 1.1, float("nan"), float("inf"))),
+            ("correction_limit_nm", (-1, float("nan"), float("inf"))),
+        ):
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    data = {**config().model_dump(), field: value}
+                    with self.assertRaises(ValueError):
+                        JointObserverCfg.model_validate(data)
+                    cfg = config()
+                    setattr(cfg, field, value)
+                    with self.assertRaises(ValueError):
+                        JointObserver(cfg, cfg.joint_names, [10] * 2, [1] * 2, actuator_limits=[4] * 2, max_dt=0.1)
+
     def test_arbitrary_names_and_timestamped_interval_replay_for_both_algorithms(self):
         for algorithm in ("linearized", "nonlinear"):
             with self.subTest(algorithm=algorithm):
@@ -112,9 +159,9 @@ class HardwareObserverConstructorTests(unittest.TestCase):
         if algorithm == "linearized":
             observer.release_slew_nm_s = None
         # Distinct limits and a nontrivial permutation expose incorrect SDK order.
-        observer.correction_limits_nm = [0.1 + 0.01 * i for i in range(len(observer.joint_names))]
+        observer.actuator_limits_nm = [1.0 + 0.1 * i for i in range(len(observer.joint_names))]
         permutation = np.random.default_rng(31).permutation(len(observer.joint_names))
-        for field in ("joint_names", "inertia", "friction_viscosity", "actuator_limits_nm", "correction_limits_nm"):
+        for field in ("joint_names", "inertia", "friction_viscosity", "actuator_limits_nm"):
             values = getattr(observer, field)
             setattr(observer, field, [values[i] for i in permutation])
         return cfg
@@ -161,7 +208,7 @@ class HardwareObserverConstructorTests(unittest.TestCase):
                         self.assertEqual(env._observer.mode, mode)
                         self.assertEqual(native_cfg["arm_effort_enabled"], mode == "ACTIVE")
                         named_limits = dict(
-                            zip(cfg.observer.joint_names, cfg.observer.correction_limits_nm, strict=True)
+                            zip(cfg.observer.joint_names, cfg.observer.resolve_correction_limits(), strict=True)
                         )
                         np.testing.assert_array_equal(
                             native_cfg["arm_effort_limits"], [named_limits[name] for name in cfg.arm_joint_names]

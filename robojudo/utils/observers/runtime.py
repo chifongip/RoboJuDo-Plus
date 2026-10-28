@@ -60,9 +60,9 @@ class JointObserver:
             bandwidth_rad_s=cfg.bandwidth_rad_s,
             **({"backend": cfg.backend} if cfg.algorithm == "nonlinear" else {}),
         )
-        self.observer.limits = np.broadcast_to(cfg.correction_limits_nm, self._shape).copy()
-        if np.any(self.observer.limits > self.observer.torque_limits):
-            raise ValueError("Correction limits must not exceed actuator limits")
+        self.observer.limits = np.asarray(
+            cfg.resolve_correction_limits(self.observer.torque_limits.tolist()), dtype=float
+        )
         self.observer.slew = cfg.slew_nm_s
         if cfg.algorithm == "nonlinear":
             self.observer.release_slew = cfg.release_slew_nm_s

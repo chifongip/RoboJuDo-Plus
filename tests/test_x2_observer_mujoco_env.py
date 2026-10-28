@@ -47,8 +47,8 @@ class InteractiveObserverTests(unittest.TestCase):
         self.assertEqual(self.env.get_observer_status()["algorithm"], "nonlinear")
         self.assertEqual(cfg.env.sim_dt * cfg.env.sim_decimation, 0.02)
         self.assertEqual(set(cfg.env.feedforward_effort_limits), set(JOINT_NAMES))
-        cfg.env.observer.correction_limits_nm[0] = 0.01
-        self.assertNotEqual(x2_locomimic_observer().env.observer.correction_limits_nm[0], 0.01)
+        cfg.env.observer.correction_limit_fraction = 0.01
+        self.assertEqual(x2_locomimic_observer().env.observer.correction_limit_fraction, 0.8)
         self.assertEqual(x2_locomimic().env.env_type, "MujocoEnv")
         self.assertFalse(x2_locomimic().env.feedforward_effort_limits)
 
@@ -69,6 +69,22 @@ class InteractiveObserverTests(unittest.TestCase):
             self.assertTrue(np.all(abs(effort) <= 0.01))
             self.assertTrue(np.all(abs(self.env.last_applied_torque) <= self.env.torque_limits))
         self.assertGreater(peak, 0)
+
+    def test_configurable_limits_reach_the_simulation_command_boundary(self):
+        cfg = self.env.cfg_env.observer
+        cfg.correction_limit_fraction = 1.0
+        for cap in (0.0, 8.0):
+            with self.subTest(cap=cap):
+                cfg.correction_limit_nm = cap
+                self.env.set_gains(self.env.stiffness, self.env.damping)
+                observer = self.env._observer
+                expected = self.env.torque_limits[observer.indices]
+                if cap:
+                    expected = np.minimum(expected, cap)
+                np.testing.assert_allclose(observer.observer.limits, expected)
+                effort = np.zeros(self.env.num_dofs)
+                effort[observer.indices] = expected
+                np.testing.assert_allclose(self.env._bounded_feedforward(effort), effort)
 
     def test_off_shadow_and_ineligible_apply_zero(self):
         self.env.set_observer_eligible(False)

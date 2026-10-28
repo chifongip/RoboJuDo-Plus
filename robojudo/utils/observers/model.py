@@ -28,7 +28,7 @@ class JointDynamics:
         if not np.isscalar(bandwidth_rad_s) or not np.isfinite(bandwidth_rad_s) or bandwidth_rad_s <= 0:
             raise ValueError("Positive finite scalar observer bandwidth required")
         self.bandwidth = float(bandwidth_rad_s)
-        self.limits = np.minimum(8.0, 0.8 * self.torque_limits)
+        self.limits = 0.8 * self.torque_limits
         self.slew = 2.0
         self.reset()
 

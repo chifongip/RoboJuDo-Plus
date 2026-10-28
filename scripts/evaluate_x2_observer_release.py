@@ -42,7 +42,9 @@ def runtime(condition, release_rate, names, kp, kd, limits):
         **parameters,
         mode="ACTIVE",
         actuator_limits_nm=np.asarray(limits)[indices].tolist(),
-        correction_limits_nm=np.minimum(8, 0.8 * np.asarray(limits)[indices]).tolist(),
+        # Preserve the bounds used by the historical release comparison.
+        correction_limit_fraction=0.8,
+        correction_limit_nm=8.0,
         slew_nm_s=2,
         release_slew_nm_s=None if condition == "legacy" else release_rate,
     )

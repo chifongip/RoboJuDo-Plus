@@ -77,10 +77,11 @@ physical inertias. Earlier position-command identification did not establish the
 torque-loop model. The observer follows the nominal-model residual approach in
 Chen et al.'s [disturbance-observer overview](https://doi.org/10.1109/TIE.2015.2478397).
 
-Both controllers use the same correction bound, `min(8 Nm, 0.8*configured limit)`,
-and **2 Nm/s** slew limit. Correction is updated at 50 Hz and held through four
-5 ms physics steps. Only the 14 arm joints receive additive effort; the existing
-locomotion policy controls the legs and waist.
+The reported comparisons used the same correction bound, `min(8 Nm, 0.8*configured limit)`,
+for both controllers. The observer now defaults to `0.8*configured limit`; the integral
+baseline retains the 8 Nm cap. Both use a **2 Nm/s** slew limit. Correction is updated
+at 50 Hz and held through four 5 ms physics steps. Only the 14 arm joints receive
+additive effort; the existing locomotion policy controls the legs and waist.
 
 ## Run and plot
 
@@ -433,12 +434,13 @@ explicit limits are supplied. `env.get_observer_status()` exposes named,
 reference-order proposed, headroom-limited and issued command vectors. These are
 command diagnostics, not measured torque or a counterfactual compensated rollout.
 
-`ACTIVE` requires all three explicit configuration fields:
-`actuator_limits_nm` and `correction_limits_nm` (14 positive finite values each,
-in the reference's left-seven/right-seven order), and positive finite
-`slew_nm_s`. Correction limits cannot exceed actuator limits. There are no
-hardware-qualified defaults, and simulation limits are never substituted for
-missing active limits. Configure the mode before environment construction;
+`ACTIVE` requires explicit `actuator_limits_nm` (14 positive finite values in the
+reference's left-seven/right-seven order) and positive finite `slew_nm_s`.
+Correction limits use `correction_limit_fraction * actuator_limit`, optionally
+capped by a positive `correction_limit_nm`; zero disables the absolute cap.
+The fraction defaults to 0.8 and must lie in `(0, 1]`, so correction limits cannot
+exceed actuator limits. There are no hardware-qualified defaults, and simulation
+limits are never substituted for missing active limits. Configure the mode before environment construction;
 changing the source configuration in place does not reconfigure the running
 observer. Runtime eligibility disable clears correction immediately.
 
