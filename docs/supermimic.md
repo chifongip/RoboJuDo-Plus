@@ -156,7 +156,7 @@ CPU MuJoCo 与训练端 Warp 后端仍需分别评估，接口一致不代表轨
 
 ## Orin NX 离线推理比较
 
-`scripts/benchmark_supermimic.py` 比较 FP32、batch=1 的六条路线，不创建机器人环境或连接硬件：
+`scripts/benchmark_supermimic.py` 比较 FP32、batch=1 的七条路线，不创建机器人环境或连接硬件：
 
 | 路线 | 后端 |
 | --- | --- |
@@ -166,6 +166,7 @@ CPU MuJoCo 与训练端 Warp 后端仍需分别评估，接口一致不代表轨
 | D | ONNX Runtime CUDA，预分配 I/O Binding |
 | E | D + CUDA Graph |
 | F | 预计算 motion latent，PyTorch CPU decoder；仅 motion |
+| G | 预计算 motion latent，ONNX Runtime CPU decoder；仅 motion |
 
 使用当前 `g1_supermimic_cfg.py` 的 23DoF checkpoint 和动作路径。ONNX 路线需要额外的
 `onnx` 导出依赖；GPU 路线还需要与目标 JetPack/CUDA 配套、包含 CUDA provider 的 ONNX Runtime。
@@ -188,7 +189,7 @@ python scripts/benchmark_supermimic.py --task all
 仅比较 CPU 和缓存路线：
 
 ```bash
-python scripts/benchmark_supermimic.py --task all --routes A B F
+python scripts/benchmark_supermimic.py --task all --routes A B F G
 ```
 
 如需 CPU 绑定，在所有路线的父进程上使用同一 `taskset`；子进程继承该 affinity。
@@ -210,12 +211,12 @@ velocity 覆盖零指令、六个轴向指令和渐变组合指令。所有后�
 - `strategy`：原始状态与参考帧准备好，直到 CPU PD target 可用，包含观测、历史和参考特征构造。
 
 历史回放状态恢复、输入文件读取、测试框架调度和 CSV 写入在计时外；策略层计时包含实际历史更新。
-F 的策略层使用 latent 查表，省去参考特征和 encoder 的实时计算。
+F、G 的策略层使用 latent 查表，省去参考特征和 encoder 的实时计算。
 `network` 仅作诊断，主要以 `paced/strategy` 的 P99 作决策；20 ms 为周期上限，仍需预留通信时间。
 同时记录每次调度的 `start_lateness_ms`，区分计算耗时与系统调度延迟。
 
 默认每条路线预热 1,000 次，每层连续测 10,000 次；50 Hz 模式先稳定 250 次（5 秒），
-每层采集 3,000 次，重复三轮。三个计时层分别运行，完整测试仅 50 Hz 采样部分约需 99 分钟，
+每层采集 3,000 次，重复三轮。三个计时层分别运行，完整测试仅 50 Hz 采样部分约需 108 分钟，
 另加正确性验证、预热、导出和连续运行时间。短测只检查工具能否运行，不用于性能推荐。
 GPU 使用 FP32 并禁用 TF32；E 的图捕获包含在单独的首次运行计时内。
 
@@ -224,10 +225,23 @@ GPU 使用 FP32 并禁用 TF32；E 的图捕获包含在单独的首次运行计
 - `environment.json`、`arguments.json`：软件、功耗/时钟查询、affinity 和命令参数。
 - 每个任务的 `tape.npz`、`inputs.json`：共用输入及 checkpoint、motion、输入文件 SHA256。
 - 每条路线每轮的 `timings.csv`、`result.json`、`worker.log`：原始耗时、P50/P95/P99/最大值、
-  超过 20 ms 比例、正确性、模型加载与首次运行耗时；F 另外报告缓存构建耗时和大小。
+  超过 20 ms 比例、正确性、模型加载与首次运行耗时；F、G 另外报告缓存构建耗时和大小。
 - ONNX 路线的 `actor.onnx` 和 `placement.json`：导出模型和首次运行的 provider placement。
 - `telemetry.log`：若存在 `tegrastats` 则每秒采集；结果 JSON 另记录可读取的起止温度和 CPU 频率。
 - `summary.json`、`report.md`：汇总及候选路线。每轮 P99 均比对应 CPU 基线至少下降 10%，
   且每轮 20 ms 超时比例不增加，才认定有明确收益；需要完整三轮数据。
 
 报告分别评估 motion 和 velocity。所有结果均为离线推理比较，不能代替闭环或真机部署验证。
+
+只补测缓存 + ONNX CPU decoder，使用与前轮一致的短测参数：
+
+```bash
+python scripts/benchmark_supermimic.py --task motion --routes G \
+    --iterations 200 --paced-iterations 200 \
+    --warmup 100 --paced-warmup 50 --repeats 1
+```
+
+同轮比较完整 ONNX CPU、缓存 PyTorch CPU 和缓存 ONNX CPU 时使用
+`--task motion --routes B F G`。G 的 encoder 在缓存生成阶段执行，导出的 ONNX 仅保留
+历史归一化与 decoder，输入为 `(1, 10, 75)` 的历史和 `(1, 32)` 的 latent；
+缓存查表在策略层计时内，缓存构建和 ONNX 导出单独记录。

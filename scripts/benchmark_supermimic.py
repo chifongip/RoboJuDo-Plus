@@ -30,10 +30,12 @@ from robojudo.policy.supermimic_policy import (
 )
 from torch import nn
 
-ROUTES = ("A", "B", "C", "D", "E", "F")
+ROUTES = ("A", "B", "C", "D", "E", "F", "G")
 LABELS = dict(
     zip(
-        ROUTES, ("torch_cpu", "ort_cpu", "torch_cuda", "ort_cuda_io", "ort_cuda_graph", "cached_torch_cpu"), strict=True
+        ROUTES,
+        ("torch_cpu", "ort_cpu", "torch_cuda", "ort_cuda_io", "ort_cuda_graph", "cached_torch_cpu", "cached_ort_cpu"),
+        strict=True,
     )
 )
 LAYERS = ("network", "interface", "strategy")
@@ -225,7 +227,7 @@ class Backend:
         self.actor = policy.model.to(self.device).eval()
         self.cache = None
         self.setup = {}
-        if route == "F":
+        if route in ("F", "G"):
             if policy.velocity or policy.cfg_policy.motion_anchor_ori_b:
                 raise RuntimeError("Cached route requires motion without anchor")
             start = time.perf_counter_ns()
@@ -241,9 +243,9 @@ class Backend:
             self.setup["cache_sha256"] = digest(directory / "latents.npy")
             self.actor = CachedDecoder(self.actor).eval()
         self.history = torch.zeros((1, 10, 75), device=self.device)
-        self.condition = torch.zeros((1, 32 if route == "F" else policy.condition_dim), device=self.device)
+        self.condition = torch.zeros((1, 32 if route in ("F", "G") else policy.condition_dim), device=self.device)
         self.session = None
-        if route in ("B", "D", "E"):
+        if route in ("B", "D", "E", "G"):
             import onnx  # noqa: F401
             import onnxruntime as ort
 
@@ -574,7 +576,7 @@ def main():
             (task, route, repeat)
             for route in args.routes
             for repeat in range(args.repeats)
-            if not (route == "F" and task == "velocity")
+            if not (route in ("F", "G") and task == "velocity")
         )
     random.Random(args.seed).shuffle(jobs)
     results = []

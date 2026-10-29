@@ -65,6 +65,38 @@ class TestSuperMimicBenchmark(unittest.TestCase):
                         self.assertEqual(backend.cache.shape, (12, 32))
                         self.assertEqual(backend.setup["cache_bytes"], 12 * 32 * 4)
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("onnx") and importlib.util.find_spec("onnxruntime"),
+        "ONNX export/runtime dependencies are optional",
+    )
+    def test_cached_onnx_decoder_matches_baseline_and_prunes_encoder(self):
+        import onnx
+
+        fixture = test_supermimic.TestSuperMimic()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        motion_cfg, _ = fixture.make_checkpoint(num_joints=23)
+        velocity_cfg, _ = fixture.make_checkpoint(num_joints=23, velocity=True)
+        configs = {"motion": motion_cfg, "velocity": velocity_cfg}
+        with tempfile.TemporaryDirectory() as root, patch.object(bench, "config", side_effect=configs.__getitem__):
+            directory = Path(root)
+            bench.make_tape("motion", directory, seed=7)
+            with np.load(directory / "tape.npz") as source:
+                tape = {k: source[k] for k in source.files}
+            backend = bench.Backend("G", bench.load_policy("motion"), directory, tape)
+            self.assertEqual(backend.setup["executed_providers"], ["CPUExecutionProvider"])
+            self.assertEqual([i.shape for i in backend.session.get_inputs()], [[1, 10, 75], [1, 32]])
+            self.assertEqual(backend.cache.shape, (12, 32))
+            graph = onnx.load(directory / "actor.onnx").graph
+            self.assertFalse(any("encoder" in value.name for value in graph.initializer))
+            for i in range(len(tape["input"])):
+                env = backend.strategy_input(tape, i)
+                action = backend.run(backend.observe(env, tape, i))
+                self.assertTrue(bench.error_metrics(action, tape["action"][i])["passed"])
+                self.assertTrue(
+                    bench.error_metrics(bench.postprocess(action, backend.policy), tape["target"][i])["passed"]
+                )
+
     def test_report_requires_three_correct_repeats_and_no_extra_deadline_misses(self):
         def result(route, repeat, p99, missed=0):
             return {
