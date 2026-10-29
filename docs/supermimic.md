@@ -153,3 +153,81 @@ PD、力矩上限和 `0.25 × effort / kp` 动作缩放来自训练预设；
 CPU MuJoCo 与训练端 Warp 后端仍需分别评估，接口一致不代表轨迹逐位一致。
 
 加载时严格检查 checkpoint 与配置的关节集合和参考 schema，拒绝 23DoF / 29DoF 交叉加载。
+
+## Orin NX 离线推理比较
+
+`scripts/benchmark_supermimic.py` 比较 FP32、batch=1 的六条路线，不创建机器人环境或连接硬件：
+
+| 路线 | 后端 |
+| --- | --- |
+| A | PyTorch CPU，单线程基线 |
+| B | ONNX Runtime CPU，单线程 |
+| C | PyTorch CUDA |
+| D | ONNX Runtime CUDA，预分配 I/O Binding |
+| E | D + CUDA Graph |
+| F | 预计算 motion latent，PyTorch CPU decoder；仅 motion |
+
+使用当前 `g1_supermimic_cfg.py` 的 23DoF checkpoint 和动作路径。ONNX 路线需要额外的
+`onnx` 导出依赖；GPU 路线还需要与目标 JetPack/CUDA 配套、包含 CUDA provider 的 ONNX Runtime。
+工具不会安装依赖或修改功耗模式、时钟、生产 policy 和真机配置。
+缺少依赖或 CUDA 时记录 `skipped`，执行/数值验证异常记录 `failed`；禁止将 CPU 回退当成 GPU 成绩。
+
+在 Orin NX 的实际部署 Python 环境中先做短测：
+
+```bash
+python scripts/benchmark_supermimic.py --task all --iterations 20 --paced-iterations 10 \
+    --warmup 10 --paced-warmup 2 --repeats 1
+```
+
+完整比较：
+
+```bash
+python scripts/benchmark_supermimic.py --task all
+```
+
+仅比较 CPU 和缓存路线：
+
+```bash
+python scripts/benchmark_supermimic.py --task all --routes A B F
+```
+
+如需 CPU 绑定，在所有路线的父进程上使用同一 `taskset`；子进程继承该 affinity。
+根据 Orin NX 实际可用的 CPU 编号设置，不能直接假定笔记本的 CPU 编号在 Jetson 上可用。
+关闭视觉/VLA 及其他竞争任务，保持部署时的功耗模式；工具记录环境信息但不会提权切换设备设置。
+默认输出为 `benchmark_results/supermimic/<时间>/`，可用 `--output-dir` 指定一个不存在的新目录。
+
+输入从当前 23DoF NPZ 构造，覆盖每一参考帧、首帧历史初始化和尾帧截断；加入固定种子状态扰动，
+velocity 覆盖零指令、六个轴向指令和渐变组合指令。所有后端复用 CPU 基线生成的历史及上一动作，
+不将各自输出反馈到后续输入。这是参考轨迹上的离线数据，不代表实机状态分布或跟踪效果。
+每条路线、每次重复均在独立进程中运行，路线顺序按固定种子打乱。
+
+性能测量前，对全部输入检查归一化动作和最终 PD target 的误差，使用
+`atol=1e-4, rtol=1e-4`；观测重建路径也需通过相同验证，失败路线不参与性能推荐。
+三层计时分别为：
+
+- `network`：输入已在目标设备上，测网络执行；GPU 使用同一 CUDA stream 的 CUDA Event。
+- `interface`：CPU 输入已经打包，直到动作返回 CPU 并完成后处理，包含 GPU 传输和同步。
+- `strategy`：原始状态与参考帧准备好，直到 CPU PD target 可用，包含观测、历史和参考特征构造。
+
+历史回放状态恢复、输入文件读取、测试框架调度和 CSV 写入在计时外；策略层计时包含实际历史更新。
+F 的策略层使用 latent 查表，省去参考特征和 encoder 的实时计算。
+`network` 仅作诊断，主要以 `paced/strategy` 的 P99 作决策；20 ms 为周期上限，仍需预留通信时间。
+同时记录每次调度的 `start_lateness_ms`，区分计算耗时与系统调度延迟。
+
+默认每条路线预热 1,000 次，每层连续测 10,000 次；50 Hz 模式先稳定 250 次（5 秒），
+每层采集 3,000 次，重复三轮。三个计时层分别运行，完整测试仅 50 Hz 采样部分约需 99 分钟，
+另加正确性验证、预热、导出和连续运行时间。短测只检查工具能否运行，不用于性能推荐。
+GPU 使用 FP32 并禁用 TF32；E 的图捕获包含在单独的首次运行计时内。
+
+输出包含：
+
+- `environment.json`、`arguments.json`：软件、功耗/时钟查询、affinity 和命令参数。
+- 每个任务的 `tape.npz`、`inputs.json`：共用输入及 checkpoint、motion、输入文件 SHA256。
+- 每条路线每轮的 `timings.csv`、`result.json`、`worker.log`：原始耗时、P50/P95/P99/最大值、
+  超过 20 ms 比例、正确性、模型加载与首次运行耗时；F 另外报告缓存构建耗时和大小。
+- ONNX 路线的 `actor.onnx` 和 `placement.json`：导出模型和首次运行的 provider placement。
+- `telemetry.log`：若存在 `tegrastats` 则每秒采集；结果 JSON 另记录可读取的起止温度和 CPU 频率。
+- `summary.json`、`report.md`：汇总及候选路线。每轮 P99 均比对应 CPU 基线至少下降 10%，
+  且每轮 20 ms 超时比例不增加，才认定有明确收益；需要完整三轮数据。
+
+报告分别评估 motion 和 velocity。所有结果均为离线推理比较，不能代替闭环或真机部署验证。
