@@ -4,12 +4,28 @@
 `torch.load(..., weights_only=True)` 加载 checkpoint，重建推理网络并严格加载 state dict。
 运行时不需要 `supermimic_mjlab`、mjlab、世界模型、critic 或训练 replay。
 
+## 默认推理后端
+
+默认 `inference_backend="onnx_cpu"`，仿真和真机入口均生效：motion 使用 G 路线
+（缓存 latent + ONNX CPU decoder），velocity 使用 B 路线（完整 ONNX CPU actor）。
+启动时仍先严格检查 checkpoint，再在内存中导出 FP32 ONNX 并创建单线程 CPU session，
+不写入或修改 checkpoint；需要在同一 Python 环境安装 `onnx` 和 `onnxruntime`，已加入依赖清单。
+
+Motion 在动作加载时为每一帧计算一次 32 维 latent；实时步骤只构造历史、查表并执行 decoder。
+历史归一化保留在 ONNX 中，动作裁剪、逐关节缩放和 PD 默认姿态语义保持一致。
+重置、策略切换、循环播放均复用缓存；重新构造 policy 时按当前 checkpoint 和 motion 重新生成。
+29DoF 的实时 torso anchor 仍在本体观测中计算，不进入固定的 motion latent 缓存。
+
+可在 policy 配置中显式设置 `inference_backend="torch"` 做原始后端对照。
+Benchmark 会独立强制加载 Torch 原始模型，A/B/F/G 的定义不随生产默认后端变化。
+`torch_num_threads` 同时用于 ONNX CPU intra-op 线程设置；默认 1，inter-op 固定为 1。
+
 ## 输入与权重
 
 | 策略 | checkpoint | 实际推理输入 |
 | --- | --- | --- |
-| 29DoF motion tracking | `supermimic_actor`，或 `supermimic_online` 完整训练断点 | `10 × 99` 本体历史 + `2680` 参考特征 |
-| 23DoF motion tracking | `supermimic_actor`，或 `supermimic_online` 完整训练断点 | `10 × 75` 本体历史 + `2560` 参考特征 |
+| 29DoF motion tracking | `supermimic_actor`，或 `supermimic_online` 完整训练断点 | `10 × 99` 本体历史 + `32` 缓存 latent |
+| 23DoF motion tracking | `supermimic_actor`，或 `supermimic_online` 完整训练断点 | `10 × 75` 本体历史 + `32` 缓存 latent |
 | 29DoF velocity tracking | `supermimic_velocity_actor` 独立推理导出 | `10 × 93` 本体历史 + `(vx, vy, wz)` |
 | 23DoF velocity tracking | `supermimic_velocity_actor` 独立推理导出 | `10 × 75` 本体历史 + `(vx, vy, wz)` |
 
@@ -245,3 +261,37 @@ python scripts/benchmark_supermimic.py --task motion --routes G \
 `--task motion --routes B F G`。G 的 encoder 在缓存生成阶段执行，导出的 ONNX 仅保留
 历史归一化与 decoder，输入为 `(1, 10, 75)` 的历史和 `(1, 32)` 的 latent；
 缓存查表在策略层计时内，缓存构建和 ONNX 导出单独记录。
+
+用于记录本次优化的短测命令（排除 C：PyTorch CUDA，比较其余适用路线）：
+
+```bash
+python scripts/benchmark_supermimic.py --task all --routes A B D E F G \
+    --iterations 200 --paced-iterations 200 \
+    --warmup 100 --paced-warmup 50 --repeats 1
+```
+
+测试结果见输出目录中的 `report.md`；缺少 CUDA 时 D/E 明确记录为跳过。
+
+### Jetson Orin NX 实测：2026-10-29
+
+以下数据来自用户在 Jetson 端提供的
+`benchmark_results/supermimic/20261029-131628/report.md`，未在本机重新测量。
+FP32、batch=1、CPU 单线程；每层连续和 50 Hz 采样各 200 次，预热 100 次、
+50 Hz 稳定 50 次，重复 1 轮。使用上面的 `--routes A B D E F G` 短测命令。
+表中耗时为 `paced/strategy`，包括观测处理、推理及 CPU 动作后处理。
+
+| 任务 | 路线 | P50 (ms) | P99 (ms) | 超过 20 ms 的比例 |
+| --- | --- | ---: | ---: | ---: |
+| Motion | A：PyTorch CPU | 22.799 | 24.970 | 100% |
+| Motion | B：ONNX CPU | 8.300 | 10.203 | 0% |
+| Motion | F：latent 缓存 + PyTorch CPU decoder | 8.795 | 9.623 | 0% |
+| Motion | G：latent 缓存 + ONNX CPU decoder | **3.742** | **3.905** | **0%** |
+| Velocity | A：PyTorch CPU | 10.437 | 12.074 | 0% |
+| Velocity | B：ONNX CPU | **4.070** | **4.221** | **0%** |
+
+Motion G 相对 A 的 P50 加速约 **6.09 倍**；velocity B 相对 A 约 **2.56 倍**。
+六个 CPU 测试均通过数值检查。D/E 在两个任务中均因 `CUDA unavailable` 跳过，
+本轮没有 GPU 性能数据，C 未请求执行。
+
+这些结果支持选择 motion G、velocity B 作为默认 CPU 推理方案。
+这是单轮离线推理比较；三轮自动推荐规则未满足，不能据此推断长期尾部延迟、闭环跟踪或真机安全性。

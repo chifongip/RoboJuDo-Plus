@@ -1,6 +1,7 @@
 torch
 scipy
 onnxruntime
+onnx
 joblib
 pyyaml
 easydict

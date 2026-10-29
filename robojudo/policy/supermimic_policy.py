@@ -1,5 +1,6 @@
 """Direct checkpoint deployment of SuperMimic motion and velocity actors."""
 
+import io
 import logging
 from collections import deque
 from itertools import pairwise
@@ -89,6 +90,60 @@ class SuperMimicActor(nn.Module):
             else self.encoder(self.goal_norm(command_or_goal)).tanh()
         )
         return self.decoder(torch.cat((latent, normalized.flatten(-2)), -1))
+
+
+class SuperMimicCachedDecoder(nn.Module):
+    """Decode live history using a motion latent computed at startup."""
+
+    def __init__(self, actor):
+        super().__init__()
+        self.actor = actor
+
+    def forward(self, history, latent):
+        normalized = (
+            self.actor.obs_norm(history) if self.actor.input_normalization else history / self.actor.observation_scale
+        )
+        return self.actor.decoder(torch.cat((latent, normalized.flatten(-2)), -1))
+
+
+def onnx_cpu_session(model, observation_dim, condition_dim, threads):
+    """Export FP32 in memory; startup fails explicitly if dependencies are missing."""
+    try:
+        import onnx  # noqa: F401
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise RuntimeError(
+            "SuperMimic ONNX CPU inference requires onnx and onnxruntime; install both in this environment"
+        ) from exc
+    with io.BytesIO() as stream:
+        torch.onnx.export(
+            model.cpu().eval(),
+            (torch.zeros(1, 10, observation_dim), torch.zeros(1, condition_dim)),
+            stream,
+            input_names=["history", "condition"],
+            output_names=["action"],
+            opset_version=17,
+            dynamo=False,
+        )
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = threads
+        options.inter_op_num_threads = 1
+        options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        session = ort.InferenceSession(stream.getvalue(), sess_options=options, providers=["CPUExecutionProvider"])
+    session.disable_fallback()
+    if session.get_providers() != ["CPUExecutionProvider"]:
+        raise RuntimeError("SuperMimic inference requires CPUExecutionProvider only")
+    warmup = session.run(
+        ["action"],
+        {
+            "history": np.zeros((1, 10, observation_dim), dtype=np.float32),
+            "condition": np.zeros((1, condition_dim), dtype=np.float32),
+        },
+    )[0]
+    if not np.isfinite(warmup).all():
+        raise ValueError("SuperMimic ONNX warmup returned a non-finite action")
+    return session
 
 
 def quat_conjugate(q):
@@ -252,6 +307,10 @@ class SuperMimicPolicyBase(Policy):
     velocity = False
 
     def __init__(self, cfg_policy: G1SuperMimicPolicyCfg, device="cpu"):
+        self.ort_session = None
+        self.inference_backend = cfg_policy.inference_backend
+        if self.inference_backend == "onnx_cpu":
+            device = "cpu"
         if not cfg_policy.checkpoint.is_file():
             raise FileNotFoundError(f"SuperMimic checkpoint not found: {cfg_policy.checkpoint}; set policy.checkpoint")
         saved = torch.load(cfg_policy.checkpoint, map_location="cpu", weights_only=True, mmap=True)
@@ -332,6 +391,8 @@ class SuperMimicPolicyBase(Policy):
         self.input_size = 10 * self.observation_dim + self.condition_dim
         self.saved = saved
         self.reset()
+        if self.velocity and self.inference_backend == "onnx_cpu":
+            self.ort_session = onnx_cpu_session(self.model, self.observation_dim, 3, cfg_policy.torch_num_threads)
         logger.info(
             "Loaded %s from %s (iteration %s)",
             type(self).__name__,
@@ -369,12 +430,17 @@ class SuperMimicPolicyBase(Policy):
 
     def get_action(self, obs):
         values = _vector(obs, self.input_size, "policy input")
-        history = torch.from_numpy(values[: 10 * self.observation_dim].reshape(1, 10, self.observation_dim)).to(
-            self.device
-        )
-        condition = torch.from_numpy(values[10 * self.observation_dim :][None]).to(self.device)
-        with torch.inference_mode():
-            actions = self.model(history, condition).cpu().numpy()[0]
+        history = values[: 10 * self.observation_dim].reshape(1, 10, self.observation_dim)
+        condition = values[10 * self.observation_dim :][None]
+        if self.ort_session is not None:
+            actions = self.ort_session.run(["action"], {"history": history, "condition": condition})[0][0]
+        else:
+            with torch.inference_mode():
+                actions = (
+                    self.model(torch.from_numpy(history).to(self.device), torch.from_numpy(condition).to(self.device))
+                    .cpu()
+                    .numpy()[0]
+                )
         actions = _vector(actions, self.num_actions, "policy action")
         if self.action_clip is not None:
             actions = np.clip(actions, -self.action_clip, self.action_clip)
@@ -435,6 +501,27 @@ class SuperMimicMotionPolicy(SuperMimicPolicyBase):
     def __init__(self, cfg_policy, device="cpu"):
         super().__init__(cfg_policy, device)
         self.motion = SuperMimicMotion(cfg_policy.motion_file, self.cfg_obs_dof.joint_names)
+        self.latent_cache = None
+        if self.inference_backend == "onnx_cpu":
+            logger.info("Preparing ONNX CPU motion decoder and %s cached latents", self.motion.length)
+            with torch.inference_mode():
+                latents = []
+                for frame in range(self.motion.length):
+                    goal = reference_features(self.motion.future(frame), self.model.default_q, self.model.reference_dim)
+                    latents.append(self.model.encoder(self.model.goal_norm(goal[None])).tanh()[0].numpy().copy())
+                self.latent_cache = np.stack(latents)
+            if not np.isfinite(self.latent_cache).all():
+                raise ValueError("Non-finite SuperMimic cached motion latent")
+            self.condition_dim = 32
+            self.input_size = 10 * self.observation_dim + 32
+            self.ort_session = onnx_cpu_session(
+                SuperMimicCachedDecoder(self.model), self.observation_dim, 32, cfg_policy.torch_num_threads
+            )
+            logger.info(
+                "Cached %s motion latents (%s bytes); using ONNX CPU decoder",
+                len(self.latent_cache),
+                self.latent_cache.nbytes,
+            )
 
     def reset(self):
         super().reset()
@@ -466,18 +553,23 @@ class SuperMimicMotionPolicy(SuperMimicPolicyBase):
             if self.cfg_policy.loop_motion
             else min(self.timestep, self.motion.length - 1)
         )
-        reference = self.motion.future(frame)
         anchor = None
         if self.cfg_policy.motion_anchor_ori_b:
             robot = torch.from_numpy(_vector(env_data.torso_quat, 4, "torso_quat")[[3, 0, 1, 2]])
             if not torch.isclose(robot.norm(), torch.tensor(1.0), atol=1e-4):
                 raise ValueError("SuperMimic torso_quat must be a unit quaternion")
-            target = reference["body_quat_w"][0, self.motion.body_names.index("torso_link")]
+            target = self.motion.data["body_quat_w"][frame, self.motion.body_names.index("torso_link")]
             if self.heading_offset is None:
                 self.heading_offset = quat_mul(yaw_quat(robot), quat_conjugate(yaw_quat(target)))
             aligned = quat_mul(self.heading_offset, target)
             anchor = orientation_columns(quat_mul(quat_conjugate(robot), aligned), interleaved=True).numpy()
-        goal = reference_features(reference, self.model.default_q.detach().cpu(), self.model.reference_dim).numpy()
+        goal = (
+            self.latent_cache[frame]
+            if self.latent_cache is not None
+            else reference_features(
+                self.motion.future(frame), self.model.default_q.detach().cpu(), self.model.reference_dim
+            ).numpy()
+        )
         done = not self.cfg_policy.loop_motion and self.timestep >= self.motion.length
         return self._pack(self._proprioception(env_data, anchor), goal), {
             "motion_name": self.motion.name,

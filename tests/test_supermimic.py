@@ -1,3 +1,4 @@
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,7 +49,9 @@ class TestSuperMimic(unittest.TestCase):
             cfg_class = G1_23SuperMimicVelocityPolicyCfg if num_joints == 23 else G1SuperMimicVelocityPolicyCfg
         else:
             cfg_class = G1_23SuperMimicMotionPolicyCfg if num_joints == 23 else G1SuperMimicMotionPolicyCfg
-        options = {} if velocity else {"motion_file": self.root / "walk.npz"}
+        options = {"inference_backend": "torch"}
+        if not velocity:
+            options["motion_file"] = self.root / "walk.npz"
         cfg = cfg_class(checkpoint=self.root / ("velocity.pt" if velocity else "motion.pt"), **options)
         names = cfg.obs_dof.joint_names
         order = list(reversed(range(num_joints))) if reverse else list(range(num_joints))
@@ -129,6 +132,7 @@ class TestSuperMimic(unittest.TestCase):
             cfg = cfg_registry.get(cls.__name__)()
             self.assertIs(env_registry.get(cfg.env.env_type), MujocoEnv)
             self.assertEqual(cfg.env.dof.num_dofs, cfg.policy.action_dof.num_dofs)
+            self.assertEqual(cfg.policy.inference_backend, "onnx_cpu")
             self.assertAlmostEqual(cfg.env.sim_dt * cfg.env.sim_decimation, 1 / cfg.policy.freq)
             self.assertIsNotNone(policy_registry.get(cfg.policy.policy_type))
         self.assertEqual(g1_supermimic_motion().policy.reference_dim, 2680)
@@ -500,6 +504,74 @@ class TestSuperMimic(unittest.TestCase):
         matrix = Rotation.from_quat(quat.numpy()[[1, 2, 3, 0]]).as_matrix()
         np.testing.assert_allclose(orientation_columns(quat, interleaved=True), matrix[:, :2].flatten(), atol=1e-6)
         np.testing.assert_allclose(orientation_columns(quat), matrix[:, :2].T.flatten(), atol=1e-6)
+
+
+@unittest.skipUnless(
+    importlib.util.find_spec("onnx") and importlib.util.find_spec("onnxruntime"),
+    "ONNX production inference requires optional test dependencies",
+)
+class TestSuperMimicOnnx(unittest.TestCase):
+    def setUp(self):
+        self.fixture = TestSuperMimic()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_motion_cached_onnx_matches_torch_for_23_and_29_dof(self):
+        for joints in (23, 29):
+            with self.subTest(joints=joints):
+                cfg, _ = self.fixture.make_checkpoint(num_joints=joints, reverse=True)
+                original = SuperMimicMotionPolicy(cfg)
+                optimized = SuperMimicMotionPolicy(cfg.model_copy(update={"inference_backend": "onnx_cpu"}))
+                self.assertEqual(optimized.input_size, 10 * optimized.observation_dim + 32)
+                self.assertEqual(optimized.latent_cache.shape, (original.motion.length, 32))
+                cache, session = optimized.latent_cache, optimized.ort_session
+                self.assertEqual(session.get_providers(), ["CPUExecutionProvider"])
+                for loop in (False, True):
+                    original.cfg_policy.loop_motion = optimized.cfg_policy.loop_motion = loop
+                    original.reset()
+                    optimized.reset()
+                    for frame in (0, 1, original.motion.length - 1, original.motion.length, original.motion.length + 1):
+                        original.timestep = optimized.timestep = frame
+                        data = self.fixture.env_data(original, yaw=0.7)
+                        obs, extras = original.get_observation(data, {})
+                        fast_obs, fast_extras = optimized.get_observation(data, {})
+                        self.assertEqual(extras, fast_extras)
+                        np.testing.assert_allclose(
+                            fast_obs[: 10 * optimized.observation_dim],
+                            obs[: 10 * original.observation_dim],
+                            atol=1e-4,
+                            rtol=1e-4,
+                        )
+                        np.testing.assert_allclose(
+                            optimized.get_action(fast_obs), original.get_action(obs), atol=1e-4, rtol=1e-4
+                        )
+                optimized.reset_alignment()
+                optimized.post_step_callback(["[MOTION_RESET]"])
+                self.assertIs(optimized.latent_cache, cache)
+                self.assertIs(optimized.ort_session, session)
+                self.assertEqual(optimized.timestep, 0)
+                self.assertEqual(len(optimized.history), 0)
+
+    def test_velocity_onnx_preserves_commands_history_and_clipped_action(self):
+        for joints in (23, 29):
+            with self.subTest(joints=joints):
+                cfg, _ = self.fixture.make_checkpoint(num_joints=joints, velocity=True, reverse=True)
+                cfg.action_clip = 0.1
+                original = SuperMimicVelocityPolicy(cfg)
+                optimized = SuperMimicVelocityPolicy(cfg.model_copy(update={"inference_backend": "onnx_cpu"}))
+                for keys in ([], ["w", "a", "q"], ["s", "d", "e"], []):
+                    data = self.fixture.env_data(original)
+                    ctrl = {"KeyboardCtrl": {"pressed_keys": keys}}
+                    obs, _ = original.get_observation(data, ctrl)
+                    fast_obs, _ = optimized.get_observation(data, ctrl)
+                    np.testing.assert_allclose(obs, fast_obs, atol=1e-4, rtol=1e-4)
+                    np.testing.assert_allclose(
+                        original.get_action(obs), optimized.get_action(fast_obs), atol=1e-4, rtol=1e-4
+                    )
+                    np.testing.assert_allclose(original.last_action, optimized.last_action, atol=1e-4, rtol=1e-4)
+                optimized.reset()
+                self.assertEqual(len(optimized.history), 0)
+                np.testing.assert_array_equal(optimized.last_action, 0)
 
 
 if __name__ == "__main__":

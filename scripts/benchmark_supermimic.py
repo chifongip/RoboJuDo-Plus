@@ -22,13 +22,13 @@ import numpy as np
 import torch
 from robojudo.config import cfg_registry
 from robojudo.policy.supermimic_policy import (
+    SuperMimicCachedDecoder,
     SuperMimicMotion,
     SuperMimicMotionPolicy,
     SuperMimicVelocityPolicy,
     quat_apply,
     quat_conjugate,
 )
-from torch import nn
 
 ROUTES = ("A", "B", "C", "D", "E", "F", "G")
 LABELS = dict(
@@ -93,7 +93,9 @@ def config(task):
 
 
 def load_policy(task):
-    return (SuperMimicMotionPolicy if task == "motion" else SuperMimicVelocityPolicy)(config(task))
+    # Keep all benchmark routes independent of the production default backend.
+    cfg = config(task).model_copy(update={"inference_backend": "torch"})
+    return (SuperMimicMotionPolicy if task == "motion" else SuperMimicVelocityPolicy)(cfg)
 
 
 def controls(command):
@@ -184,16 +186,7 @@ def make_tape(task, directory, seed):
     )
 
 
-class CachedDecoder(nn.Module):
-    def __init__(self, actor):
-        super().__init__()
-        self.actor = actor
-
-    def forward(self, history, latent):
-        normalized = (
-            self.actor.obs_norm(history) if self.actor.input_normalization else history / self.actor.observation_scale
-        )
-        return self.actor.decoder(torch.cat((latent, normalized.flatten(-2)), -1))
+CachedDecoder = SuperMimicCachedDecoder
 
 
 def error_metrics(actual, expected):
@@ -481,6 +474,7 @@ def worker(args):
 
 
 def report(directory, results):
+    ordered = sorted(results, key=lambda r: (r["task"], r["route"], r["repeat"]))
     lines = [
         "# SuperMimic inference comparison",
         "",
@@ -490,7 +484,7 @@ def report(directory, results):
         "|---|---|---|---|---|---|",
     ]
     failures = []
-    for r in results:
+    for r in ordered:
         m = r.get("measurements", {}).get("paced/strategy", {})
         latency = f"{m['p50_ms']:.3f}/{m['p99_ms']:.3f}" if m else "—"
         lines.append(

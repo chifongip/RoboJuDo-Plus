@@ -38,7 +38,10 @@ class TestSuperMimicBenchmark(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         motion_cfg, _ = fixture.make_checkpoint(num_joints=23)
         velocity_cfg, _ = fixture.make_checkpoint(num_joints=23, velocity=True)
-        configs = {"motion": motion_cfg, "velocity": velocity_cfg}
+        configs = {
+            "motion": motion_cfg.model_copy(update={"inference_backend": "onnx_cpu"}),
+            "velocity": velocity_cfg.model_copy(update={"inference_backend": "onnx_cpu"}),
+        }
         with tempfile.TemporaryDirectory() as root, patch.object(bench, "config", side_effect=configs.__getitem__):
             root = Path(root)
             for task in configs:
@@ -53,7 +56,9 @@ class TestSuperMimicBenchmark(unittest.TestCase):
                 inputs = json.loads((directory / "inputs.json").read_text())
                 self.assertEqual(inputs["tape_sha256"], bench.digest(directory / "tape.npz"))
                 for route in ("A", "F") if task == "motion" else ("A",):
-                    backend = bench.Backend(route, bench.load_policy(task), directory, tape)
+                    policy = bench.load_policy(task)
+                    self.assertEqual(policy.inference_backend, "torch")
+                    backend = bench.Backend(route, policy, directory, tape)
                     for i in range(len(tape["input"])):
                         env = backend.strategy_input(tape, i)
                         action = backend.run(backend.observe(env, tape, i))
@@ -77,7 +82,10 @@ class TestSuperMimicBenchmark(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         motion_cfg, _ = fixture.make_checkpoint(num_joints=23)
         velocity_cfg, _ = fixture.make_checkpoint(num_joints=23, velocity=True)
-        configs = {"motion": motion_cfg, "velocity": velocity_cfg}
+        configs = {
+            "motion": motion_cfg.model_copy(update={"inference_backend": "onnx_cpu"}),
+            "velocity": velocity_cfg.model_copy(update={"inference_backend": "onnx_cpu"}),
+        }
         with tempfile.TemporaryDirectory() as root, patch.object(bench, "config", side_effect=configs.__getitem__):
             directory = Path(root)
             bench.make_tape("motion", directory, seed=7)
@@ -105,7 +113,14 @@ class TestSuperMimicBenchmark(unittest.TestCase):
                 "repeat": repeat,
                 "label": bench.LABELS[route],
                 "status": "passed",
-                "measurements": {"paced/strategy": {"p50_ms": p99 / 2, "p99_ms": p99, "over_20ms_fraction": missed}},
+                "measurements": {
+                    "paced/strategy": {
+                        "p50_ms": p99 / 2,
+                        "p95_ms": p99 * 0.9,
+                        "p99_ms": p99,
+                        "over_20ms_fraction": missed,
+                    }
+                },
             }
 
         results = [result(route, i, latency) for i in range(3) for route, latency in (("A", 10), ("F", 8))]

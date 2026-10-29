@@ -99,6 +99,7 @@ class G1SuperMimicPolicyCfg(PolicyCfg):
     checkpoint: Path
     action_scales: list[float] = [0.25 * m[2] / m[0] for m in _MOTORS]
     torch_num_threads: int = Field(default=1, ge=1)
+    inference_backend: Literal["torch", "onnx_cpu"] = "onnx_cpu"
 
     @property
     def policy_file(self) -> str:
