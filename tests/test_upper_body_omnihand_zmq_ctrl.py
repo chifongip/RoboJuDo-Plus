@@ -1,3 +1,4 @@
+import copy
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -123,6 +124,55 @@ class TestUpperBodyOmniHandZmqCtrl(unittest.TestCase):
             self.assertTrue(controller.get_data()["fresh"])
             self.assertTrue(controller.get_data()["fresh"])
         self.assertEqual(len(controller._hand_runtime.queued), 1)
+
+    def test_invalid_frames_preserve_the_last_accepted_frame(self):
+        invalid_frames = []
+        for key, value in (
+            ("schema_version", 2),
+            ("type", "joint_positions"),
+            ("mode", "sim2sim"),
+            ("hand_type", "casia"),
+            ("frame_id", True),
+            ("frame_id", -1),
+            ("timestamp_ns", False),
+            ("timestamp_ns", 0),
+        ):
+            frame = self.synchronized_frame(8)
+            frame[key] = value
+            invalid_frames.append((key, frame))
+        for side in ("arm", "left_hand", "right_hand"):
+            for value in (True, "0.1", float("nan"), float("inf"), 10**400):
+                frame = self.synchronized_frame(8)
+                frame[side]["qpos"][0] = value
+                invalid_frames.append((f"{side} value {str(value)[:20]}", frame))
+            for key, value in (("valid", False), ("joint_names", []), ("qpos", [])):
+                frame = self.synchronized_frame(8)
+                frame[side][key] = value
+                invalid_frames.append((f"{side} {key}", frame))
+
+        for label, invalid in invalid_frames:
+            with self.subTest(label=label):
+                controller = self.make_controller([self.synchronized_frame(), copy.deepcopy(invalid)])
+                with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.0):
+                    accepted = controller.get_data()
+                with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.1):
+                    rejected = controller.get_data()
+                self.assertEqual(rejected["frame_id"], 7)
+                self.assertEqual(rejected["joint_positions"], accepted["joint_positions"])
+                self.assertEqual(controller._last_received_at, 10.0)
+                self.assertEqual(len(controller._hand_runtime.queued), 1)
+
+    def test_timeout_and_publisher_restart(self):
+        controller = self.make_controller([self.synchronized_frame(7)])
+        with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.0):
+            self.assertTrue(controller.get_data()["fresh"])
+        with patch("robojudo.controller.upper_body_hand_zmq_ctrl.time.monotonic", return_value=10.3):
+            data = controller.get_data()
+            self.assertFalse(data["fresh"])
+            self.assertFalse(data["omnihand"]["fresh"])
+            controller._socket.messages.append(self.synchronized_frame(0))
+            self.assertEqual(controller.get_data()["frame_id"], 0)
+        self.assertEqual(len(controller._hand_runtime.queued), 2)
 
 
 if __name__ == "__main__":

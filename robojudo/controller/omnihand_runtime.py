@@ -73,6 +73,8 @@ class OmniHandCommandFrame:
     right_command: np.ndarray
     source_timestamp_ns: int
     frame_id: int | None
+    enqueued_at: float
+    takeover_generation: int
 
 
 def omnihand_joint_names(side: str) -> tuple[str, ...]:
@@ -113,6 +115,7 @@ class OmniHandRuntime:
         self._thread: threading.Thread | None = None
         self._error: Exception | None = None
         self._enabled = False
+        self._takeover_generation = 0
         self._last_command_at: dict[str, float | None] = {"left": None, "right": None}
         self._last_joint_state_at: dict[str, float | None] = {"left": None, "right": None}
         self._applied_commands = {
@@ -166,9 +169,7 @@ class OmniHandRuntime:
             # ZLGCAN may expose multiple CAN-FD channels on one adapter, therefore
             # its channel IDs remain independently configurable.
             adapter_index = cfg.left_adapter_index if side == "left" else cfg.right_adapter_index
-            configured_channel = (
-                cfg.zlgcan_left_channel_id if side == "left" else cfg.zlgcan_right_channel_id
-            )
+            configured_channel = cfg.zlgcan_left_channel_id if side == "left" else cfg.zlgcan_right_channel_id
             channel_id = (0 if side == "left" else 1) if configured_channel is None else configured_channel
             hand = OmniHandPro2025.create_hand_by_zlgcan(
                 hand_type=hand_type,
@@ -193,17 +194,22 @@ class OmniHandRuntime:
         return hand
 
     def set_takeover_enabled(self, enabled: bool):
-        """Open or close the hardware command gate and invalidate old pending commands."""
+        """Invalidate pending frames without waiting for an in-progress SDK call.
+
+        A call already admitted to the SDK may finish after disabling. Remaining
+        writes and frame publication must still belong to the current takeover.
+        """
 
         enabled = bool(enabled)
         with self._lock:
             if enabled == self._enabled:
                 return
             self._enabled = enabled
+            self._takeover_generation += 1
             self._last_command_at = {"left": None, "right": None}
             self._applied_source_timestamp_ns = None
             self._applied_frame_id = None
-        self._discard_pending_commands()
+            self._discard_pending_commands()
         logger.warning("OmniHand control %s", "enabled" if enabled else "disabled")
 
     def set_joint_commands(
@@ -225,21 +231,21 @@ class OmniHandRuntime:
         left_command = np.clip(left_command, OMNIHAND_LEFT_LIMITS[:, 0], OMNIHAND_LEFT_LIMITS[:, 1])
         right_command = np.clip(right_command, OMNIHAND_RIGHT_LIMITS[:, 0], OMNIHAND_RIGHT_LIMITS[:, 1])
         timestamp_ns = time.time_ns() if source_timestamp_ns is None else int(source_timestamp_ns)
-        command_frame = OmniHandCommandFrame(
-            left_command=left_command.copy(),
-            right_command=right_command.copy(),
-            source_timestamp_ns=timestamp_ns,
-            frame_id=None if frame_id is None else int(frame_id),
-        )
-        try:
-            self._command_queue.put_nowait(command_frame)
-        except queue.Full:
-            # Never wait for the worker: replace the unsent command with this newer frame.
+        with self._lock:
+            command_frame = OmniHandCommandFrame(
+                left_command=left_command.copy(),
+                right_command=right_command.copy(),
+                source_timestamp_ns=timestamp_ns,
+                frame_id=None if frame_id is None else int(frame_id),
+                enqueued_at=time.monotonic(),
+                takeover_generation=self._takeover_generation,
+            )
             try:
-                self._command_queue.get_nowait()
-            except queue.Empty:  # pragma: no cover - another producer cannot remove entries
-                pass
-            self._command_queue.put_nowait(command_frame)
+                self._command_queue.put_nowait(command_frame)
+            except queue.Full:
+                # Replace the unsent frame without waiting for hardware I/O.
+                self._discard_pending_commands()
+                self._command_queue.put_nowait(command_frame)
         return np.concatenate((left_command, right_command)).astype(np.float32)
 
     def _discard_pending_commands(self):
@@ -256,16 +262,31 @@ class OmniHandRuntime:
             raise RuntimeError(f"OmniHand {side} joint positions must contain 12 finite angles")
         return result
 
-    def _send_joint_command(self, hands: dict[str, object], side: str, joint_command: np.ndarray, now: float):
+    def _command_is_current(self, frame: OmniHandCommandFrame) -> bool:
+        """Check the gate and local command lease while holding ``_lock``."""
+        return (
+            self._enabled
+            and frame.takeover_generation == self._takeover_generation
+            and 0 <= time.monotonic() - frame.enqueued_at <= self.cfg.command_timeout_s
+        )
+
+    def _send_joint_command(self, hands: dict[str, object], side: str, frame: OmniHandCommandFrame) -> bool:
+        joint_command = frame.left_command if side == "left" else frame.right_command
         limits = omnihand_limits(side)
         clipped = np.clip(joint_command, limits[:, 0], limits[:, 1])
         if not np.array_equal(clipped, joint_command):
             logger.warning("Clipped %s OmniHand command to SDK limits", side)
-        # This method is called only by _run; vendor objects never cross threads.
+        with self._lock:
+            if not self._command_is_current(frame):
+                return False
+        # Never hold the state lock across SDK I/O: disabling must remain nonblocking.
         hands[side].set_all_active_joint_angles(clipped.tolist())
         with self._lock:
+            if not self._command_is_current(frame):
+                return False
             self._applied_commands[side] = clipped.astype(np.float32)
-            self._last_command_at[side] = now
+            self._last_command_at[side] = frame.enqueued_at
+        return True
 
     def _update_measured_joint_positions(self, hands: dict[str, object], now: float):
         # Read both hands before publishing either result so returned data never contains
@@ -297,17 +318,15 @@ class OmniHandRuntime:
                 except queue.Empty:
                     pass
                 else:
-                    with self._lock:
-                        enabled = self._enabled
-                    if enabled:
-                        now = time.monotonic()
-                        # Both commands come from one command frame. Apply them back to
-                        # back and publish the source metadata only after both succeed.
-                        self._send_joint_command(hands, "left", command_frame.left_command, now)
-                        self._send_joint_command(hands, "right", command_frame.right_command, now)
+                    # A gate transition or an expired lease cancels the remaining
+                    # writes even when the worker has already dequeued this frame.
+                    if self._send_joint_command(hands, "left", command_frame) and self._send_joint_command(
+                        hands, "right", command_frame
+                    ):
                         with self._lock:
-                            self._applied_source_timestamp_ns = command_frame.source_timestamp_ns
-                            self._applied_frame_id = command_frame.frame_id
+                            if self._command_is_current(command_frame):
+                                self._applied_source_timestamp_ns = command_frame.source_timestamp_ns
+                                self._applied_frame_id = command_frame.frame_id
 
                 now = time.monotonic()
                 if now >= next_joint_state_at:

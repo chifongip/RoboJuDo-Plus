@@ -99,7 +99,10 @@ class UpperBodyHandZmqCtrlBase(Controller):
             raise ValueError(f"{label} qpos must contain exactly {len(expected_names)} values")
         if any(isinstance(value, bool) or not isinstance(value, Real) for value in joint_positions):
             raise ValueError(f"{label} qpos values must be numeric")
-        values = np.asarray(joint_positions, dtype=np.float64)
+        try:
+            values = np.asarray(joint_positions, dtype=np.float64)
+        except OverflowError as exc:
+            raise ValueError(f"{label} qpos values must fit float64") from exc
         if not np.isfinite(values).all():
             raise ValueError(f"{label} qpos values must be finite")
         return values
@@ -173,9 +176,7 @@ class UpperBodyHandZmqCtrlBase(Controller):
                 and self._latest_sync_frame_id is not None
                 and synchronized_frame_id <= self._latest_sync_frame_id
             ):
-                raise ValueError(
-                    f"frame_id {synchronized_frame_id} is not newer than {self._latest_sync_frame_id}"
-                )
+                raise ValueError(f"frame_id {synchronized_frame_id} is not newer than {self._latest_sync_frame_id}")
             combined_hand_joint_commands = self._hand_runtime.set_joint_commands(
                 left_hand_joint_commands,
                 right_hand_joint_commands,
