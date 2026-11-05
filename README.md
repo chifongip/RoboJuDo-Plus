@@ -124,6 +124,9 @@ python submodule_install.py ros2_joy_cpp
 # XR/dexterous-hand teleoperation support.
 python submodule_install.py dex_teleop
 
+# XRoboToolkit X2 sample and XR SDK (optional; Python 3.11+ on Linux).
+python submodule_install.py xrobotoolkit_teleop
+
 # OmniHand Python SDK; selects the active CPython ABI and x86_64/aarch64 wheel.
 python submodule_install.py omnihand_sdk
 
@@ -133,6 +136,12 @@ python submodule_install.py casiahand_sdk
 # PHC motion controller support.
 python submodule_install.py phc
 ```
+
+XRoboToolkit installs its `x2` extra into the invoking Python 3.11+ environment on Linux x86_64/aarch64. It includes
+the X2 simulation dependencies and XR SDK, without other robot SDKs, Torch, or camera/hand-retargeting packages.
+It currently provides the upstream fixed-base X2 sample; RoboJuDo pipeline integration is not yet implemented.
+See the [XRoboToolkit setup guide](docs/xrobotoolkit_teleop.md) for isolated Conda installation, verification,
+and sample launch commands. A fresh environment is recommended but not required; the installer never creates one.
 
 The optional installers may require an active Conda environment and external SDKs. See:
 
@@ -577,6 +586,15 @@ External projects used by RoboJuDo-Plus:
 - [ros2_joy_cpp](https://github.com/chifongip/ros2_joy_cpp)
 - [ZED Proxy](https://github.com/HansZ8/ZED-Proxy)
 - [DEX Teleop](https://github.com/wrfbreeze/dex_teleop)
+- [XRoboToolkit teleoperation sample](https://github.com/XR-Robotics/XRoboToolkit-Teleop-Sample-Python) and the
+  [X2-enabled fork](https://github.com/chifongip/XRoboToolkit-Teleop-Sample-Python) — optional X2 fixed-base teleoperation
+  sample with an `x2` installation extra; see the [setup guide](docs/xrobotoolkit_teleop.md).
+- [XRoboToolkit PC Service](https://github.com/XR-Robotics/XRoboToolkit-PC-Service) and
+  [Python SDK binding](https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind) — XR tracking input for the sample.
+- [MuJoCo](https://github.com/google-deepmind/mujoco) and [Placo](https://github.com/rhoban/placo) — simulation and
+  inverse kinematics used by the XRoboToolkit X2 sample.
+- [AGILINK OmniHand SDK](https://github.com/AgibotTech/agillink_omnihand_sdk) — optional physical OmniHand control.
+- [CASIA Hand-M SDK](https://github.com/Breezewrf/casiahand_sdk) — optional physical CASIA hand control.
 - [MuJoCo Python Viewer](https://github.com/rohanpsingh/mujoco-python-viewer)
 - [PHC](https://github.com/ZhengyiLuo/PHC)
 - [ProtoMotions](https://github.com/NVlabs/ProtoMotions)
@@ -587,8 +605,16 @@ Bundled packages and third-party components:
 - [`packages/ros2_joy_cpp`](packages/ros2_joy_cpp) — native ROS 2 Joy subscriber package.
 - [`packages/unitree_cpp`](packages/unitree_cpp) — Unitree G1 native binding; see its [package README](packages/unitree_cpp/README.md).
 - [`packages/zed_proxy`](packages/zed_proxy) — optional ZED camera odometry submodule.
+- [`packages/robojudo_recorder`](packages/robojudo_recorder) — recording service for LeRobot v3 datasets; see its
+  [README](packages/robojudo_recorder/README.md).
 - [`third_party/aimdk`](third_party/aimdk) — pinned AimDK SDK used by X2 deployment.
 - [`third_party/dex_teleop`](third_party/dex_teleop) — optional XR arm and dexterous-hand teleoperation module; see its [README](third_party/dex_teleop/README.md).
+- [`third_party/xrobotoolkit_teleop`](third_party/xrobotoolkit_teleop) — pinned XRoboToolkit X2 sample with minimal
+  installation support; RoboJuDo pipeline integration is not yet implemented.
+- [`third_party/omnihand_sdk`](third_party/omnihand_sdk) — optional OmniHand SDK; see its
+  [README](third_party/omnihand_sdk/README.md).
+- [`third_party/casiahand_sdk`](third_party/casiahand_sdk) — optional CASIA Hand-M SDK; see its
+  [README](third_party/casiahand_sdk/README.md).
 - [`third_party/mujoco_viewer`](third_party/mujoco_viewer) — optional MuJoCo visualization module; see its [README](third_party/mujoco_viewer/README.md).
 - [`third_party/phc`](third_party/phc) — optional PHC motion controller submodule.
 - [`third_party/patches`](third_party/patches) — RoboJuDo patches and robot-specific add-ons for optional dependencies.
