@@ -192,8 +192,9 @@ AND upper-body control available
 ```
 
 When the stream becomes stale, `vx`, `vy`, and yaw rate immediately become zero while height holds its last valid
-value. Arm targets return toward their configured defaults through the pipeline's explicit joint-velocity limiter.
-The default limit is 4 rad/s, or 0.08 rad per 50 Hz control step.
+value. The entire arm group holds its last emitted targets until a fresh complete frame arrives or takeover is
+explicitly disabled. Live targets, reconnection and explicit return to defaults use the pipeline's joint-velocity
+limiter. The default limit is 4 rad/s, or 0.08 rad per 50 Hz control step.
 
 Actively disabling upper-body takeover restores the standard Locomanipulation joystick velocity/height controls and
 rate-limits the arms back to their defaults. On CASIA-equipped G1 configurations, the same disable edge also commands

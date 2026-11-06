@@ -20,6 +20,8 @@ class UpperBodyZmqPipelineMixin:
         self._upper_body_enabled = False
         self._upper_body_stream_was_fresh = False
         self._upper_body_generation = None
+        self._upper_body_pending = None
+        self._upper_body_command_submitted = False
         self._upper_body_indices = np.asarray([], dtype=np.int32)
         self._upper_body_default = np.asarray([], dtype=np.float32)
         self._upper_body_filtered = np.asarray([], dtype=np.float32)
@@ -42,6 +44,8 @@ class UpperBodyZmqPipelineMixin:
         self._recording_paused = False
         self._upper_body_enabled = False
         self._upper_body_stream_was_fresh = False
+        self._upper_body_pending = None
+        self._upper_body_command_submitted = False
         super().reset()
         if self._upper_body_indices.size:
             self._upper_body_filtered = self.env.dof_pos[self._upper_body_indices].astype(np.float32)
@@ -88,6 +92,7 @@ class UpperBodyZmqPipelineMixin:
             return
         self._upper_body_enabled = enabled
         self._upper_body_stream_was_fresh = False
+        self._upper_body_pending = None
         manager = getattr(self, "ctrl_manager", None)
         entry = getattr(manager, "controllers", {}).get("UpperBodyZmqCtrl")
         if entry is not None:
@@ -112,6 +117,9 @@ class UpperBodyZmqPipelineMixin:
     def _apply_upper_body_override(self, pd_target: np.ndarray, ctrl_data) -> np.ndarray:
         if self._upper_body_cfg is None:
             return pd_target
+        receiver = self._feedback_receiver()
+        if receiver is not None:
+            return self._apply_feedback_proposal(pd_target, ctrl_data, receiver)
 
         desired = self._upper_body_default.copy()
         stream_data = ctrl_data.get("UpperBodyZmqCtrl", {})
@@ -123,17 +131,25 @@ class UpperBodyZmqPipelineMixin:
             if isinstance(stream_generation, int) and stream_generation >= generation:
                 self._upper_body_generation = stream_generation
         positions = stream_data.get("joint_positions", {})
+        stream_is_fresh = (
+            stream_is_fresh and isinstance(positions, dict) and set(positions) == set(self._upper_body_cfg.joint_names)
+        )
         received_at = stream_data.get("joint_received_at")
         if received_at is not None:
             now = time.monotonic()
             # Inference occurs after CtrlManager samples the receiver. Recheck
             # leases at application time, rather than trusting an earlier bool.
-            positions = {
-                name: value
-                for name, value in positions.items()
-                if name in received_at and 0 <= now - received_at[name] <= self._upper_body_cfg.timeout_s
-            }
-            stream_is_fresh = stream_is_fresh and bool(positions)
+            stream_is_fresh = stream_is_fresh and all(
+                name in received_at and 0 <= now - received_at[name] <= self._upper_body_cfg.timeout_s
+                for name in self._upper_body_cfg.joint_names
+            )
+        if self._upper_body_enabled and not stream_is_fresh:
+            if self._upper_body_stream_was_fresh:
+                logger.warning("Upper-body ZMQ stream timed out or became incomplete; holding joint targets")
+            self._upper_body_stream_was_fresh = False
+            target = np.asarray(pd_target, dtype=np.float32).copy()
+            target[self._upper_body_indices] = self._upper_body_filtered
+            return target
         if self._upper_body_enabled and stream_is_fresh:
             for local_index, name in enumerate(self._upper_body_cfg.joint_names):
                 if name in positions:
@@ -143,8 +159,6 @@ class UpperBodyZmqPipelineMixin:
                     desired[local_index] = np.clip(positions[name], -numeric_limit, numeric_limit)
             if not self._upper_body_stream_was_fresh:
                 logger.info("Upper-body ZMQ stream active")
-        elif self._upper_body_enabled and self._upper_body_stream_was_fresh:
-            logger.warning("Upper-body ZMQ stream timed out; returning to defaults")
 
         limits = self.env.position_limits[self._upper_body_indices]
         desired = np.clip(desired, limits[:, 0], limits[:, 1])
@@ -161,6 +175,82 @@ class UpperBodyZmqPipelineMixin:
         target = np.asarray(pd_target, dtype=np.float32).copy()
         target[self._upper_body_indices] = self._upper_body_filtered
         return target
+
+    def _feedback_receiver(self):
+        cfg = getattr(self, "_upper_body_cfg", None)
+        if cfg is None or getattr(cfg, "feedback_endpoint", None) is None:
+            return None
+        return self.ctrl_manager.controllers[cfg.ctrl_type]["inst"]
+
+    def _feedback_intent(self):
+        mode = getattr(getattr(self, "mode", None), "value", None)
+        if (
+            mode != "RL_DEFAULT"
+            or not self._upper_body_control_available()
+            or getattr(self.env, "_last_safety_state", None) == "HOLD"
+        ):
+            return "HOLD"
+        return "TRACK" if self._upper_body_enabled else "HOME"
+
+    def _reset_upper_body_feedback(self):
+        receiver = self._feedback_receiver()
+        if receiver is not None:
+            receiver.reset()
+            self._upper_body_pending = None
+            self._upper_body_stream_was_fresh = False
+
+    def _apply_feedback_proposal(self, pd_target, ctrl_data, receiver):
+        # An outage never sends the arms home. Only HOME intent authorizes the
+        # external solver's checked return, including while teleop is disabled.
+        self._upper_body_pending = None
+        self._upper_body_stream_was_fresh = False
+        if not self._upper_body_control_available():
+            return pd_target
+        stream = ctrl_data.get(self._upper_body_cfg.ctrl_type, {})
+        proposal = stream.get("proposal")
+        if stream.get("fresh") and proposal is not None and proposal.get("intent") == self._feedback_intent():
+            positions = stream.get("joint_positions", {})
+            try:
+                receiver.feedback.validate(proposal, positions)
+                candidate = np.asarray([positions[name] for name in self._upper_body_cfg.joint_names], dtype=np.float32)
+                # The bridge checks float32 targets. Do not reshape a checked path.
+                receiver.feedback.validate(
+                    proposal, dict(zip(self._upper_body_cfg.joint_names, candidate.tolist(), strict=False))
+                )
+            except (ValueError, KeyError, OverflowError) as exc:
+                receiver._log_invalid_message(exc, time.monotonic())
+            else:
+                self._upper_body_filtered = candidate
+                self._upper_body_pending = proposal
+                self._upper_body_stream_was_fresh = self._upper_body_enabled and proposal.get("status") == "tracking"
+        target = np.asarray(pd_target, dtype=np.float32).copy()
+        target[self._upper_body_indices] = self._upper_body_filtered
+        return target
+
+    def _publish_upper_body_feedback(self, env_data, pd_target):
+        receiver = self._feedback_receiver()
+        if receiver is None or not self._upper_body_indices.size:
+            return
+        if self._upper_body_command_submitted:
+            self._upper_body_filtered = np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices].copy()
+            if self._upper_body_pending is not None:
+                receiver.acknowledge()
+        self._upper_body_pending = None
+        names = self._upper_body_cfg.joint_names
+        sample_times = env_data.get("joint_sample_times")
+        receiver.feedback.publish(
+            positions=dict(zip(self.env.joint_names, np.asarray(env_data.dof_pos, dtype=float).tolist(), strict=False)),
+            sample_times={} if sample_times is None else dict(zip(self.env.joint_names, sample_times, strict=False)),
+            targets=dict(zip(names, self._upper_body_filtered.tolist(), strict=False)),
+            defaults=dict(zip(names, self._upper_body_default.tolist(), strict=False)),
+            limits={
+                name: self.env.position_limits[index].tolist()
+                for name, index in zip(names, self._upper_body_indices, strict=False)
+            },
+            intent=self._feedback_intent(),
+            mode=self.mode.value,
+            control_dt=self.dt,
+        )
 
     # Recording methods
     def _record_upper_body_sample(self, env_data, extras, pd_target, *, rl_active: bool):

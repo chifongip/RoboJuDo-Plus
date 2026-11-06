@@ -8,6 +8,7 @@ import zmq
 
 from robojudo.controller import Controller, ctrl_registry
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
+from robojudo.controller.upper_body_feedback import StaleVisualization, UpperBodyFeedback
 
 logger = logging.getLogger(__name__)
 _MAX_MESSAGE_BYTES = 16_384
@@ -29,7 +30,7 @@ def _reject_constant(value):
 
 @ctrl_registry.register
 class UpperBodyZmqCtrl(Controller):
-    """Receive single-frame JSON arm targets with bounded work and per-joint leases.
+    """Receive complete single-frame JSON arm targets with bounded work and one group lease.
 
     Freshness is measured locally at receipt. Legacy publishers supply no source
     timestamp or sequence, so transit delay/replay cannot be inferred from JSON.
@@ -53,15 +54,27 @@ class UpperBodyZmqCtrl(Controller):
             self._socket.close(linger=0)
             raise
         self._latest_positions: dict[str, float] = {}
-        self._joint_received_at: dict[str, float] = {}
         self._last_received_at: float | None = None
         self._last_poll_at: float | None = None
         self._last_invalid_log_at = float("-inf")
+        self._last_visualization_log_at = float("-inf")
         self._discard_backlog = False
         self._discard_multipart = False
         self._closed = False
         self._transport_error: str | None = None
         self._reset_generation = 0
+        self._proposal = None
+        self._target_poses = {}
+        self._target_poses_deadline = float("-inf")
+        self._target_poses_generation = None
+        self._target_poses_state_id = -1
+        self.feedback = None
+        if cfg_ctrl.feedback_endpoint is not None:
+            try:
+                self.feedback = UpperBodyFeedback(cfg_ctrl, self._context)
+            except Exception:
+                self._socket.close(linger=0)
+                raise
         logger.info("UpperBodyZmqCtrl subscribed to %s", cfg_ctrl.endpoint)
 
     @property
@@ -70,22 +83,28 @@ class UpperBodyZmqCtrl(Controller):
 
     def _clear_positions(self):
         self._latest_positions.clear()
-        self._joint_received_at.clear()
         self._last_received_at = None
+        self._proposal = None
 
     def reset(self):
         self._clear_positions()
+        self._target_poses = {}
+        self._target_poses_state_id = -1
         self._reset_generation += 1
         # Drain at the next poll, within its normal budget. Commands queued before
         # a toggle/reset must not be promoted into a new control session.
         self._discard_backlog = True
         self._last_poll_at = None
+        if self.feedback is not None:
+            self.feedback.reset()
 
     def close(self):
         if not self._closed:
             self.reset()
             self._closed = True
             self._socket.close(linger=0)
+            if self.feedback is not None:
+                self.feedback.close()
 
     def _decode_message(self, message) -> dict[str, float]:
         if not isinstance(message, dict) or "positions" not in message:
@@ -98,6 +117,8 @@ class UpperBodyZmqCtrl(Controller):
         unknown = sorted(set(positions) - self._joint_names)
         if unknown:
             raise ValueError(f"unknown upper-body joints: {unknown}")
+        if set(positions) != self._joint_names:
+            raise ValueError("positions must contain the complete configured upper-body joint group")
 
         decoded = {}
         for name, value in positions.items():
@@ -110,12 +131,41 @@ class UpperBodyZmqCtrl(Controller):
             if not math.isfinite(value):
                 raise ValueError(f"position for {name} must be finite")
             decoded[name] = value
+        if self.feedback is not None:
+            self.feedback.validate(message, decoded, receiving=True)
+            self._proposal = message
         return decoded
 
     def _log_invalid_message(self, exc: Exception, now: float):
         if now - self._last_invalid_log_at >= 1.0:
             logger.warning("Rejected upper-body ZMQ message: %s", exc)
             self._last_invalid_log_at = now
+
+    def _consume_visualization(self, message, now):
+        if (
+            self.feedback is None
+            or not self.cfg_ctrl.visualize_targets
+            or not isinstance(message, dict)
+            or "target_poses" not in message
+        ):
+            return False
+        try:
+            poses, deadline = self.feedback.visualization(message)
+            if (
+                self._target_poses_generation != self.feedback.generation
+                or message["state_id"] > self._target_poses_state_id
+            ):
+                self._target_poses = poses
+                self._target_poses_deadline = deadline
+                self._target_poses_generation = self.feedback.generation
+                self._target_poses_state_id = message["state_id"]
+        except StaleVisualization as exc:
+            logger.debug("Discarded upper-body visualization: %s", exc)
+        except (TypeError, ValueError, OverflowError) as exc:
+            if now - self._last_visualization_log_at >= 1.0:
+                logger.warning("Ignored upper-body visualization: %s", exc)
+                self._last_visualization_log_at = now
+        return message.get("type") == "upper_body_visualization"
 
     def _receive_available(self, now: float):
         for _ in range(_MAX_MESSAGES_PER_POLL):
@@ -145,12 +195,13 @@ class UpperBodyZmqCtrl(Controller):
                 message = json.loads(
                     payload.decode("utf-8"), object_pairs_hook=_unique_object, parse_constant=_reject_constant
                 )
+                if self._consume_visualization(message, now):
+                    continue
                 positions = self._decode_message(message)
             except (TypeError, ValueError, RecursionError) as exc:
                 self._log_invalid_message(exc, now)
                 continue
-            self._latest_positions.update(positions)
-            self._joint_received_at.update(dict.fromkeys(positions, now))
+            self._latest_positions = positions
             self._last_received_at = now
             self._transport_error = None
         # Reaching the budget cannot prove that the queue was drained. Discard
@@ -160,26 +211,37 @@ class UpperBodyZmqCtrl(Controller):
 
     def get_data(self):
         now = time.monotonic()
+        if self.feedback is not None and self.feedback.expire_tracking(now):
+            self._clear_positions()
         if self._last_poll_at is not None and now - self._last_poll_at > self.cfg_ctrl.timeout_s:
             self.reset()
         self._last_poll_at = now
         if not self._closed:
             self._receive_available(now)
-        positions = {
-            name: value
-            for name, value in self._latest_positions.items()
-            if 0 <= now - self._joint_received_at[name] <= self.cfg_ctrl.timeout_s
-        }
         age_s = None if self._last_received_at is None else now - self._last_received_at
-        return {
+        fresh = age_s is not None and 0 <= age_s <= self.cfg_ctrl.timeout_s and not self._closed
+        positions = self._latest_positions.copy() if fresh else {}
+        result = {
             "joint_positions": positions,
-            "joint_received_at": {name: self._joint_received_at[name] for name in positions},
+            "joint_received_at": dict.fromkeys(positions, self._last_received_at),
             "has_received": self._last_received_at is not None,
-            "fresh": bool(positions) and not self._closed,
+            "fresh": fresh and bool(positions),
             "age_s": age_s,
             "reset_generation": self._reset_generation,
             "transport_error": self._transport_error,
         }
+        if self.feedback is not None:
+            result["proposal"] = self._proposal
+            result["target_poses"] = (
+                self._target_poses
+                if now <= self._target_poses_deadline and self._target_poses_generation == self.feedback.generation
+                else {}
+            )
+        return result
+
+    def acknowledge(self):
+        self.feedback.acknowledge()
+        self._clear_positions()
 
     def process_triggers(self, ctrl_data):
         return ctrl_data, []

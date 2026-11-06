@@ -42,7 +42,7 @@ dex_teleop:
   installer: scripts/install_dex_teleop.py
 
 
-# XRoboToolkit X2 teleoperation sample (runtime integration follows separately).
+# XRoboToolkit X2 simulation and external-state arm teleoperation bridge.
 # Installs the upstream [x2] extra and SDK into the invoking Python environment.
 xrobotoolkit_teleop:
   install: false

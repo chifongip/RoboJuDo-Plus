@@ -42,11 +42,11 @@ class FakeZmqSocket:
 
 
 class TestUpperBodyZmqCtrl(unittest.TestCase):
-    def make_controller(self, messages=None):
+    def make_controller(self, messages=None, joint_names=None):
         socket = FakeZmqSocket(messages)
         with patch("robojudo.controller.upper_body_zmq_ctrl.zmq.Context.instance") as context:
             context.return_value.socket.return_value = socket
-            return UpperBodyZmqCtrl(UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES))
+            return UpperBodyZmqCtrl(UpperBodyZmqCtrlCfg(joint_names=joint_names or ["left_elbow_joint"]))
 
     def test_config_requires_unique_named_joints(self):
         cfg = UpperBodyZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES)
@@ -54,6 +54,9 @@ class TestUpperBodyZmqCtrl(unittest.TestCase):
         self.assertEqual(cfg.timeout_s, 0.25)
         self.assertEqual(cfg.ema_alpha, 0.95)
         self.assertIsNone(cfg.upper_body_default_pose)
+        for value in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(default_pose=value), self.assertRaises(ValueError):
+                UpperBodyZmqCtrlCfg(joint_names=["left_elbow_joint"], upper_body_default_pose=[value])
 
         for timeout in (float("inf"), float("nan"), 0.0):
             with self.assertRaises(ValueError):
@@ -70,12 +73,13 @@ class TestUpperBodyZmqCtrl(unittest.TestCase):
                 upper_body_default_pose=[0.0],
             )
 
-    def test_named_partial_updates_are_merged(self):
+    def test_complete_snapshots_replace_previous_targets_atomically(self):
         controller = self.make_controller(
             [
-                {"positions": {"left_shoulder_pitch_joint": 0.2}, "source": "test"},
-                {"positions": {"right_elbow_joint": -0.6}},
-            ]
+                {"positions": {"left_shoulder_pitch_joint": 0.1, "right_elbow_joint": -0.4}, "source": "test"},
+                {"positions": {"right_elbow_joint": -0.6, "left_shoulder_pitch_joint": 0.2}},
+            ],
+            joint_names=["left_shoulder_pitch_joint", "right_elbow_joint"],
         )
         with patch("robojudo.controller.upper_body_zmq_ctrl.time.monotonic", return_value=10.0):
             data = controller.get_data()
@@ -97,7 +101,6 @@ class TestUpperBodyZmqCtrl(unittest.TestCase):
         )
         controller._latest_positions = {"right_elbow_joint": -0.3}
         controller._last_received_at = 1.0
-        controller._joint_received_at = {"right_elbow_joint": 1.0}
         with patch("robojudo.controller.upper_body_zmq_ctrl.time.monotonic", return_value=2.0):
             data = controller.get_data()
 
@@ -117,7 +120,9 @@ class TestUpperBodyZmqCtrl(unittest.TestCase):
         self.assertEqual(controller._last_received_at, 2.0)
 
     def test_stream_becomes_stale_after_timeout(self):
-        controller = self.make_controller([{"positions": {"left_wrist_yaw_joint": 0.1}}])
+        controller = self.make_controller(
+            [{"positions": {"left_wrist_yaw_joint": 0.1}}], joint_names=["left_wrist_yaw_joint"]
+        )
         with patch("robojudo.controller.upper_body_zmq_ctrl.time.monotonic", return_value=4.0):
             self.assertTrue(controller.get_data()["fresh"])
         with patch("robojudo.controller.upper_body_zmq_ctrl.time.monotonic", return_value=4.251):
@@ -125,17 +130,24 @@ class TestUpperBodyZmqCtrl(unittest.TestCase):
         self.assertFalse(data["fresh"])
         self.assertEqual(data["joint_positions"], {})
 
-    def test_partial_joint_updates_have_independent_expiry(self):
-        controller = self.make_controller([{"positions": {"left_elbow_joint": -0.4}}])
+    def test_partial_update_cannot_refresh_any_part_of_the_group(self):
+        positions = {"left_elbow_joint": -0.4, "right_elbow_joint": -0.3}
+        controller = self.make_controller([{"positions": positions}], joint_names=list(positions))
         with patch("robojudo.controller.upper_body_zmq_ctrl.time.monotonic", return_value=1.0):
             controller.get_data()
         controller._socket.messages.append({"positions": {"right_elbow_joint": -0.2}})
         with patch("robojudo.controller.upper_body_zmq_ctrl.time.monotonic", return_value=1.2):
-            self.assertEqual(len(controller.get_data()["joint_positions"]), 2)
+            data = controller.get_data()
+        self.assertEqual(data["joint_positions"], positions)
+        self.assertEqual(data["joint_received_at"], dict.fromkeys(positions, 1.0))
+        self.assertEqual(controller._last_received_at, 1.0)
         with patch("robojudo.controller.upper_body_zmq_ctrl.time.monotonic", return_value=1.26):
             data = controller.get_data()
-        self.assertTrue(data["fresh"])
-        self.assertEqual(data["joint_positions"], {"right_elbow_joint": -0.2})
+        self.assertFalse(data["fresh"])
+        self.assertEqual(data["joint_positions"], {})
+        controller._socket.messages.append({"positions": positions})
+        with patch("robojudo.controller.upper_body_zmq_ctrl.time.monotonic", return_value=1.28):
+            self.assertTrue(controller.get_data()["fresh"])
 
     def test_malformed_frames_never_refresh_the_lease(self):
         good = b'{"positions":{"left_elbow_joint":-0.4}}'

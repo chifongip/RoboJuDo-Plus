@@ -1,3 +1,4 @@
+import math
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -214,9 +215,7 @@ class OmniHandCfg(Config):
 
     @model_validator(mode="after")
     def validate_omnihand(self):
-        if self.transport == "socketcan" and (
-            not self.left_interface.strip() or not self.right_interface.strip()
-        ):
+        if self.transport == "socketcan" and (not self.left_interface.strip() or not self.right_interface.strip()):
             raise ValueError("OmniHand SocketCAN interfaces must not be empty")
         return self
 
@@ -254,10 +253,17 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
     endpoint: str = "tcp://127.0.0.1:8559"
     joint_names: list[str] = []
     upper_body_default_pose: list[float] | None = None
-    """Optional controller-specific fallback pose, ordered like ``joint_names``."""
+    """Optional pose for explicit control disable, ordered like ``joint_names``."""
     timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
     ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
     max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    feedback_endpoint: str | None = None
+    """Opt into versioned, externally collision-checked proposals and robot feedback."""
+    visualize_targets: bool = False
+    """Request torso-relative hand target frames for optional simulation overlays."""
+    feedback_timeout_s: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+    return_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    """Return cap advertised in feedback; legacy filtering uses max_joint_velocity_rad_s."""
 
     @model_validator(mode="after")
     def validate_upper_body_zmq(self):
@@ -272,6 +278,15 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
                 "Upper-body ZMQ upper_body_default_pose length "
                 f"{len(self.upper_body_default_pose)} must match joint_names length {len(self.joint_names)}"
             )
+        if self.upper_body_default_pose is not None and not all(map(math.isfinite, self.upper_body_default_pose)):
+            raise ValueError("Upper-body ZMQ upper_body_default_pose must contain only finite values")
+        if self.feedback_endpoint is not None:
+            if self.ctrl_type != "UpperBodyZmqCtrl":
+                raise ValueError("upper-body feedback currently supports arm-only UpperBodyZmqCtrl")
+            if not self.feedback_endpoint.startswith("tcp://") or not self.feedback_endpoint[6:].strip():
+                raise ValueError("upper-body feedback_endpoint must use tcp://")
+            if self.ema_alpha != 0.0:
+                raise ValueError("externally checked proposals require ema_alpha=0")
         return self
 
 

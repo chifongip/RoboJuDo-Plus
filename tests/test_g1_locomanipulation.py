@@ -407,9 +407,7 @@ class TestG1Locomanipulation(unittest.TestCase):
 
         pipeline = G1LocomanipulationPipeline.__new__(G1LocomanipulationPipeline)
         pipeline.env = FakeEnv()
-        pipeline._process_commands(
-            ["[ELASTIC_BAND_LOWER]", "[ELASTIC_BAND_LIFT]", "[ELASTIC_BAND_TOGGLE]"]
-        )
+        pipeline._process_commands(["[ELASTIC_BAND_LOWER]", "[ELASTIC_BAND_LIFT]", "[ELASTIC_BAND_TOGGLE]"])
         self.assertEqual(pipeline.env.calls, ["lower", "lift", "toggle"])
 
     def test_model_assets_match_supplied_exports(self):
@@ -504,6 +502,8 @@ class TestG1Locomanipulation(unittest.TestCase):
         pipeline.dt = cfg.env.sim_dt * cfg.env.sim_decimation
         target = np.asarray(cfg.env.dof.default_pos, dtype=np.float32)
         left_shoulder = cfg.env.dof.joint_names.index("left_shoulder_pitch_joint")
+        positions = dict(zip(pipeline._upper_body_cfg.joint_names, pipeline._upper_body_default.tolist(), strict=True))
+        positions["left_shoulder_pitch_joint"] = 0.8
 
         result = pipeline._apply_pd_target_override(
             target,
@@ -511,7 +511,7 @@ class TestG1Locomanipulation(unittest.TestCase):
                 {
                     "UpperBodyZmqCtrl": {
                         "fresh": True,
-                        "joint_positions": {"left_shoulder_pitch_joint": 0.8},
+                        "joint_positions": positions,
                     }
                 }
             ),

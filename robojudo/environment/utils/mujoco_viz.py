@@ -12,6 +12,48 @@ class MujocoVisualizer:
 
     # TODO: reset: clear all markers
 
+    def update_teleop_frames(self, torso, target_poses):
+        """Draw RGB XYZ axes in MuJoCo world coordinates, without alignment remapping."""
+        self._draw_teleop_frame(np.eye(4), "world (fixed)", 6012, (1, 1, 1, 0.8), 0.2)
+        self._draw_teleop_frame(torso, "XR torso reference", 6000, (1, 1, 1, 0.8), 0.15)
+        for side, marker_id, color in (
+            ("left", 6004, (1, 0.8, 0, 0.8)),
+            ("right", 6008, (0, 0.9, 1, 0.8)),
+        ):
+            local = target_poses.get(side)
+            world = None if local is None else torso @ np.asarray(local, dtype=float)
+            self._draw_teleop_frame(world, f"{side} hand target", marker_id, color, 0.09)
+
+    def _draw_teleop_frame(self, transform, label, marker_id, color, length):
+        visible = transform is not None
+        transform = np.eye(4) if transform is None else transform
+        self.viewer.add_marker(
+            id=marker_id,
+            pos=transform[:3, 3],
+            size=np.full(3, 0.015),
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            rgba=color if visible else (0, 0, 0, 0),
+            label=label if visible else "",
+        )
+        axis_rotations = (
+            np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]]),
+            np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]]),
+            np.eye(3),
+        )
+        for index, rotation in enumerate(axis_rotations):
+            rgba = [0.0, 0.0, 0.0, 0.0]
+            rgba[index] = 1.0
+            rgba[3] = 0.9 if visible else 0.0
+            self.viewer.add_marker(
+                id=marker_id + index + 1,
+                pos=transform[:3, 3],
+                mat=transform[:3, :3] @ rotation,
+                size=np.array([0.004, 0.004, length]),
+                type=mujoco.mjtGeom.mjGEOM_ARROW,
+                rgba=rgba,
+                label="",
+            )
+
     def update_rg_view(self, body_pos, body_rot, humanoid_id):
         if humanoid_id == 0:
             rgba = (1, 0, 0, 1)

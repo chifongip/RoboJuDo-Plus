@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -42,7 +43,8 @@ class TestUpperBodySpeedLimit(unittest.TestCase):
                     pipeline = self.make_pipeline(dt, alpha)
                     np.testing.assert_allclose(pipeline._upper_body_filtered, [0.3, -0.3])
                     self.step(pipeline, {"left": 2.0, "right": -2.0})
-                    self.step(pipeline, fresh=False)
+                    before_timeout = pipeline._upper_body_filtered.copy()
+                    np.testing.assert_array_equal(self.step(pipeline, fresh=False), before_timeout)
                     self.step(pipeline, {"left": -2.0, "right": 2.0})
                     pipeline._set_upper_body_enabled(False)
                     for _ in range(500):
@@ -52,6 +54,24 @@ class TestUpperBodySpeedLimit(unittest.TestCase):
                     np.testing.assert_array_equal(target, [0.0, 0.0])
                     pipeline._set_upper_body_enabled(True)
                     self.step(pipeline, {"left": -2.0, "right": 2.0})
+
+    def test_incomplete_or_partly_expired_frame_holds_the_entire_group(self):
+        pipeline = self.make_pipeline()
+        self.step(pipeline, {"left": 1.0, "right": -1.0})
+        previous = pipeline._upper_body_filtered.copy()
+        np.testing.assert_array_equal(self.step(pipeline, {"left": 1.5}), previous)
+        with patch("time.monotonic", return_value=10.0):
+            result = pipeline._apply_upper_body_override(
+                np.zeros(3),
+                {
+                    "UpperBodyZmqCtrl": {
+                        "fresh": True,
+                        "joint_positions": {"left": 1.5, "right": -1.5},
+                        "joint_received_at": {"left": 10.0, "right": 9.0},
+                    }
+                },
+            )
+        np.testing.assert_array_equal(result[1:], previous)
 
     def test_joint_limits_and_convergence(self):
         pipeline = self.make_pipeline()

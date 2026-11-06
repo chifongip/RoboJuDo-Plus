@@ -1,0 +1,199 @@
+"""Optional feedback/acknowledgement for externally checked arm proposals.
+
+All deadlines belong to this process. A publisher echoes feedback identifiers;
+its clock is never compared with the robot's monotonic clock.
+"""
+
+import math
+import time
+import uuid
+from collections import OrderedDict
+
+import numpy as np
+import zmq
+
+
+def _counter(value):
+    if type(value) is not int or value < 0:
+        raise ValueError("sequence fields must be non-negative integers")
+    return value
+
+
+class StaleVisualization(ValueError):
+    """Display data references measurements that are no longer available."""
+
+
+class UpperBodyFeedback:
+    def __init__(self, cfg, context):
+        self.cfg = cfg
+        self.session_id = uuid.uuid4().hex
+        self.generation = 0
+        self.command_id = 0
+        self.state_id = 0
+        self.intent = "HOLD"
+        self.reset_reason = "startup"
+        self.bridge_id = None
+        self.last_proposal_at = None
+        self._frame_id = -1
+        self._states = OrderedDict()
+        self.socket = context.socket(zmq.PUB)
+        try:
+            self.socket.setsockopt(zmq.LINGER, 0)
+            self.socket.setsockopt(zmq.SNDHWM, 1)
+            self.socket.bind(cfg.feedback_endpoint)
+        except Exception:
+            self.socket.close(linger=0)
+            raise
+
+    def reset(self, reason="controller session reset"):
+        self.reset_reason = reason
+        self.generation += 1
+        self._frame_id = -1
+        self._states.clear()
+        self.last_proposal_at = None
+
+    def expire_tracking(self, now):
+        if (
+            self.intent == "TRACK"
+            and self.last_proposal_at is not None
+            and now - self.last_proposal_at > self.cfg.timeout_s
+        ):
+            self.reset("tracking command timeout")
+            return True
+        return False
+
+    def close(self):
+        self.socket.close(linger=0)
+
+    def publish(self, *, positions, sample_times, targets, defaults, limits, intent, mode, control_dt):
+        now = time.monotonic()
+        if intent != self.intent:
+            self.reset("control intent changed")
+            self.intent = intent
+        ages = {name: now - stamp for name, stamp in sample_times.items()}
+        valid = set(ages) == set(positions) and all(
+            math.isfinite(age) and 0 <= age <= self.cfg.feedback_timeout_s for age in ages.values()
+        )
+        valid = valid and all(math.isfinite(value) for value in (*positions.values(), *targets.values()))
+        self.state_id += 1
+        frame = {
+            "schema_version": 1,
+            "type": "upper_body_state",
+            "session_id": self.session_id,
+            "generation": self.generation,
+            "reset_reason": self.reset_reason,
+            "state_id": self.state_id,
+            "command_id": self.command_id,
+            "intent": intent,
+            "mode": mode,
+            "valid": valid,
+            "positions": {name: value if math.isfinite(value) else None for name, value in positions.items()},
+            "joint_age_s": {name: age if math.isfinite(age) else None for name, age in ages.items()},
+            "last_commanded_positions": {
+                name: value if math.isfinite(value) else None for name, value in targets.items()
+            },
+            "default_positions": defaults,
+            "position_limits": limits,
+            "control_dt": control_dt,
+            "arm_velocity_limit": self.cfg.max_joint_velocity_rad_s,
+            "return_velocity_limit": self.cfg.return_joint_velocity_rad_s,
+            "feedback_timeout_s": self.cfg.feedback_timeout_s,
+            "visualize_targets": self.cfg.visualize_targets,
+        }
+        deadline = min(sample_times.values(), default=float("-inf")) + self.cfg.feedback_timeout_s
+        self._states[self.state_id] = (deadline, frame)
+        while len(self._states) > 16:
+            self._states.popitem(last=False)
+        try:
+            self.socket.send_json(frame, flags=zmq.NOBLOCK, allow_nan=False)
+        except zmq.Again:
+            pass
+
+    def validate(self, message, positions, *, receiving=False):
+        if (
+            type(message.get("schema_version")) is not int
+            or message["schema_version"] != 1
+            or message.get("type") != "upper_body_proposal"
+        ):
+            raise ValueError("expected upper_body_proposal schema version 1")
+        if message.get("session_id") != self.session_id or _counter(message.get("generation")) != self.generation:
+            raise ValueError("obsolete upper-body session or generation")
+        frame_id = _counter(message.get("frame_id"))
+        state_id = _counter(message.get("state_id"))
+        command_id = _counter(message.get("command_id"))
+        bridge_id = message.get("bridge_id")
+        if not isinstance(bridge_id, str) or not 1 <= len(bridge_id) <= 64:
+            raise ValueError("bridge_id must be a non-empty bounded string")
+        if self.bridge_id is not None and bridge_id != self.bridge_id:
+            # Rotate the robot-owned generation before allowing a restarted bridge.
+            self.bridge_id = bridge_id
+            self.reset("bridge restarted")
+            raise ValueError("bridge restarted; waiting for a new feedback generation")
+        state = self._states.get(state_id)
+        if state is None:
+            raise ValueError("unknown feedback state")
+        deadline, feedback = state
+        if not feedback["valid"] or time.monotonic() > deadline:
+            raise ValueError("referenced robot measurements expired")
+        if command_id != self.command_id or command_id != feedback["command_id"]:
+            raise ValueError("superseded arm command baseline")
+        if message.get("intent") != self.intent or self.intent not in {"TRACK", "HOME"}:
+            raise ValueError("arm proposal is not authorized by the current intent")
+        if set(positions) != set(self.cfg.joint_names):
+            raise ValueError("feedback proposals must contain all configured arm joints")
+        if receiving and frame_id <= self._frame_id:
+            raise ValueError("duplicate or out-of-order arm proposal")
+        status = message.get("status")
+        if status not in {"tracking", "homing"} or (self.intent == "HOME" and status != "homing"):
+            raise ValueError("proposal status is incompatible with its control intent")
+        speed = feedback["arm_velocity_limit"]
+        if status == "homing":
+            speed = min(speed, feedback["return_velocity_limit"])
+        for name, value in positions.items():
+            lower, upper = feedback["position_limits"][name]
+            if not lower <= value <= upper:
+                raise ValueError(
+                    f"arm target exceeds position limits: {name}={value!r}, allowed [{lower!r}, {upper!r}]"
+                )
+            if abs(value - feedback["last_commanded_positions"][name]) > speed * feedback["control_dt"] + 1e-6:
+                raise ValueError(f"arm target exceeds command velocity limit: {name}")
+        if receiving:
+            self.bridge_id = bridge_id
+            self._frame_id = frame_id
+            self.last_proposal_at = time.monotonic()
+
+    def acknowledge(self):
+        self.command_id += 1
+        # Command IDs invalidate old proposals. Keep the bounded snapshots until
+        # their deadlines so acknowledgement does not discard valid overlays.
+
+    def visualization(self, message):
+        """Validate display-only poses without authorizing or refreshing commands."""
+        if (
+            type(message.get("schema_version")) is not int
+            or message["schema_version"] != 1
+            or message.get("session_id") != self.session_id
+        ):
+            raise ValueError("invalid visualization session")
+        if _counter(message.get("generation")) != self.generation:
+            raise StaleVisualization("obsolete visualization generation")
+        state = self._states.get(_counter(message.get("state_id")))
+        if state is None or not state[1]["valid"] or time.monotonic() > state[0]:
+            raise StaleVisualization("expired or superseded visualization measurements")
+        poses = message.get("target_poses", {})
+        if not isinstance(poses, dict) or set(poses) - {"left", "right"}:
+            raise ValueError("invalid target pose names")
+        result = {}
+        for side, value in poses.items():
+            transform = np.asarray(value, dtype=float)
+            if (
+                transform.shape != (4, 4)
+                or not np.isfinite(transform).all()
+                or np.any(np.abs(transform[:3, 3]) > 10.0)
+                or not np.allclose(transform[3], [0, 0, 0, 1], atol=1e-6)
+                or not np.allclose(transform[:3, :3].T @ transform[:3, :3], np.eye(3), atol=1e-5)
+                or not np.isclose(np.linalg.det(transform[:3, :3]), 1.0, atol=1e-5)
+            ):
+                raise ValueError("target pose must be a finite rigid transform")
+            result[side] = transform.tolist()
+        return result, state[0]

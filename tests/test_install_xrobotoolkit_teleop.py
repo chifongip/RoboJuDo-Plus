@@ -55,9 +55,13 @@ class TestInstallXrobotoolkitTeleop(unittest.TestCase):
             installer.validate_environment()
 
     def test_missing_asset_reports_submodule_initialization_command(self):
-        (self.source / "assets/agibot/x2/scene.xml").unlink()
-        with self.assertRaisesRegex(RuntimeError, "git submodule update --init"):
-            installer.validate_environment()
+        for name in ("scene.xml", "x2_ultra.urdf"):
+            with self.subTest(name=name):
+                target = self.source / "assets/agibot/x2" / name
+                target.unlink()
+                with self.assertRaisesRegex(RuntimeError, "git submodule update --init"):
+                    installer.validate_environment()
+                target.touch()
 
     def test_rejects_revision_without_x2_extra_before_installing(self):
         (self.source / "pyproject.toml").write_text('[project]\nname = "old-version"\n')

@@ -195,6 +195,8 @@ class AgiBotCppEnv(Environment):
         state = self.aimdk.get_robot_state()
         self._dof_pos = np.asarray(state.motor_state.q, dtype=np.float32)
         self._dof_vel = np.asarray(state.motor_state.dq, dtype=np.float32)
+        sample_times = np.asarray(getattr(state, "joint_received_time_sec", []), dtype=float)
+        self._joint_sample_times = sample_times if sample_times.shape == self._dof_pos.shape else None
         observer = getattr(self, "_observer", None)
         if observer is not None:
             ages = np.asarray(state.joint_age_sec, dtype=float)

@@ -28,6 +28,7 @@ class Environment(ABC):
         # Feedback variables, all in radian
         self._dof_pos = np.zeros(self.num_dofs)
         self._dof_vel = np.zeros(self.num_dofs)
+        self._joint_sample_times = None
         self._base_rpy = np.zeros(3)
         self._base_quat = np.array([0.0, 0.0, 0.0, 1.0])  # as x, y, z, w
         self._base_ang_vel = np.zeros(3)
@@ -171,9 +172,11 @@ class Environment(ABC):
         return self._fk_info.copy() if self._fk_info is not None else None
 
     def get_data(self):
+        sample_times = getattr(self, "_joint_sample_times", None)
         env_data = {
             "dof_pos": self.dof_pos,
             "dof_vel": self.dof_vel,
+            "joint_sample_times": None if sample_times is None else sample_times.copy(),
             # "base_rpy": self.base_rpy,
             "base_quat": self.base_quat,
             "base_ang_vel": self.base_ang_vel,

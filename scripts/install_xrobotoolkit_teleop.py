@@ -13,9 +13,12 @@ XROBOTOOLKIT_DIR = ROOT_DIR / "third_party" / "xrobotoolkit_teleop"
 REQUIRED_FILES = (
     "pyproject.toml",
     "xrobotoolkit_teleop/simulation/agibot_x2_teleop_controller.py",
+    "xrobotoolkit_teleop/integrations/robojudo_x2.py",
+    "xrobotoolkit_teleop/common/x2_arm_retargeter.py",
     "scripts/simulation/teleop_agibot_x2_mujoco.py",
     "assets/agibot/x2/scene.xml",
     "assets/agibot/x2/x2_fixed.urdf",
+    "assets/agibot/x2/x2_ultra.urdf",
     "assets/agibot/x2/collisions.json",
 )
 IMPORT_CHECK = "\n".join(
@@ -25,6 +28,7 @@ IMPORT_CHECK = "\n".join(
         "import mujoco",
         "import tyro",
         "from xrobotoolkit_teleop.simulation.agibot_x2_teleop_controller import AgibotX2TeleopController",
+        "from xrobotoolkit_teleop.integrations.robojudo_x2 import RoboJuDoX2Bridge",
         "print('XRoboToolkit X2 dependencies and controller imports passed.')",
     )
 )
@@ -66,7 +70,7 @@ def main() -> None:
     run([sys.executable, "-m", "pip", "install", "-e", f"{XROBOTOOLKIT_DIR.as_posix()}[x2]"])
     # Import only: do not initialize the SDK, connect to a headset, or open a viewer.
     run([sys.executable, "-c", IMPORT_CHECK])
-    print("XRoboToolkit X2 sample installation complete. RoboJuDo runtime integration is not yet available.")
+    print("XRoboToolkit X2 installation complete. Run the bridge in this environment alongside RoboJuDo.")
 
 
 if __name__ == "__main__":

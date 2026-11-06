@@ -162,6 +162,7 @@ class MujocoEnv(Environment):
 
         self._dof_pos = dof_pos.copy()
         self._dof_vel = dof_vel.copy()
+        self._joint_sample_times = np.full(self.num_dofs, time.monotonic())
 
         if simple:
             return
@@ -203,6 +204,15 @@ class MujocoEnv(Environment):
             if self.elastic_band is not None:
                 self.elastic_band.update_visualization(self.viewer)
             self.viewer.render()
+
+    def draw_teleop_targets(self, target_poses):
+        if self.visualizer is None:
+            return
+        torso = self.data.body("torso_link")
+        transform = np.eye(4)
+        transform[:3, :3] = torso.xmat.reshape(3, 3)
+        transform[:3, 3] = torso.xpos
+        self.visualizer.update_teleop_frames(transform, target_poses)
 
     def _simulate_torque(self, torque_fn):
         self._render()

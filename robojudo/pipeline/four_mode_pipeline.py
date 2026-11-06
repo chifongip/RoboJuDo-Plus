@@ -141,6 +141,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             previous.value,
             requested.value,
         )
+        self._reset_upper_body_feedback()
         return True
 
     def _on_enter_rl(self):
@@ -241,6 +242,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         alpha = self._joint_default_step / self._joint_default_steps
         target = (1.0 - alpha) * self._joint_default_start + alpha * self._joint_default_target
         self.env.step(target)
+        self._upper_body_command_submitted = True
         if self._joint_default_step == self._joint_default_steps and not self._joint_default_complete:
             self._joint_default_complete = True
             logger.warning("JOINT_DEFAULT interpolation complete; RL_DEFAULT is now enabled")
@@ -271,6 +273,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
     def _send_policy_target(self, pd_target, hand_pose=None):
         self._sync_observer_eligibility()
         self.env.step(pd_target, hand_pose)
+        self._upper_body_command_submitted = True
 
     def _step_rl_policy(self, env_data, ctrl_data, dry_run: bool):
         obs, extras = self.policy.get_observation(env_data, ctrl_data)
@@ -281,6 +284,13 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         return pd_target, extras
 
     def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
+        upper_body_cfg = getattr(self, "_upper_body_cfg", None)
+        if getattr(upper_body_cfg, "visualize_targets", False):
+            draw_targets = getattr(self.env, "draw_teleop_targets", None)
+            if draw_targets is not None:
+                stream = ctrl_data.get(upper_body_cfg.ctrl_type, {})
+                draw_targets(stream.get("target_poses", {}))
+        self._publish_upper_body_feedback(env_data, pd_target)
         commands = ctrl_data.get("COMMANDS", [])
         self.timestep += 1
         self.ctrl_manager.post_step_callback(ctrl_data)
@@ -298,6 +308,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             )
 
     def step(self, dry_run=False):
+        self._upper_body_command_submitted = False
         try:
             self.env.update()
         except RuntimeError as exc:
