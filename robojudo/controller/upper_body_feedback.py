@@ -65,7 +65,7 @@ class UpperBodyFeedback:
     def close(self):
         self.socket.close(linger=0)
 
-    def publish(self, *, positions, sample_times, targets, defaults, limits, intent, mode, control_dt):
+    def publish(self, *, positions, sample_times, targets, defaults, limits, intent, mode, control_dt, timing_ms=None):
         now = time.monotonic()
         if intent != self.intent:
             self.reset("control intent changed")
@@ -99,6 +99,7 @@ class UpperBodyFeedback:
             "return_velocity_limit": self.cfg.return_joint_velocity_rad_s,
             "feedback_timeout_s": self.cfg.feedback_timeout_s,
             "visualize_targets": self.cfg.visualize_targets,
+            "pipeline_timing_ms": {} if timing_ms is None else dict(timing_ms),
         }
         deadline = min(sample_times.values(), default=float("-inf")) + self.cfg.feedback_timeout_s
         self._states[self.state_id] = (deadline, frame)
@@ -133,8 +134,18 @@ class UpperBodyFeedback:
         if state is None:
             raise ValueError("unknown feedback state")
         deadline, feedback = state
-        if not feedback["valid"] or time.monotonic() > deadline:
-            raise ValueError("referenced robot measurements expired")
+        if not feedback["valid"]:
+            raise ValueError("referenced robot measurements were invalid at publication")
+        now = time.monotonic()
+        if now > deadline:
+            stage = "receipt" if receiving else "application"
+            age_at_publish = max((age for age in feedback["joint_age_s"].values() if age is not None), default=0.0)
+            raise ValueError(
+                f"referenced robot measurements expired at {stage} "
+                f"(overdue={max(0.0, now - deadline) * 1000:.1f} ms, "
+                f"age_at_publish={age_at_publish * 1000:.1f} ms, "
+                f"budget={self.cfg.feedback_timeout_s * 1000:.1f} ms)"
+            )
         if command_id != self.command_id or command_id != feedback["command_id"]:
             raise ValueError("superseded arm command baseline")
         if message.get("intent") != self.intent or self.intent not in {"TRACK", "HOME"}:

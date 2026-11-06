@@ -144,6 +144,8 @@ joints and sample ages, last commanded arms, default pose, position/speed limits
 session/generation/state/command IDs. Robot-owned deadlines and command acknowledgements reject delayed, replayed,
 or superseded proposals without comparing host clocks. The pipeline rechecks freshness immediately before applying
 the target; command acknowledgement occurs after successful environment submission, not physical actuator confirmation.
+Feedback publication uses the environment's post-step cached snapshot and its original measurement timestamps.
+Proposals are polled again after policy inference, immediately before arm override, to avoid an extra cycle of queueing.
 A tracking-command timeout revokes the generation even when robot feedback stays healthy, so old proposals cannot
 resume motion. Feedback identifies this reset separately from mode/session changes, allowing the bridge to rebase
 an already engaged controller using fresh state. Acknowledgement retries also rebase without revoking engagement.
@@ -172,10 +174,31 @@ simulates hands independently of the deferred RoboJuDo hand integration.
 
 ## Troubleshooting
 
+- To measure SDK timestamp updates independently of IK and ZMQ, stop the bridge and other XR SDK clients, leave
+  PC Service/headset streaming, and run in `robojudo-xr`:
+
+  ```bash
+  python -m xrobotoolkit_teleop.integrations.xr_receive_rate --duration 30 --csv /tmp/xr-rate.csv
+  ```
+
+  The probe samples at 200 Hz and reports cumulative observed update rate, recent update-gap p95, lifetime maximum
+  update gap, maximum local polling gap, source timestamp gaps, and 0.25 s timeout episodes. This measures changes
+  visible through the SDK, not every network packet; faster updates between polls can be missed.
+  It does not compare headset and host clocks.
+  Repeat with RoboJuDo simulation running while the bridge remains stopped to check the effect of system load.
+  Large update gaps with small local polling gaps point to the headset/PC Service/SDK path. Large polling gaps mean
+  local scheduling or blocking also needs investigation. An average rate alone cannot explain intermittent timeouts.
+  The recent p95 uses the latest 4096 observed update gaps; history is bounded for long captures.
 - For repeated XR timestamp timeouts, run the bridge with `--xr-diagnostics`. Every two seconds it reports the SDK's
   raw timestamp, seconds since its last observed change, observed update rate, grip values, and robot intent.
   The observed rate measures bridge reads, not network packet rate. In TRACK intent, check whether the timestamp
   advances and whether a squeezed grip exceeds `0.9`. A stationary pose alone does not indicate a stale stream.
+- The same flag prints arm round-trip timings: feedback age at publication, policy inference, environment stepping
+  (including simulation rendering/physics), retargeting, and the last observed acknowledgement wait, all in milliseconds.
+  These are local durations, not cross-host clock comparisons. `measurement_age_lower_bound` excludes network transit
+  and queueing; the robot's age check remains authoritative. For command expiry, RoboJuDo logs the validation stage,
+  deadline overrun, publication age, and configured budget. The 100 ms measurement deadline remains enforced.
+  Timing fields show the most recent observation of each stage, rather than one synchronized command trace.
 - Run one XR SDK client at a time when comparing against the standalone demo. The locally supplied PC Service
   implementation stops an existing feedback client when a new one subscribes.
 - If Python 3.10 is selected, activate the Python 3.11+ environment and check `python --version` before rerunning.

@@ -316,6 +316,38 @@ class UpperBodyFeedbackTests(unittest.TestCase):
             self.receive(message)
         self.assertEqual(self.receiver.get_data()["target_poses"]["left"][0][3], 0.3)
 
+    def test_proposal_arriving_during_inference_is_applied_in_the_same_cycle(self):
+        self.pipeline._set_upper_body_enabled(True)
+        state = self.publish()
+        proposal = self.proposal(state)
+        self.receiver.get_data()  # Drain the enable-session reset before inference.
+
+        def infer(obs):
+            self.clock.return_value = 10.06
+            self.receiver._socket.messages.append(proposal)
+            return self.env.default_pos.copy()
+
+        self.pipeline.policy = SimpleNamespace(
+            get_observation=lambda env_data, ctrl_data: (None, {}), get_pd_target=infer
+        )
+        target, _ = self.pipeline._step_rl_policy(self.env_data, {"UpperBodyZmqCtrl": {"fresh": False}}, dry_run=False)
+        index = self.env.joint_names.index("left_elbow_joint")
+        self.assertAlmostEqual(target[index], proposal["positions"]["left_elbow_joint"], places=6)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIsNotNone(self.pipeline._upper_body_pending)
+
+    def test_post_step_feedback_uses_latest_state_and_its_real_sample_times(self):
+        self.clock.return_value = 10.08
+        latest = Box(dof_pos=self.env.dof_pos.copy(), joint_sample_times=np.full(len(self.env.joint_names), 10.08))
+        latest.dof_pos[0] += 0.1
+        self.env.get_data = lambda: latest
+        self.pipeline._upper_body_command_submitted = True
+        state = self.publish()
+        self.assertAlmostEqual(state["positions"][self.env.joint_names[0]], float(latest.dof_pos[0]))
+        self.assertTrue(all(age == 0 for age in state["joint_age_s"].values()))
+        latest.joint_sample_times[:] = 9.0
+        self.assertFalse(self.publish()["valid"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -213,6 +213,30 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         )
         self.assertFalse(self.pipeline._upper_body_enabled)
 
+    def test_slow_inference_still_accepts_fresh_arm_proposals(self):
+        original = self.pipeline.policy.get_pd_target
+
+        def slow_inference(obs):
+            time.sleep(0.055)
+            return original(obs)
+
+        self.pipeline.policy.get_pd_target = slow_inference
+        child = self.start_bridge()
+        self.wait_until(lambda: self.receiver.feedback.command_id > 0)
+        self.pipeline._set_upper_body_enabled(True)
+        self.cycles(0.2)
+        self.control(child, grip=1.0)
+        self.wait_until(lambda: self.pipeline._upper_body_stream_was_fresh)
+        initial = self.pipeline._upper_body_filtered.copy()
+        self.control(child, z=-0.03)
+        self.wait_until(lambda: np.max(np.abs(self.pipeline._upper_body_filtered - initial)) > 0.005)
+        accepted = self.receiver.feedback.command_id
+        self.cycles(0.6)
+        self.assertGreaterEqual(self.receiver.feedback.command_id - accepted, 3)
+        state = self.receiver.feedback._states[self.receiver.feedback.state_id][1]
+        self.assertLess(max(state["joint_age_s"].values()), 0.02)
+        self.assertGreater(state["pipeline_timing_ms"]["policy"], 50)
+
 
 if __name__ == "__main__":
     unittest.main()

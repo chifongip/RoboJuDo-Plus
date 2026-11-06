@@ -1,4 +1,5 @@
 import logging
+import time
 from enum import Enum
 
 import numpy as np
@@ -276,11 +277,16 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         self._upper_body_command_submitted = True
 
     def _step_rl_policy(self, env_data, ctrl_data, dry_run: bool):
+        started = time.perf_counter()
         obs, extras = self.policy.get_observation(env_data, ctrl_data)
         pd_target = self.policy.get_pd_target(obs)
+        self._upper_body_timing_ms = {"policy": 1000 * (time.perf_counter() - started)}
+        self._refresh_upper_body_feedback(ctrl_data)
         pd_target = self._apply_pd_target_override(pd_target, ctrl_data)
         if not dry_run:
+            started = time.perf_counter()
             self._send_policy_target(pd_target, extras.get("hand_pose"))
+            self._upper_body_timing_ms["env_step"] = 1000 * (time.perf_counter() - started)
         return pd_target, extras
 
     def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
@@ -309,6 +315,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
 
     def step(self, dry_run=False):
         self._upper_body_command_submitted = False
+        self._upper_body_timing_ms = {}
         try:
             self.env.update()
         except RuntimeError as exc:

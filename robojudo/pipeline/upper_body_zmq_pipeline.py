@@ -199,6 +199,13 @@ class UpperBodyZmqPipelineMixin:
             self._upper_body_pending = None
             self._upper_body_stream_was_fresh = False
 
+    def _refresh_upper_body_feedback(self, ctrl_data):
+        receiver = self._feedback_receiver()
+        if receiver is not None:
+            # Proposals may arrive while policy inference is running. Sample
+            # them at application time rather than adding another control cycle.
+            ctrl_data[self._upper_body_cfg.ctrl_type] = receiver.get_data()
+
     def _apply_feedback_proposal(self, pd_target, ctrl_data, receiver):
         # An outage never sends the arms home. Only HOME intent authorizes the
         # external solver's checked return, including while teleop is disabled.
@@ -237,6 +244,13 @@ class UpperBodyZmqPipelineMixin:
                 receiver.acknowledge()
         self._upper_body_pending = None
         names = self._upper_body_cfg.joint_names
+        get_data = getattr(self.env, "get_data", None)
+        if self._upper_body_command_submitted and get_data is not None:
+            # MuJoCo updates its state during env.step(). Publishing the earlier
+            # policy snapshot wastes the whole inference/step time budget.
+            # Native environments retain their actual cached sample timestamps;
+            # this never relabels old measurements as newly received.
+            env_data = get_data()
         sample_times = env_data.get("joint_sample_times")
         receiver.feedback.publish(
             positions=dict(zip(self.env.joint_names, np.asarray(env_data.dof_pos, dtype=float).tolist(), strict=False)),
@@ -250,6 +264,7 @@ class UpperBodyZmqPipelineMixin:
             intent=self._feedback_intent(),
             mode=self.mode.value,
             control_dt=self.dt,
+            timing_ms=getattr(self, "_upper_body_timing_ms", {}),
         )
 
     # Recording methods
