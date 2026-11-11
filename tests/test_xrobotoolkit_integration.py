@@ -74,7 +74,7 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         from robojudo.config.x2 import x2_xrobotoolkit
         from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
         from robojudo.pipeline.four_mode_pipeline import ControlMode
-        from robojudo.pipeline.x2_locomanipulation_pipeline import X2LocomanipulationPipeline
+        from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import X2LocomanipulationLocoMimicPipeline
 
         self.directory = self.enterContext(tempfile.TemporaryDirectory(prefix="x2-xr-integration-"))
         self.children = []
@@ -93,8 +93,8 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         cfg.env.forward_kinematic = None
         cfg.env.update_with_fk = False
         cfg.device = "cpu"
-        cfg.policy.command_status_interval_s = 0.0
-        self.pipeline = X2LocomanipulationPipeline(cfg)
+        cfg.loco_policy.command_status_interval_s = 0.0
+        self.pipeline = X2LocomanipulationLocoMimicPipeline(cfg)
         from robojudo.environment.utils.mujoco_viz import MujocoVisualizer
 
         self.markers = {}

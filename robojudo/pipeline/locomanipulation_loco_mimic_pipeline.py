@@ -1,4 +1,5 @@
 import logging
+import time
 
 from robojudo.pipeline.four_mode_pipeline import (
     FALL_TILT_THRESHOLD_RAD,
@@ -140,7 +141,10 @@ class LocomanipulationLocoMimicPipelineMixin:
         if "[POLICY_MIMIC]" in commands:
             self._set_upper_body_enabled(False)
 
+        started = time.perf_counter()
         pd_target, extras = self._get_policy_step(env_data, ctrl_data)
+        self._upper_body_timing_ms = {"policy": 1000 * (time.perf_counter() - started)}
+        self._refresh_upper_body_feedback(ctrl_data)
         upper_body_override_available = self._upper_body_control_available()
         if upper_body_override_available:
             if not self._upper_body_override_was_available and self._upper_body_indices.size:
@@ -151,7 +155,9 @@ class LocomanipulationLocoMimicPipelineMixin:
             pd_target = self._apply_pd_target_override(pd_target, ctrl_data)
         self._upper_body_override_was_available = upper_body_override_available
         if not dry_run:
+            started = time.perf_counter()
             self._send_policy_target(pd_target, extras.get("hand_pose"))
+            self._upper_body_timing_ms["env_step"] = 1000 * (time.perf_counter() - started)
         return pd_target, extras
 
     def _process_policy_commands(self, commands: list[str], extras):
@@ -193,6 +199,7 @@ class LocomanipulationLocoMimicPipelineMixin:
             self._sync_observer_eligibility()
 
     def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
+        self._update_upper_body_feedback(env_data, ctrl_data, pd_target)
         commands = ctrl_data.get("COMMANDS", [])
         policy_commands = [command for command in commands if command.startswith("[POLICY_")]
         if rl_active:

@@ -234,6 +234,15 @@ class UpperBodyZmqPipelineMixin:
         target[self._upper_body_indices] = self._upper_body_filtered
         return target
 
+    def _update_upper_body_feedback(self, env_data, ctrl_data, pd_target):
+        cfg = getattr(self, "_upper_body_cfg", None)
+        if getattr(cfg, "visualize_targets", False):
+            draw_targets = getattr(self.env, "draw_teleop_targets", None)
+            if draw_targets is not None:
+                stream = ctrl_data.get(cfg.ctrl_type, {})
+                draw_targets(stream.get("target_poses", {}))
+        self._publish_upper_body_feedback(env_data, pd_target)
+
     def _publish_upper_body_feedback(self, env_data, pd_target):
         receiver = self._feedback_receiver()
         if receiver is None or not self._upper_body_indices.size:

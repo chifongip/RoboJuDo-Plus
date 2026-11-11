@@ -10,7 +10,7 @@ import numpy as np
 import zmq
 from box import Box
 
-from robojudo.config.x2 import x2_xrobotoolkit, x2_xrobotoolkit_real
+from robojudo.config.x2 import x2_locomanipulation, x2_xrobotoolkit, x2_xrobotoolkit_real
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
 from robojudo.controller.upper_body_zmq_ctrl import UpperBodyZmqCtrl
 from robojudo.pipeline.four_mode_pipeline import ControlMode
@@ -54,7 +54,8 @@ class MemoryContext:
 class UpperBodyFeedbackTests(unittest.TestCase):
     def setUp(self):
         self.clock = self.enterContext(patch("time.monotonic", return_value=10.0))
-        self.cfg = x2_xrobotoolkit()
+        self.cfg = x2_locomanipulation()
+        self.cfg.ctrl = x2_xrobotoolkit().ctrl
         self.arm_cfg = next(cfg for cfg in self.cfg.ctrl if isinstance(cfg, UpperBodyZmqCtrlCfg))
         with patch("robojudo.controller.upper_body_zmq_ctrl.zmq.Context.instance", return_value=MemoryContext()):
             self.receiver = UpperBodyZmqCtrl(self.arm_cfg)
@@ -110,9 +111,9 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         return {"UpperBodyZmqCtrl": self.receiver.get_data()}
 
     def test_presets_reuse_controller_and_pipeline_without_timeout_policy_switch(self):
-        for cfg in (self.cfg, x2_xrobotoolkit_real()):
+        for cfg in (x2_xrobotoolkit(), x2_xrobotoolkit_real()):
             upper = next(item for item in cfg.ctrl if isinstance(item, UpperBodyZmqCtrlCfg))
-            self.assertEqual(cfg.pipeline_type, "X2LocomanipulationPipeline")
+            self.assertEqual(cfg.pipeline_type, "X2LocomanipulationLocoMimicPipeline")
             self.assertEqual(upper.ctrl_type, "UpperBodyZmqCtrl")
             self.assertEqual(upper.max_joint_velocity_rad_s, 8.0)
             self.assertEqual(upper.return_joint_velocity_rad_s, 1.0)

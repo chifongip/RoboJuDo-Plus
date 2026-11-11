@@ -25,9 +25,40 @@ class TestX2LocomimicObserverConfig(unittest.TestCase):
         actual, expected = cfg.model_dump(), base.model_dump()
         actual["env"].pop("observer")
         expected["env"].pop("observer")
+        self.assertEqual(actual["loco_policy"].pop("policy_name"), "policy_observer_fine_tune")
+        expected["loco_policy"].pop("policy_name")
         self.assertEqual(actual, expected)
         self.assertFalse(cfg.env.is_sim)
         self.assertTrue(cfg.do_safety_check)
+
+    def test_xr_and_observer_presets_share_the_model_and_height_rate(self):
+        from robojudo.config.x2 import x2_xrobotoolkit, x2_xrobotoolkit_real
+
+        policy = x2_locomimic_observer().loco_policy
+        self.assertEqual(policy.policy_name, "policy_observer_fine_tune")
+        self.assertEqual(policy.max_height_command_rate_m_s, 0.1)
+        for candidate in (
+            x2_locomimic_real_observer().loco_policy,
+            x2_xrobotoolkit().loco_policy,
+            x2_xrobotoolkit_real().loco_policy,
+        ):
+            self.assertEqual(candidate.model_dump(), policy.model_dump())
+
+    def test_xr_presets_inherit_observer_runtime(self):
+        from robojudo.config.x2 import x2_xrobotoolkit, x2_xrobotoolkit_real
+
+        for xr, base in (
+            (x2_xrobotoolkit(), x2_locomimic_observer()),
+            (x2_xrobotoolkit_real(), x2_locomimic_real_observer()),
+        ):
+            actual, expected = xr.model_dump(), base.model_dump()
+            actual.pop("ctrl")
+            expected.pop("ctrl")
+            self.assertEqual(actual, expected)
+            self.assertEqual([type(ctrl) for ctrl in xr.ctrl], [type(ctrl) for ctrl in base.ctrl])
+            for controller, original in zip(xr.ctrl, base.ctrl, strict=True):
+                if controller.ctrl_type != "UpperBodyZmqCtrl":
+                    self.assertEqual(controller.model_dump(), original.model_dump())
 
     def test_arm_limits_use_joint_names_and_compensation_defaults_off(self):
         cfg = x2_locomimic_real_observer()

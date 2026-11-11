@@ -248,14 +248,18 @@ class TestX2Locomanipulation(unittest.TestCase):
         from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import X2LocomanipulationPolicyCfg
         from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
 
-        cfg = X2LocomanipulationPolicyCfg()
-        policy = X2LocomanipulationPolicy(cfg, "cpu")
-        action = policy.get_action(np.zeros(cfg.num_obs, dtype=np.float32))
+        for name in ("policy", "policy_observer_fine_tune"):
+            with self.subTest(policy=name):
+                cfg = X2LocomanipulationPolicyCfg(policy_name=name)
+                policy = X2LocomanipulationPolicy(cfg, "cpu")
+                action = policy.get_action(np.zeros(cfg.num_obs, dtype=np.float32))
 
-        self.assertEqual({value.name: value.shape for value in policy.session.get_inputs()}, {"obs": [1, 430]})
-        self.assertEqual({value.name: value.shape for value in policy.session.get_outputs()}, {"actions": [1, 15]})
-        self.assertEqual(action.shape, (15,))
-        self.assertTrue(np.isfinite(action).all())
+                self.assertEqual({value.name: value.shape for value in policy.session.get_inputs()}, {"obs": [1, 430]})
+                self.assertEqual(
+                    {value.name: value.shape for value in policy.session.get_outputs()}, {"actions": [1, 15]}
+                )
+                self.assertEqual(action.shape, (15,))
+                self.assertTrue(np.isfinite(action).all())
 
 
 if __name__ == "__main__":

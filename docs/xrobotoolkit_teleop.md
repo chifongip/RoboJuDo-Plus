@@ -89,17 +89,21 @@ python -m xrobotoolkit_teleop.integrations.robojudo --robot x2 --ik-backend plac
 ```
 
 Complete the usual preparation sequence: simulation keyboard `i` / joystick `Y` selects `JOINT_DEFAULT`; after
-interpolation completes, `j` / `X` selects `RL_DEFAULT`. Toggle arm tracking with `t` / `Start`. Release both XR grips
+interpolation completes, `j` / `X` selects `RL_DEFAULT`. Toggle arm tracking with `t` / joystick `L`. Release both XR grips
 before engaging; hold the corresponding grip to move an arm. Release a grip to hold that arm's target. XR `Y` held
-returns both arms toward their defaults. Walking and runtime/recording commands remain on the existing controls.
+returns both arms toward their defaults. Walking and policy switching use the inherited loco-mimic controls:
+`Back` selects locomotion and `Start` selects mimic. XR arm tracking is available in locomotion mode after policy
+interpolation completes.
 
 Hand targets are relative to the measured torso, so walking, turning, and waist motion carry them with the robot.
 The headset's horizontal heading maps controller motion to torso axes at engagement; subsequent head motion does
 not move the targets. No robot odometry or independent physics simulation is used by the bridge.
 
 For real deployment, follow the [X2 AimDK setup](x2_sim2real.md), then use `-c x2_xrobotoolkit_real` in the robot
-terminal. The bridge command is identical. Real-robot acceptance is still required; automated validation uses
-synthetic XR input and MuJoCo, not a physical X2.
+terminal. The bridge command is identical. The XR presets inherit the observer environment and model: simulation
+compensation is `ACTIVE`, while real-robot compensation defaults to `OFF`. Real joystick preparation uses
+`RB+Y` for `JOINT_DEFAULT` and `RB+X` for `RL_DEFAULT`. Real-robot acceptance is still required; automated validation
+uses synthetic XR input and MuJoCo, not a physical X2.
 
 ## Defaults and interruptions
 

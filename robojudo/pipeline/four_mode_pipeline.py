@@ -290,13 +290,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         return pd_target, extras
 
     def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
-        upper_body_cfg = getattr(self, "_upper_body_cfg", None)
-        if getattr(upper_body_cfg, "visualize_targets", False):
-            draw_targets = getattr(self.env, "draw_teleop_targets", None)
-            if draw_targets is not None:
-                stream = ctrl_data.get(upper_body_cfg.ctrl_type, {})
-                draw_targets(stream.get("target_poses", {}))
-        self._publish_upper_body_feedback(env_data, pd_target)
+        self._update_upper_body_feedback(env_data, ctrl_data, pd_target)
         commands = ctrl_data.get("COMMANDS", [])
         self.timestep += 1
         self.ctrl_manager.post_step_callback(ctrl_data)
