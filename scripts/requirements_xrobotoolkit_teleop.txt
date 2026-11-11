@@ -1,0 +1,13 @@
+# ABI-compatible native stack; CasADi 3.6.7 is provided by Conda, not pip.
+numpy==2.2.6
+placo==0.11.0
+pin==4.1.0
+libpinocchio==4.1.0
+eigenpy==3.13.0
+coal==3.0.3
+libcoal==3.0.3
+cmeel-boost==1.90.0
+cmeel-eigen==3.4.1
+jrl-cmakemodules==2.1.0
+cmake==4.4.0
+ninja==1.13.2

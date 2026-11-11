@@ -137,12 +137,19 @@ python submodule_install.py casiahand_sdk
 python submodule_install.py phc
 ```
 
-XRoboToolkit installs its `x2` extra into the invoking Python 3.11+ environment on Linux x86_64/aarch64. It includes
-the X2 simulation dependencies and XR SDK, without other robot SDKs, Torch, or camera/hand-retargeting packages.
-The `x2_xrobotoolkit` and `x2_xrobotoolkit_real` presets use the existing locomanipulation pipeline and arm controller
-with measured-state feedback to a separate XR process. OmniHand control is deferred.
-See the [XRoboToolkit setup guide](docs/xrobotoolkit_teleop.md) for isolated Conda installation, verification,
-and sample launch commands. A fresh environment is recommended but not required; the installer never creates one.
+XRoboToolkit setup creates a separate, teleop-only **`robojudo-xr`** Conda environment with Python 3.11,
+Placo, and LeRobot, including compilation and permanent registration of the native symbolic bindings.
+It requires Linux x86_64/aarch64, Conda, and `g++`. It does not install RoboJuDo, other robot SDKs, or Torch.
+
+```bash
+python scripts/install_xrobotoolkit_teleop.py
+conda activate robojudo-xr
+```
+
+An existing target is preserved unless `--reuse` is supplied; use `--name NAME` for another environment name.
+The `x2_xrobotoolkit` and `x2_xrobotoolkit_real` presets run in the existing RoboJuDo environment and communicate
+with the XR bridge over ZMQ. Both IK methods run in the same XR environment. OmniHand integration is deferred.
+See the [XRoboToolkit setup guide](docs/xrobotoolkit_teleop.md) for verification and launch commands.
 
 The optional installers may require an active Conda environment and external SDKs. See:
 

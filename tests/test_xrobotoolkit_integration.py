@@ -48,7 +48,7 @@ class SyntheticXR:
         pass
 
 xr = SyntheticXR()
-bridge = RoboJuDoX2Bridge(sys.argv[1], sys.argv[2], xr_client=xr)
+bridge = RoboJuDoX2Bridge(sys.argv[1], sys.argv[2], xr_client=xr, ik_backend=sys.argv[3])
 try:
     while True:
         if select.select([sys.stdin], [], [], 0)[0]:
@@ -137,6 +137,7 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
                 BRIDGE_PROCESS,
                 self.command_endpoint,
                 self.feedback_endpoint,
+                os.environ.get("XROBOTOOLKIT_TEST_BACKEND", "placo"),
             ],
             stdin=subprocess.PIPE,
             stdout=log,

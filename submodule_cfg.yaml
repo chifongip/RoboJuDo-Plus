@@ -43,7 +43,7 @@ dex_teleop:
 
 
 # XRoboToolkit X2 simulation and external-state arm teleoperation bridge.
-# Installs the upstream [x2] extra and SDK into the invoking Python environment.
+# Creates robojudo-xr (Python 3.11) with the [x2] extra, SDK, Placo and LeRobot bindings.
 xrobotoolkit_teleop:
   install: false
   path: third_party/xrobotoolkit_teleop
