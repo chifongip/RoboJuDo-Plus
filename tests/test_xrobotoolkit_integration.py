@@ -21,14 +21,19 @@ import zmq
 BRIDGE_PROCESS = r"""
 import json
 import select
+import logging
+import os
 import sys
 import time
 import numpy as np
-from xrobotoolkit_teleop.integrations.robojudo_x2 import RoboJuDoX2Bridge
+from xrobotoolkit_teleop.integrations.robojudo import RoboJuDoBridge
 
 class SyntheticXR:
     def __init__(self):
         self.grip = 0.0
+        self.right_grip = 0.0
+        self.trigger = 0.0
+        self.right_trigger = 0.0
         self.z = 0.0
         self.freeze = False
         self.timestamp = 1
@@ -41,14 +46,17 @@ class SyntheticXR:
     def get_pose_by_name(self, name):
         return np.array([0., 0., self.z if name == 'left_controller' else 0., 0., 0., 0., 1.])
     def get_key_value_by_name(self, name):
-        return self.grip if name == 'left_grip' else 0.0
+        return {'left_grip': self.grip, 'right_grip': self.right_grip,
+                'left_trigger': self.trigger, 'right_trigger': self.right_trigger}.get(name, 0.0)
     def get_button_state_by_name(self, name):
         return False
     def close(self):
         pass
 
+if os.environ.get("XROBOTOOLKIT_TEST_DIAGNOSTICS"):
+    logging.basicConfig(level=logging.INFO)
 xr = SyntheticXR()
-bridge = RoboJuDoX2Bridge(sys.argv[1], sys.argv[2], xr_client=xr, ik_backend=sys.argv[3])
+bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], xr_client=xr, ik_backend=sys.argv[3], robot=sys.argv[4])
 try:
     while True:
         if select.select([sys.stdin], [], [], 0)[0]:
@@ -61,6 +69,8 @@ try:
         started = time.monotonic()
         if bridge.poll():
             time.sleep(max(0, 0.02 - (time.monotonic() - started)))
+        if os.environ.get("XROBOTOOLKIT_TEST_DIAGNOSTICS"):
+            bridge.report_xr_diagnostics()
 finally:
     bridge.close()
 """
@@ -70,8 +80,10 @@ finally:
     os.environ.get("XROBOTOOLKIT_TEST_PYTHON"), "set XROBOTOOLKIT_TEST_PYTHON for two-process XR tests"
 )
 class XrobotoolkitIntegrationTests(unittest.TestCase):
+    with_omnihand = False
+
     def setUp(self):
-        from robojudo.config.x2 import x2_xrobotoolkit
+        from robojudo.config.x2 import x2_xrobotoolkit, x2_xrobotoolkit_omnihand
         from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
         from robojudo.pipeline.four_mode_pipeline import ControlMode
         from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import X2LocomanipulationLocoMimicPipeline
@@ -83,7 +95,7 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
             reserved.bind(("127.0.0.1", 0))
             port = reserved.getsockname()[1]
         self.command_endpoint = f"tcp://127.0.0.1:{port}"
-        cfg = x2_xrobotoolkit()
+        cfg = x2_xrobotoolkit_omnihand() if self.with_omnihand else x2_xrobotoolkit()
         upper = next(item for item in cfg.ctrl if isinstance(item, UpperBodyZmqCtrlCfg))
         upper.endpoint = self.command_endpoint
         upper.feedback_endpoint = "tcp://127.0.0.1:*"
@@ -103,7 +115,7 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         )
         self.addCleanup(self.pipeline.env.shutdown)
         self.addCleanup(self.pipeline.ctrl_manager.close)
-        self.receiver = self.pipeline.ctrl_manager.controllers.UpperBodyZmqCtrl.inst
+        self.receiver = self.pipeline.ctrl_manager.controllers[upper.ctrl_type].inst
         self.feedback_endpoint = self.receiver.feedback.socket.getsockopt_string(zmq.LAST_ENDPOINT)
         self.pipeline.prepare()
         self.pipeline._enter_mode(ControlMode.JOINT_DEFAULT)
@@ -138,6 +150,7 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
                 self.command_endpoint,
                 self.feedback_endpoint,
                 os.environ.get("XROBOTOOLKIT_TEST_BACKEND", "placo"),
+                "x2_omnihand" if self.with_omnihand else "x2",
             ],
             stdin=subprocess.PIPE,
             stdout=log,
@@ -233,10 +246,45 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         self.wait_until(lambda: np.max(np.abs(self.pipeline._upper_body_filtered - initial)) > 0.005)
         accepted = self.receiver.feedback.command_id
         self.cycles(0.6)
-        self.assertGreaterEqual(self.receiver.feedback.command_id - accepted, 3)
+        self.assertGreaterEqual(
+            self.receiver.feedback.command_id - accepted,
+            3,
+            "\n".join(path.read_text() for path in Path(self.directory).glob("*.log")),
+        )
         state = self.receiver.feedback._states[self.receiver.feedback.state_id][1]
         self.assertLess(max(state["joint_age_s"].values()), 0.02)
         self.assertGreater(state["pipeline_timing_ms"]["policy"], 50)
+
+
+@unittest.skipUnless(os.environ.get("XROBOTOOLKIT_TEST_PYTHON"), "set XROBOTOOLKIT_TEST_PYTHON")
+class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
+    with_omnihand = True
+
+    def test_independent_triggers_and_home_holds_fingers(self):
+        child = self.start_bridge()
+        self.wait_until(lambda: self.receiver.feedback.command_id > 0)
+        self.pipeline._set_upper_body_enabled(True)
+        self.cycles(0.25)
+        self.control(child, trigger=0.4)
+        self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["L_index_mcp_joint"] > 0.04)
+        self.wait_until(lambda: self.pipeline.env.hand_snapshot()["positions"]["L_index_mcp_joint"] > 0.03)
+        self.assertEqual(self.pipeline.env.hand_snapshot()["targets"]["R_index_mcp_joint"], 0.0)
+        self.control(child, right_trigger=0.3)
+        self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["R_index_mcp_joint"] > 0.04)
+        self.wait_until(lambda: self.pipeline.env.hand_snapshot()["positions"]["R_index_mcp_joint"] > 0.03)
+        self.control(child, grip=0.0, right_grip=0.0)
+        self.cycles(0.15)
+        held = self.pipeline.env.hand_snapshot()["targets"].copy()
+        self.pipeline._set_upper_body_enabled(False)
+        self.cycles(0.3)
+        self.assertEqual(self.pipeline.env.hand_snapshot()["targets"], held)
+
+        self.control(child, trigger=0.0, right_trigger=0.0)
+        self.cycles(0.2)
+        self.assertEqual(self.pipeline.env.hand_snapshot()["targets"], held)
+        self.pipeline._set_upper_body_enabled(True)
+        self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["L_index_mcp_joint"] < 0.01)
+        self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["R_index_mcp_joint"] < 0.01)
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ class UpperBodyZmqCtrl(Controller):
     """
 
     cfg_ctrl: UpperBodyZmqCtrlCfg
+    _conflate_legacy_frames = False
 
     def __init__(self, cfg_ctrl: UpperBodyZmqCtrlCfg, env=None, device="cpu"):
         cfg_ctrl = type(cfg_ctrl).model_validate(cfg_ctrl.model_dump())
@@ -49,6 +50,8 @@ class UpperBodyZmqCtrl(Controller):
             self._socket.setsockopt(zmq.RCVHWM, _MAX_MESSAGES_PER_POLL)
             self._socket.setsockopt(zmq.MAXMSGSIZE, _MAX_MESSAGE_BYTES)
             self._socket.setsockopt(zmq.SUBSCRIBE, b"")
+            if self._conflate_legacy_frames and cfg_ctrl.feedback_endpoint is None:
+                self._socket.setsockopt(zmq.CONFLATE, 1)
             self._socket.connect(cfg_ctrl.endpoint)
         except Exception:
             self._socket.close(linger=0)
@@ -75,7 +78,7 @@ class UpperBodyZmqCtrl(Controller):
             except Exception:
                 self._socket.close(linger=0)
                 raise
-        logger.info("UpperBodyZmqCtrl subscribed to %s", cfg_ctrl.endpoint)
+        logger.info("%s subscribed to %s", type(self).__name__, cfg_ctrl.endpoint)
 
     @property
     def reset_generation(self):

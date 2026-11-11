@@ -41,6 +41,8 @@ class InteractiveObserverTests(unittest.TestCase):
         actual = cfg.model_dump()
         actual.pop("env")
         base.pop("env")
+        # The observer preset intentionally selects its matching policy checkpoint.
+        base["loco_policy"]["policy_name"] = "policy_observer_fine_tune"
         self.assertEqual(actual, base)
         self.assertTrue(cfg.env.is_sim)
         self.assertEqual(cfg.env.observer.mode, "ACTIVE")

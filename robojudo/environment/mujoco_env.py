@@ -31,6 +31,8 @@ class MujocoEnv(Environment):
         self.model = mujoco.MjModel.from_xml_path(cfg_env.xml)  # pyright: ignore[reportAttributeAccessIssue]
         self.model.opt.timestep = self.sim_dt
         self._dof_actuator_indices = self._resolve_actuator_indices(self.model, self.joint_names)
+        self._dof_qpos_indices = np.array([self.model.joint(n).qposadr[0] for n in self.joint_names])
+        self._dof_qvel_indices = np.array([self.model.joint(n).dofadr[0] for n in self.joint_names])
         self.data = mujoco.MjData(self.model)  # pyright: ignore[reportAttributeAccessIssue]
         if self.model.nkey > 0:
             mujoco.mj_resetDataKeyframe(self.model, self.data, 0)  # pyright: ignore[reportAttributeAccessIssue]
@@ -157,8 +159,8 @@ class MujocoEnv(Environment):
 
     def update(self, simple=False):  # TODO: clean sensors in xml
         """simple: only update dof pos & vel"""
-        dof_pos = self.data.qpos.astype(np.float32)[-self.num_dofs :]
-        dof_vel = self.data.qvel.astype(np.float32)[-self.num_dofs :]
+        dof_pos = self.data.qpos.astype(np.float32)[self._dof_qpos_indices]
+        dof_vel = self.data.qvel.astype(np.float32)[self._dof_qvel_indices]
 
         self._dof_pos = dof_pos.copy()
         self._dof_vel = dof_vel.copy()
@@ -228,11 +230,15 @@ class MujocoEnv(Environment):
             self.last_saturation_mask = torque != self.last_unclipped_torque
             self.data.ctrl[:] = 0.0
             self.data.ctrl[self._dof_actuator_indices] = torque
+            self._apply_auxiliary_targets()
             if self.elastic_band is not None:
                 self.elastic_band.apply()
             mujoco.mj_step(self.model, self.data)  # pyright: ignore[reportAttributeAccessIssue]
             self.update(simple=True)
         self.update(simple=False)
+
+    def _apply_auxiliary_targets(self):
+        """Allow independently owned actuators alongside the body torque vector."""
 
     def command_passive(self):
         self._simulate_torque(lambda: np.zeros(self.num_dofs, dtype=np.float64))

@@ -2,8 +2,8 @@
 
 The optional `third_party/xrobotoolkit_teleop` submodule runs XR input, arm inverse kinematics, and self-collision
 checks in a separate process. RoboJuDo's existing X2 locomanipulation pipeline owns walking, runtime modes, recording,
-and robot hardware. The bridge observes all 31 X2 joints and commands only the 14 arm joints. OmniHand control and
-loco-mimic integration are deferred.
+and robot hardware. The default bridge observes all 31 X2 joints and commands the 14 arm joints. Optional OmniHand Pro presets add
+24 active finger commands and 38 finger observations. Both use the existing loco-mimic runtime.
 
 ```text
 Headset/controllers -> PC Service -> XR bridge (XR environment)
@@ -155,7 +155,13 @@ The existing `UpperBodyZmqCtrlCfg` and pipeline are reused. The presets opt in w
 disable. The JSON `positions` envelope remains unchanged, but publishers must now send all configured joints in each
 frame; partial updates are rejected. XR disable returns through the bridge's checked HOME path, pending bridge recovery
 if it is offline.
-Feedback mode currently supports arm-only control, not `UpperBodyOmniHandZmqCtrlCfg`.
+The same `X2LocomanipulationLocoMimicPipeline` runs arm-only and OmniHand XR presets. Proposal validation,
+application, feedback publication and recording composition share the existing upper-body pipeline; the controller
+supplies hand measurements, limits and acknowledgement status. There is no XR-specific controller or pipeline class.
+
+The arm-only presets use schema version 1. The OmniHand XR presets use schema version 2 and the existing
+`UpperBodyOmniHandZmqCtrlCfg` with `feedback_endpoint` configured. Without feedback, that same controller
+retains the dex-teleop synchronized-frame protocol.
 
 The bridge binds a command PUB socket on `tcp://127.0.0.1:8559`; RoboJuDo connects its existing SUB socket there.
 RoboJuDo binds feedback PUB on `tcp://127.0.0.1:8571`; the bridge connects there. Do not run another arm publisher
@@ -195,7 +201,7 @@ Upstream headless solver/demo tests run with `python -m unittest discover -s tes
 
 The original standalone demonstration remains available through
 `python third_party/xrobotoolkit_teleop/scripts/simulation/teleop_agibot_x2_mujoco.py`. Its `--with-omnihand` mode
-simulates hands independently of the deferred RoboJuDo hand integration.
+remains a separate standalone simulation.
 
 ## Troubleshooting
 
@@ -255,7 +261,7 @@ To exercise LeRobot in the two-process integration test, also set `XROBOTOOLKIT_
 `XROBOTOOLKIT_TEST_PYTHON`. Tests always import this repository's bundled bridge source.
 X2 is the first production robot profile. Other scalar-joint robots can register model resources, observed/controlled
 joints, reference/end-effector frames and XR device mappings without modifying bridge transport or backend dispatch.
-Hands and mobile-base teleoperation remain outside this protocol.
+The `x2_omnihand` profile adds fingers through schema version 2; mobile-base commands remain outside this protocol.
 
 ## Setup validation
 
@@ -265,3 +271,100 @@ without custom path exports, including after a new Conda activation and removal 
 The native suite passed 186 tests; both Placo and LeRobot passed the two-process RoboJuDo/MuJoCo integration tests.
 The installer and optional-module dispatcher tests passed, including existing-target protection and verified reuse.
 Native binding runtime paths point only to their own target environment. This clean-install validation did not cover aarch64.
+
+
+## OmniHand Pro through robot-side HCAN
+
+Simulation uses the existing 31-joint body policy and observer, with 38 additional articulated finger joints and
+24 position actuators in the same MuJoCo world. Both IK backends support the `x2_omnihand` profile:
+
+```bash
+# RoboJuDo environment
+python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand
+# Separate terminal, XR environment
+python -m xrobotoolkit_teleop.integrations.robojudo --robot x2_omnihand --ik-backend placo
+# Alternatively: --ik-backend lerobot
+```
+
+Use the normal preparation sequence and tracking toggle. Squeeze either trigger to close its hand; release the
+trigger to open. Triggers work independently of the grips and arm IK. Grips clutch only the arms; release both
+grips before engaging arm tracking. Finger targets use a coordinated ramp capped at 2 rad/s by default; the bridge supports
+`--hand-velocity-limit`, additionally bounded by the robot's configured cap and model limits. XR Y and explicit
+tracking disable return the arms through checked HOME while retaining finger targets. Outages hold targets.
+
+Physical hands connect through HCAN adapters attached to the **robot**, with channel 0 and hand device ID 1 by
+default. The XR host does not open adapters or install the vendor SDK. In the robot's RoboJuDo environment:
+
+```bash
+python submodule_install.py omnihand_sdk
+sudo bash third_party/omnihand_sdk/linux/aarch64/setup_udev.sh
+# Use linux/x64 on an x86_64 robot host; log out and back in after initial udev setup.
+```
+
+Create a robot-local JSON file, for example `.local/omnihand.json` (JSON files are ignored by this repository):
+
+```json
+{
+  "left_hcan_serial": "LEFT_ADAPTER_HW_SER",
+  "right_hcan_serial": "RIGHT_ADAPTER_HW_SER",
+  "left_hand_serial": "EXACT_LEFT_VENDOR_SERIAL",
+  "right_hand_serial": "EXACT_RIGHT_VENDOR_SERIAL"
+}
+```
+
+Adapter selection uses `hcan_serial_number`, following the vendor HCAN demos. Hand identity uses **exact**
+`product_seq_num` matching after removing trailing NUL padding only; suffixes are not accepted. Both workers
+must verify product information, device ID, hand serial, and finite joint measurements before takeover. Missing
+or incorrect serial configuration stops startup rather than falling back to adapter enumeration indices.
+Both dex-teleop and XR controllers use the single `OmniHandRuntime` in `omnihand_runtime.py`, with the same
+process isolation and cleanup. Existing deployments retain HCAN adapter indices, ZLGCAN and SocketCAN.
+Serial selection requires HCAN; other transports reject serial fields rather than silently ignoring them.
+Dex-teleop retains its latest-only `set_joint_commands` API; checked XR uses strict `submit` with acknowledgement.
+The shared `startup_timeout_s` defaults to 15 s. No separate HCAN runtime implementation is maintained.
+
+Stop other adapter clients, then run the read-only check before enabling robot motion:
+
+```bash
+python scripts/check_omnihand_hcan.py --config .local/omnihand.json
+export ROBOJUDO_OMNIHAND_CONFIG="$PWD/.local/omnihand.json"
+python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_real
+```
+
+The bridge command is identical to simulation. Follow the normal X2 real-robot preparation procedure.
+The check only verifies identity and reads joint angles; it does not send motion commands. Each adapter has its
+own persistent spawned SDK process. Startup, SDK receive, and cleanup waits are bounded; a worker fault cancels
+outstanding work. Default receive timeout is 200 ms and worker startup budget is 15 s. These do not relax the
+100 ms robot feedback/proposal deadline. Repeated slow replies cause holds and need diagnosis on the robot.
+
+Schema version 2 keeps the existing message types and session/generation/deadline fields. State `positions` and
+`joint_age_s` cover 69 joints (31 body + 38 fingers); proposal `positions`, state `last_commanded_positions`,
+`default_positions`, and `position_limits` cover 38 commanded joints (14 arms + 24 active fingers). State adds
+`hand_velocity_limit`. Active hand names/order follow `OMNIHAND_JOINT_NAMES`; passive observations use the seven
+SDK passive joints per hand. Both endpoints default to the existing loopback ports. A version/profile mismatch
+is rejected. Run only one command publisher.
+
+The robot revalidates proposals before application, submits arms through its environment, and then dispatches
+fingers. Acknowledgement requires successful arm submission and both hand SDK writes for the same proposal.
+The vendor Python angle setter exposes no per-write status: acknowledgement confirms that both SDK calls
+returned without exceptions, not firmware acceptance, physical arrival, or simultaneous actuation.
+Partial application cannot be rolled back; it
+invalidates the generation and cancels pending work. New feedback exposes the resulting baseline. Recording
+includes the 14 arm and 24 active finger observations/commands only on acknowledged fresh tracking frames.
+
+Collision checks use measured fingers, nonlinear passive coupling, and sampled combined command paths. When
+finger motion fails, the bridge may send an independently checked arm escape with fingers held. Internal same-hand
+collision pairs remain excluded as in the standalone model. Hand contacts are disabled in simulation; this is
+not an object-grasp physics or tactile-control implementation. Wrist mounts remain provisional until checked
+against the physical adapters. Before qualifying deployment, verify mounts, exact identities, SDK joint ordering
+and signs, low-speed one-hand operation, grip release, HOME finger hold, and XR/bridge/adapter interruptions.
+
+Rebuild the floating hand model with `python scripts/build_x2_xr_omnihand_assets.py`. It reuses the submodule's
+hand meshes, source finger dynamics/couplings, short-wrist data, and their existing license/provenance metadata.
+Automated two-process integration tests cover both arm-only and OmniHand presets with synthetic XR input:
+
+```bash
+XROBOTOOLKIT_TEST_PYTHON=/path/to/robojudo-xr/bin/python \
+  python -m unittest discover -s tests -p test_xrobotoolkit_integration.py
+# Repeat with XROBOTOOLKIT_TEST_BACKEND=lerobot.
+python -m unittest discover -s tests -p test_xr_omnihand.py
+```

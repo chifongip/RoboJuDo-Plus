@@ -1,19 +1,17 @@
-"""Threaded direct control runtime for dual OmniHand Pro 2025 hands."""
+"""Dual OmniHand Pro control with one isolated SDK process per adapter.
 
-from __future__ import annotations
+Both dex-teleop and checked XR proposals use this runtime. Connection policy is
+configuration-driven; XR explicitly requires serial-verified robot-side HCAN.
+"""
 
-import logging
+import multiprocessing as mp
+import pickle
 import queue
-import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
 
 import numpy as np
 
 from robojudo.controller.ctrl_cfgs import OmniHandCfg
-
-logger = logging.getLogger(__name__)
 
 OMNIHAND_JOINT_SUFFIXES = (
     "thumb_roll_joint",
@@ -62,20 +60,6 @@ OMNIHAND_RIGHT_LIMITS[:4] = np.asarray(
     dtype=np.float64,
 )
 
-HandFactory = Callable[[OmniHandCfg, str], object]
-
-
-@dataclass(frozen=True)
-class OmniHandCommandFrame:
-    """One inseparable left/right command originating from the same control frame."""
-
-    left_command: np.ndarray
-    right_command: np.ndarray
-    source_timestamp_ns: int
-    frame_id: int | None
-    enqueued_at: float
-    takeover_generation: int
-
 
 def omnihand_joint_names(side: str) -> tuple[str, ...]:
     if side == "left":
@@ -93,309 +77,394 @@ def omnihand_limits(side: str) -> np.ndarray:
     raise ValueError(f"Unsupported OmniHand side {side!r}")
 
 
-class OmniHandRuntime:
-    """Apply dual-hand commands through the Omnihand SDK without blocking the robot loop.
+PASSIVE_SUFFIXES = (
+    "thumb_dip_joint",
+    "index_dip_joint",
+    "middle_dip_joint",
+    "ring_pip_joint",
+    "ring_dip_joint",
+    "pinky_pip_joint",
+    "pinky_dip_joint",
+)
+ALL_HAND_NAMES = tuple(
+    f"{prefix}_{suffix}" for prefix in ("L", "R") for suffix in (*OMNIHAND_JOINT_SUFFIXES, *PASSIVE_SUFFIXES)
+)
 
-    All Omnihand SDK calls are confined to one worker thread. The controller thread only
-    sets commands and reads immutable copies of the latest runtime state.
-    """
 
-    def __init__(
-        self,
-        cfg: OmniHandCfg,
-        *,
-        hand_factory: HandFactory | None = None,
-    ):
-        self.cfg = cfg
-        self._hand_factory = hand_factory or self._create_hand
-        # Protect state shared by the controller thread and the SDK worker thread.
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._ready = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._error: Exception | None = None
-        self._enabled = False
-        self._takeover_generation = 0
-        self._last_command_at: dict[str, float | None] = {"left": None, "right": None}
-        self._last_joint_state_at: dict[str, float | None] = {"left": None, "right": None}
-        self._applied_commands = {
-            "left": np.zeros(12, dtype=np.float32),
-            "right": np.zeros(12, dtype=np.float32),
-        }
-        self._measured_joint_positions = {
-            "left": np.zeros(12, dtype=np.float32),
-            "right": np.zeros(12, dtype=np.float32),
-        }
-        self._applied_source_timestamp_ns: int | None = None
-        self._applied_frame_id: int | None = None
-        # A capacity of one implements latest-command-wins semantics and prevents
-        # stale teleoperation commands from accumulating behind slow hardware I/O.
-        self._command_queue: queue.Queue[OmniHandCommandFrame] = queue.Queue(maxsize=1)
+def measured_command_baseline(positions):
+    """Represent a sampled startup pose as bounded float32 command values."""
+    result = {}
+    limits = np.concatenate((OMNIHAND_LEFT_LIMITS, OMNIHAND_RIGHT_LIMITS))
+    for name, (lower, upper) in zip(OMNIHAND_JOINT_NAMES, limits, strict=True):
+        value = positions[name]
+        if not np.isfinite(value) or value < lower - 1e-6 or value > upper + 1e-6:
+            raise ValueError(f"measured startup finger is outside SDK limits: {name}")
+        value = np.float32(np.clip(value, lower, upper))
+        if float(value) < lower:
+            value = np.nextafter(value, np.float32(np.inf))
+        if float(value) > upper:
+            value = np.nextafter(value, np.float32(-np.inf))
+        result[name] = float(value)
+    return result
 
-        self._thread = threading.Thread(target=self._run, name="OmniHandRuntime", daemon=True)
-        self._thread.start()
-        if not self._ready.wait(cfg.startup_timeout_s):
-            self.close()
-            raise TimeoutError(f"OmniHand runtime did not start within {cfg.startup_timeout_s:.1f} seconds")
-        if self._error is not None:
-            self.close()
-            raise RuntimeError("failed to start OmniHand runtime") from self._error
 
-    @staticmethod
-    def _create_hand(cfg: OmniHandCfg, side: str):
-        try:
-            from omnihand import HandType, OmniHandPro2025
-        except ImportError as exc:
-            raise RuntimeError(
-                "OmniHand control requires the vendor Python SDK; run "
-                "`python submodule_install.py omnihand_sdk` in the active environment"
-            ) from exc
+def connect_verified_hand(cfg, side):
+    """Open exactly the requested adapter and verify identity without moving it."""
+    from omnihand import HandType, OmniHandPro2025
 
-        hand_type = HandType.LEFT if side == "left" else HandType.RIGHT
-        hand_can_id = cfg.hand_can_id
-        if hand_can_id is None:
-            hand_can_id = OmniHandPro2025.kDefaultHandDeviceId
-        if cfg.transport == "hcan":
-            # HCAN exposes each USB adapter as a device index. Its SDK channel is
-            # always zero, so users only configure the left/right adapter indices.
-            adapter_index = cfg.left_adapter_index if side == "left" else cfg.right_adapter_index
-            hand = OmniHandPro2025.create_hand_by_hcan(
-                hand_type=hand_type,
-                hand_device_id=hand_can_id,
-                canfd_device_id=adapter_index,
-                canfd_channel_id=0,
-            )
-        elif cfg.transport == "zlgcan":
-            # ZLGCAN may expose multiple CAN-FD channels on one adapter, therefore
-            # its channel IDs remain independently configurable.
-            adapter_index = cfg.left_adapter_index if side == "left" else cfg.right_adapter_index
-            configured_channel = cfg.zlgcan_left_channel_id if side == "left" else cfg.zlgcan_right_channel_id
-            channel_id = (0 if side == "left" else 1) if configured_channel is None else configured_channel
-            hand = OmniHandPro2025.create_hand_by_zlgcan(
-                hand_type=hand_type,
-                hand_device_id=hand_can_id,
-                canfd_device_id=adapter_index,
-                canfd_channel_id=channel_id,
-            )
-        elif cfg.transport == "socketcan":
-            interface = cfg.left_interface if side == "left" else cfg.right_interface
-            hand = OmniHandPro2025.create_hand_socketcan(
-                hand_type=hand_type,
-                hand_device_id=hand_can_id,
-                can_interface=interface,
-            )
-        else:  # pragma: no cover - protected by the config literal
-            raise ValueError(f"Unsupported OmniHand transport {cfg.transport!r}")
+    serial = getattr(cfg, f"{side}_hcan_serial")
+    expected = getattr(cfg, f"{side}_hand_serial")
+    if not serial or not expected:
+        raise ValueError(f"{side} HCAN adapter serial and expected hand serial are required")
+    device_id = cfg.hand_can_id or 1
+    hand = OmniHandPro2025.create_hand_by_hcan(
+        hand_type=HandType.LEFT if side == "left" else HandType.RIGHT,
+        hand_device_id=device_id,
+        hcan_serial_number=serial,
+        canfd_channel_id=0,
+    )
+    if hand is None:
+        raise RuntimeError(f"{side}: HCAN adapter {serial!r} could not be opened")
+    hand.set_frame_recv_timeout(cfg.frame_recv_timeout_ms)
+    vendor, device = hand.get_vendor_info(), hand.get_device_info()
+    actual = vendor.product_seq_num.rstrip("\0")
+    if not vendor.product_model or device.hand_device_id != device_id or actual != expected:
+        raise RuntimeError(f"{side}: hand identity mismatch: expected {expected!r}, received {actual!r}")
+    return hand
 
-        if hand is None:
-            raise RuntimeError(f"OmniHand SDK could not create the {side} hand")
-        if not hand.init():
-            raise RuntimeError(f"OmniHand SDK failed to initialize the {side} hand")
-        return hand
 
-    def set_takeover_enabled(self, enabled: bool):
-        """Invalidate pending frames without waiting for an in-progress SDK call.
+def create_hand(cfg: OmniHandCfg, side: str):
+    try:
+        from omnihand import HandType, OmniHandPro2025
+    except ImportError as exc:
+        raise RuntimeError(
+            "OmniHand control requires the vendor Python SDK; run "
+            "`python submodule_install.py omnihand_sdk` in the active environment"
+        ) from exc
 
-        A call already admitted to the SDK may finish after disabling. Remaining
-        writes and frame publication must still belong to the current takeover.
-        """
-
-        enabled = bool(enabled)
-        with self._lock:
-            if enabled == self._enabled:
-                return
-            self._enabled = enabled
-            self._takeover_generation += 1
-            self._last_command_at = {"left": None, "right": None}
-            self._applied_source_timestamp_ns = None
-            self._applied_frame_id = None
-            self._discard_pending_commands()
-        logger.warning("OmniHand control %s", "enabled" if enabled else "disabled")
-
-    def set_joint_commands(
-        self,
-        left_joint_positions,
-        right_joint_positions,
-        source_timestamp_ns: int | None = None,
-        frame_id: int | None = None,
-    ) -> np.ndarray:
-        """Set the newest atomic left/right joint command without blocking the caller."""
-        left_command = np.asarray(left_joint_positions, dtype=np.float64)
-        right_command = np.asarray(right_joint_positions, dtype=np.float64)
-        if left_command.shape != (12,) or right_command.shape != (12,):
-            raise ValueError("OmniHand joint commands must each have shape (12,)")
-        if not np.isfinite(left_command).all() or not np.isfinite(right_command).all():
-            raise ValueError("OmniHand joint commands must be finite")
-        # Clip before enqueueing so hardware execution and recorded actions use the
-        # same command values.
-        left_command = np.clip(left_command, OMNIHAND_LEFT_LIMITS[:, 0], OMNIHAND_LEFT_LIMITS[:, 1])
-        right_command = np.clip(right_command, OMNIHAND_RIGHT_LIMITS[:, 0], OMNIHAND_RIGHT_LIMITS[:, 1])
-        timestamp_ns = time.time_ns() if source_timestamp_ns is None else int(source_timestamp_ns)
-        with self._lock:
-            command_frame = OmniHandCommandFrame(
-                left_command=left_command.copy(),
-                right_command=right_command.copy(),
-                source_timestamp_ns=timestamp_ns,
-                frame_id=None if frame_id is None else int(frame_id),
-                enqueued_at=time.monotonic(),
-                takeover_generation=self._takeover_generation,
-            )
-            try:
-                self._command_queue.put_nowait(command_frame)
-            except queue.Full:
-                # Replace the unsent frame without waiting for hardware I/O.
-                self._discard_pending_commands()
-                self._command_queue.put_nowait(command_frame)
-        return np.concatenate((left_command, right_command)).astype(np.float32)
-
-    def _discard_pending_commands(self):
-        while True:
-            try:
-                self._command_queue.get_nowait()
-            except queue.Empty:
-                return
-
-    @staticmethod
-    def _validate_joint_positions(value, side: str) -> np.ndarray:
-        result = np.asarray(value, dtype=np.float32)
-        if result.shape != (12,) or not np.isfinite(result).all():
-            raise RuntimeError(f"OmniHand {side} joint positions must contain 12 finite angles")
-        return result
-
-    def _command_is_current(self, frame: OmniHandCommandFrame) -> bool:
-        """Check the gate and local command lease while holding ``_lock``."""
-        return (
-            self._enabled
-            and frame.takeover_generation == self._takeover_generation
-            and 0 <= time.monotonic() - frame.enqueued_at <= self.cfg.command_timeout_s
+    if cfg.transport == "hcan" and cfg.left_hcan_serial is not None:
+        return connect_verified_hand(cfg, side)
+    hand_type = HandType.LEFT if side == "left" else HandType.RIGHT
+    hand_can_id = cfg.hand_can_id
+    if hand_can_id is None:
+        hand_can_id = OmniHandPro2025.kDefaultHandDeviceId
+    if cfg.transport == "hcan":
+        # HCAN exposes each USB adapter as a device index. Its SDK channel is
+        # always zero, so users only configure the left/right adapter indices.
+        adapter_index = cfg.left_adapter_index if side == "left" else cfg.right_adapter_index
+        hand = OmniHandPro2025.create_hand_by_hcan(
+            hand_type=hand_type,
+            hand_device_id=hand_can_id,
+            canfd_device_id=adapter_index,
+            canfd_channel_id=0,
         )
+    elif cfg.transport == "zlgcan":
+        # ZLGCAN may expose multiple CAN-FD channels on one adapter, therefore
+        # its channel IDs remain independently configurable.
+        adapter_index = cfg.left_adapter_index if side == "left" else cfg.right_adapter_index
+        configured_channel = cfg.zlgcan_left_channel_id if side == "left" else cfg.zlgcan_right_channel_id
+        channel_id = (0 if side == "left" else 1) if configured_channel is None else configured_channel
+        hand = OmniHandPro2025.create_hand_by_zlgcan(
+            hand_type=hand_type,
+            hand_device_id=hand_can_id,
+            canfd_device_id=adapter_index,
+            canfd_channel_id=channel_id,
+        )
+    elif cfg.transport == "socketcan":
+        interface = cfg.left_interface if side == "left" else cfg.right_interface
+        hand = OmniHandPro2025.create_hand_socketcan(
+            hand_type=hand_type,
+            hand_device_id=hand_can_id,
+            can_interface=interface,
+        )
+    else:  # pragma: no cover - protected by the config literal
+        raise ValueError(f"Unsupported OmniHand transport {cfg.transport!r}")
 
-    def _send_joint_command(self, hands: dict[str, object], side: str, frame: OmniHandCommandFrame) -> bool:
-        joint_command = frame.left_command if side == "left" else frame.right_command
-        limits = omnihand_limits(side)
-        clipped = np.clip(joint_command, limits[:, 0], limits[:, 1])
-        if not np.array_equal(clipped, joint_command):
-            logger.warning("Clipped %s OmniHand command to SDK limits", side)
-        with self._lock:
-            if not self._command_is_current(frame):
-                return False
-        # Never hold the state lock across SDK I/O: disabling must remain nonblocking.
-        hands[side].set_all_active_joint_angles(clipped.tolist())
-        with self._lock:
-            if not self._command_is_current(frame):
-                return False
-            self._applied_commands[side] = clipped.astype(np.float32)
-            self._last_command_at[side] = frame.enqueued_at
-        return True
+    if hand is None:
+        raise RuntimeError(f"OmniHand SDK could not create the {side} hand")
+    if not hand.init():
+        raise RuntimeError(f"OmniHand SDK failed to initialize the {side} hand")
+    hand.set_frame_recv_timeout(cfg.frame_recv_timeout_ms)
+    return hand
 
-    def _update_measured_joint_positions(self, hands: dict[str, object], now: float):
-        # Read both hands before publishing either result so returned data never contains
-        # a newly sampled left hand paired with an older right hand from this cycle.
-        measured_positions = {
-            side: self._validate_joint_positions(hand.get_all_active_joint_angles(), side)
-            for side, hand in hands.items()
-        }
-        with self._lock:
-            for side, positions in measured_positions.items():
-                self._measured_joint_positions[side] = positions
-                self._last_joint_state_at[side] = now
 
-    def _run(self):
-        hands = {}
+class _CommandMailbox:
+    """Single shared command slot; overwriting never depends on a Queue feeder."""
+
+    def __init__(self, context):
+        self._buffer = context.Array("B", 16_384)
+        self._length = context.Value("i", 0, lock=False)
+
+    def put_nowait(self, command):
+        payload = pickle.dumps(command, protocol=pickle.HIGHEST_PROTOCOL)
+        if len(payload) > len(self._buffer):
+            raise ValueError("OmniHand command exceeds mailbox capacity")
+        with self._buffer.get_lock():
+            self._buffer[: len(payload)] = payload
+            self._length.value = len(payload)
+
+    def get_nowait(self):
+        with self._buffer.get_lock():
+            if not self._length.value:
+                raise queue.Empty
+            payload = bytes(self._buffer[: self._length.value])
+            self._length.value = 0
+        return pickle.loads(payload)
+
+
+def _publish_state(channel, value):
+    try:
+        channel.put_nowait(value)
+    except queue.Full:
         try:
-            # Hardware initialization lives in the worker because the SDK owns native
-            # resources that must be used consistently from the same thread.
-            hands = {side: self._hand_factory(self.cfg, side) for side in ("left", "right")}
-            now = time.monotonic()
-            self._update_measured_joint_positions(hands, now)
-            self._ready.set()
-            joint_state_period_s = 1.0 / self.cfg.joint_state_fps
-            next_joint_state_at = now + joint_state_period_s
+            channel.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            channel.put_nowait(value)
+        except queue.Full:
+            pass
 
-            while not self._stop.is_set():
-                try:
-                    command_frame = self._command_queue.get(timeout=0.01)
-                except queue.Empty:
-                    pass
-                else:
-                    # A gate transition or an expired lease cancels the remaining
-                    # writes even when the worker has already dequeued this frame.
-                    if self._send_joint_command(hands, "left", command_frame) and self._send_joint_command(
-                        hands, "right", command_frame
-                    ):
-                        with self._lock:
-                            if self._command_is_current(command_frame):
-                                self._applied_source_timestamp_ns = command_frame.source_timestamp_ns
-                                self._applied_frame_id = command_frame.frame_id
 
-                now = time.monotonic()
-                if now >= next_joint_state_at:
-                    self._update_measured_joint_positions(hands, now)
-                    next_joint_state_at = now + joint_state_period_s
-        except Exception as exc:
-            self._error = exc
-            logger.exception("OmniHand runtime stopped: %s", exc)
-            self._ready.set()
-        finally:
-            hands.clear()
+def _worker(cfg, side, commands, states, stop, gate):
+    """Never import the SDK in the parent; verify before reading or commanding."""
+    try:
+        hand = create_hand(cfg, side)
+        applied = None
+        target = None
+        commanded_at = None
+        applied_generation = None
+        while not stop.is_set():
+            try:
+                generation, deadline, identity, angles, submitted_at = commands.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                with gate.get_lock():
+                    allowed = gate[0] == generation and gate[1] == 1 and time.monotonic() <= deadline
+                if allowed:
+                    hand.set_all_active_joint_angles(angles)
+                    # A successful in-flight write cannot be undone by revocation.
+                    # Report its actual target, but never acknowledge an expired lease.
+                    target, commanded_at = angles, submitted_at
+                    with gate.get_lock():
+                        allowed = gate[0] == generation and gate[1] == 1 and time.monotonic() <= deadline
+                    if allowed:
+                        applied = identity
+                        applied_generation = generation
+                    else:
+                        applied, applied_generation = None, None
+            sampled_at = time.monotonic()
+            angles = np.asarray(hand.get_all_joint_angles(), dtype=float)
+            if angles.shape != (19,) or not np.isfinite(angles).all():
+                raise RuntimeError(f"{side}: expected 19 finite finger angles")
+            _publish_state(
+                states,
+                {
+                    "positions": angles.tolist(),
+                    "sampled_at": sampled_at,
+                    "applied": applied,
+                    "targets": target,
+                    "commanded_at": commanded_at,
+                    "generation": applied_generation,
+                },
+            )
+            stop.wait(1.0 / cfg.joint_state_fps)
+    except Exception as exc:
+        _publish_state(states, {"error": f"{side}: {type(exc).__name__}: {exc}"})
 
-    def get_data(self) -> dict:
-        """Return consistent copies of measured positions, commands, and freshness state."""
 
-        if self._error is not None:
-            raise RuntimeError("OmniHand runtime is unavailable") from self._error
+class OmniHandRuntime:
+    """Bounded parent-side coordinator; application IDs require both worker writes."""
+
+    def __init__(self, cfg, *, read_only=False, require_serials=False):
+        if require_serials and (
+            cfg.transport != "hcan"
+            or not all(getattr(cfg, f"{side}_{kind}_serial") for side in ("left", "right") for kind in ("hcan", "hand"))
+        ):
+            raise ValueError("XR hardware requires HCAN adapter and exact hand serials for both sides")
+        self.cfg = cfg
+        self.read_only = read_only
+        self._ctx = mp.get_context("spawn")
+        self._stop = self._ctx.Event()
+        self._gate = self._ctx.Array("q", [0, 0])
+        self._workers = {}
+        self._states = {}
+        self._pending = None
+        self._sequence = 0
+        self._closed = False
+        try:
+            for side in ("left", "right"):
+                commands, states = _CommandMailbox(self._ctx), self._ctx.Queue(1)
+                process = self._ctx.Process(
+                    target=_worker,
+                    args=(cfg, side, commands, states, self._stop, self._gate),
+                    daemon=True,
+                )
+                self._workers[side] = (process, commands, states)
+                process.start()
+            deadline = time.monotonic() + cfg.startup_timeout_s
+            while len(self._states) < 2:
+                self._poll()
+                if time.monotonic() > deadline:
+                    raise TimeoutError("OmniHand startup verification timed out")
+                self._stop.wait(0.01)
+            self._initial_targets = measured_command_baseline(self.get_data()["positions"])
+        except Exception:
+            self.close()
+            raise
+
+    def _poll(self):
+        for side, (process, _, states) in self._workers.items():
+            try:
+                state = states.get_nowait()
+            except queue.Empty:
+                state = None
+            if state is not None:
+                if "error" in state:
+                    self.set_takeover_enabled(False)
+                    raise RuntimeError(state["error"])
+                self._states[side] = state
+            if process.exitcode is not None and not self._closed:
+                self.set_takeover_enabled(False)
+                raise RuntimeError(f"{side} OmniHand worker exited ({process.exitcode})")
+
+    def set_takeover_enabled(self, enabled):
+        with self._gate.get_lock():
+            self._gate[0] += 1
+            self._gate[1] = int(enabled and not self.read_only)
+        self._pending = None
+
+    def submit(self, positions, identity, deadline, *, replace_pending=False):
+        angles = np.asarray([positions[n] for n in OMNIHAND_JOINT_NAMES], dtype=float)
+        limits = np.concatenate((OMNIHAND_LEFT_LIMITS, OMNIHAND_RIGHT_LIMITS))
+        if not np.isfinite(angles).all() or np.any(angles < limits[:, 0]) or np.any(angles > limits[:, 1]):
+            raise ValueError("checked finger commands exceed SDK limits")
+        with self._gate.get_lock():
+            generation, enabled = self._gate[:]
+            if not enabled or not np.isfinite(deadline) or time.monotonic() > deadline:
+                raise RuntimeError("OmniHand command is unauthorized or expired")
+            if self._pending is not None and not replace_pending:
+                raise RuntimeError("OmniHand command is already pending")
+            if replace_pending:
+                self._gate[0] += 1
+                generation = self._gate[0]
+        self._pending = identity
+        submitted_at = time.monotonic()
+        try:
+            for index, side in enumerate(("left", "right")):
+                message = (generation, deadline, identity, angles[index * 12 : (index + 1) * 12].tolist(), submitted_at)
+                self._workers[side][1].put_nowait(message)
+        except Exception:
+            self.set_takeover_enabled(False)
+            raise
+
+    def set_joint_commands(self, left_joint_positions, right_joint_positions, source_timestamp_ns=None, frame_id=None):
+        """Accept a latest-only dex-teleop frame; XR uses strict ``submit`` instead."""
+        arrays = [np.asarray(values, dtype=float) for values in (left_joint_positions, right_joint_positions)]
+        if any(values.shape != (12,) or not np.isfinite(values).all() for values in arrays):
+            raise ValueError("OmniHand commands must each contain 12 finite joint angles")
+        positions = np.concatenate(
+            [
+                np.clip(values, limits[:, 0], limits[:, 1])
+                for values, limits in zip(arrays, (OMNIHAND_LEFT_LIMITS, OMNIHAND_RIGHT_LIMITS), strict=True)
+            ]
+        )
+        with self._gate.get_lock():
+            enabled = self._gate[1]
+        if enabled:
+            self._sequence += 1
+            timestamp_ns = time.time_ns() if source_timestamp_ns is None else int(source_timestamp_ns)
+            identity = (self._sequence, None if frame_id is None else int(frame_id), timestamp_ns)
+            self.submit(
+                dict(zip(OMNIHAND_JOINT_NAMES, positions.tolist(), strict=True)),
+                identity,
+                time.monotonic() + self.cfg.command_timeout_s,
+                replace_pending=True,
+            )
+        return positions.astype(np.float32)
+
+    def get_data(self):
+        self._poll()
+        measured, stamps, commands = {}, {}, {}
+        for index, side in enumerate(("left", "right")):
+            if side not in self._states:
+                continue
+            state = self._states[side]
+            names = ALL_HAND_NAMES[index * 19 : (index + 1) * 19]
+            measured.update(zip(names, state["positions"], strict=True))
+            stamps.update(dict.fromkeys(names, state["sampled_at"]))
+            active = OMNIHAND_JOINT_NAMES[index * 12 : (index + 1) * 12]
+            commands.update(zip(active, state["targets"] or state["positions"][:12], strict=True))
+        if hasattr(self, "_initial_targets"):
+            for index, side in enumerate(("left", "right")):
+                if self._states[side]["targets"] is None:
+                    for name in OMNIHAND_JOINT_NAMES[index * 12 : (index + 1) * 12]:
+                        commands[name] = self._initial_targets[name]
+        with self._gate.get_lock():
+            generation, enabled = self._gate[:]
+            enabled = bool(enabled)
+        applied = None
+        if len(self._states) == 2:
+            left, right = (self._states[side]["applied"] for side in ("left", "right"))
+            if (
+                left is not None
+                and left == right
+                and all(state["generation"] == generation for state in self._states.values())
+            ):
+                applied = left
+        fresh = len(measured) == 38 and all(
+            0 <= time.monotonic() - stamp <= self.cfg.joint_state_timeout_s for stamp in stamps.values()
+        )
         now = time.monotonic()
-        with self._lock:
-            enabled = self._enabled
-            command_ages = {
-                side: None if timestamp is None else now - timestamp
-                for side, timestamp in self._last_command_at.items()
-            }
-            joint_state_ages = {
-                side: None if timestamp is None else now - timestamp
-                for side, timestamp in self._last_joint_state_at.items()
-            }
-            measured_joint_positions = np.concatenate(
-                (self._measured_joint_positions["left"], self._measured_joint_positions["right"])
-            ).astype(np.float32)
-            applied_joint_commands = np.concatenate(
-                (self._applied_commands["left"], self._applied_commands["right"])
-            ).astype(np.float32)
-            applied_source_timestamp_ns = self._applied_source_timestamp_ns
-            applied_frame_id = self._applied_frame_id
-
-        # Freshness uses local monotonic time. Source wall-clock timestamps are kept
-        # only for correlation because the publisher and robot clocks may differ.
+        command_ages = {
+            side: None if state["commanded_at"] is None else now - state["commanded_at"]
+            for side, state in self._states.items()
+        }
         side_fresh = {
-            side: enabled and age is not None and age <= self.cfg.command_timeout_s
+            side: enabled
+            and age is not None
+            and 0 <= age <= self.cfg.command_timeout_s
+            and self._states[side]["generation"] == generation
             for side, age in command_ages.items()
         }
-        joint_state_fresh = all(
-            age is not None and age <= self.cfg.joint_state_timeout_s for age in joint_state_ages.values()
-        )
-        received_ages = [age for age in command_ages.values() if age is not None]
+        source_identity = applied if applied is not None and len(applied) == 3 else (None, None, None)
         return {
-            "joint_names": list(OMNIHAND_JOINT_NAMES),
-            "joint_positions": measured_joint_positions,
-            "joint_position_commands": applied_joint_commands,
-            "left_fresh": side_fresh["left"],
-            "right_fresh": side_fresh["right"],
-            "joint_state_fresh": joint_state_fresh,
-            "fresh": side_fresh["left"] and side_fresh["right"] and joint_state_fresh,
-            "age_s": max(received_ages) if received_ages else None,
             "enabled": enabled,
-            "applied_source_timestamp_ns": applied_source_timestamp_ns,
-            "applied_frame_id": applied_frame_id,
+            "left_fresh": side_fresh.get("left", False),
+            "right_fresh": side_fresh.get("right", False),
+            "age_s": max((age for age in command_ages.values() if age is not None), default=None),
+            "applied_frame_id": source_identity[1],
+            "applied_source_timestamp_ns": source_identity[2],
+            "positions": measured,
+            "sample_times": stamps,
+            "targets": commands,
+            "applied": applied,
+            "joint_names": list(OMNIHAND_JOINT_NAMES),
+            "joint_positions": np.array([measured.get(n, 0) for n in OMNIHAND_JOINT_NAMES], dtype=np.float32),
+            "joint_position_commands": np.array([commands.get(n, 0) for n in OMNIHAND_JOINT_NAMES], dtype=np.float32),
+            "fresh": fresh and applied is not None and all(side_fresh.get(side, False) for side in ("left", "right")),
+            "joint_state_fresh": fresh,
         }
+
+    def acknowledge(self):
+        self._pending = None
 
     def reset(self):
         self.set_takeover_enabled(False)
 
     def close(self):
+        self._closed = True
+        self.set_takeover_enabled(False)
         self._stop.set()
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=3.0)
-            if thread.is_alive():
-                logger.warning("OmniHand runtime did not stop within 3 seconds")
-            self._thread = None
+        for process, _, states in self._workers.values():
+            if process.pid is not None:
+                process.join(timeout=2)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=2)
+                if process.is_alive():
+                    process.kill()
+                    process.join()
+            states.cancel_join_thread()
+            states.close()

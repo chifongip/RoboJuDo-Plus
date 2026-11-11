@@ -1,42 +1,31 @@
+"""Shared OmniHand runtime contracts for dex-teleop and checked XR callers."""
+
+import multiprocessing as mp
 import queue
 import sys
-import threading
-import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
 from robojudo.controller.ctrl_cfgs import OmniHandCfg
 from robojudo.controller.omnihand_runtime import (
+    OMNIHAND_JOINT_NAMES,
     OMNIHAND_LEFT_LIMITS,
     OMNIHAND_RIGHT_LIMITS,
     OmniHandRuntime,
+    _CommandMailbox,
+    create_hand,
 )
 
 
-class ObservedCommandQueue(queue.Queue):
-    """Signal when the worker has finished handling its first dequeued frame."""
-
-    def __init__(self):
-        super().__init__(maxsize=1)
-        self.processed = threading.Event()
-        self._dequeued = False
-
-    def get(self, *args, **kwargs):
-        if self._dequeued:
-            self.processed.set()
-        result = super().get(*args, **kwargs)
-        self._dequeued = True
-        return result
-
-    def get_nowait(self):
-        # Producer-side queue clearing is not a completed worker iteration.
-        return super().get(block=False)
-
-
 class TestOmniHandConfig(unittest.TestCase):
+    def test_timeouts_and_rates_must_be_finite(self):
+        for field in ("command_timeout_s", "joint_state_fps", "joint_state_timeout_s", "startup_timeout_s"):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                OmniHandCfg(**{field: float("inf")})
+
     def test_hcan_exposes_adapter_indices_without_channel_configuration(self):
         cfg = OmniHandCfg(transport="hcan", left_adapter_index=1, right_adapter_index=0)
         self.assertEqual(cfg.transport, "hcan")
@@ -48,246 +37,140 @@ class TestOmniHandConfig(unittest.TestCase):
 
 
 class TestOmniHandRuntime(unittest.TestCase):
-    def test_disable_during_left_write_cancels_right_and_frame_publication(self):
-        entered = threading.Event()
-        release = threading.Event()
-        sent = []
+    def test_command_mailbox_retains_latest_frame_during_producer_burst(self):
+        self.runtime.set_takeover_enabled(True)
+        for frame_id in range(100):
+            self.runtime.set_joint_commands(np.zeros(12), np.zeros(12), 123, frame_id)
+        for _, mailbox, _ in self.runtime._workers.values():
+            message = mailbox.get_nowait()
+            self.assertEqual(message[0], self.runtime._gate[0])
+            self.assertEqual(message[2][1], 99)
+            with self.assertRaises(queue.Empty):
+                mailbox.get_nowait()
 
-        class FakeHand:
-            def __init__(self, side):
-                self.side = side
-
-            def set_all_active_joint_angles(self, positions):
-                if self.side == "left":
-                    entered.set()
-                    if not release.wait(2):
-                        raise TimeoutError("test did not release left write")
-                sent.append(self.side)
-
-            def get_all_active_joint_angles(self):
-                return np.zeros(12)
-
-        runtime = OmniHandRuntime(OmniHandCfg(command_timeout_s=10), hand_factory=lambda _, side: FakeHand(side))
-        try:
-            commands = ObservedCommandQueue()
-            runtime._command_queue = commands
-            runtime.set_takeover_enabled(True)
-            runtime.set_joint_commands(np.zeros(12), np.zeros(12), 123, 8)
-            self.assertTrue(entered.wait(1))
-            runtime.set_takeover_enabled(False)
-            # A quick re-enable must not revive a frame from the previous takeover.
-            runtime.set_takeover_enabled(True)
-            release.set()
-            self.assertTrue(commands.processed.wait(1))
-            self.assertEqual(sent, ["left"])
-            data = runtime.get_data()
-            self.assertIsNone(data["applied_frame_id"])
-            self.assertIsNone(data["applied_source_timestamp_ns"])
-            self.assertFalse(data["left_fresh"])
-            self.assertFalse(data["right_fresh"])
-        finally:
-            release.set()
-            runtime.close()
-
-    def test_expired_frame_is_dropped_before_either_write(self):
-        class FakeHand:
-            def get_all_active_joint_angles(self):
-                return np.zeros(12)
-
-            def set_all_active_joint_angles(self, positions):
-                sent.append(positions)
-
-        sent = []
-        # Hold the worker in startup feedback while a frame waits in its queue.
-        entered = threading.Event()
-        release = threading.Event()
-        clock = SimpleNamespace(monotonic=lambda: now[0], time_ns=time.time_ns)
-        now = [10.0]
-        runtime = OmniHandRuntime.__new__(OmniHandRuntime)
-        original_update = OmniHandRuntime._update_measured_joint_positions
-
-        def blocked_update(inst, hands, timestamp):
-            entered.set()
-            if not release.wait(2):
-                raise TimeoutError("test did not release feedback")
-            original_update(inst, hands, timestamp)
-
-        # Run construction separately because startup waits for the first feedback.
-        errors = []
-
-        def start():
-            try:
-                runtime.__init__(OmniHandCfg(command_timeout_s=0.03), hand_factory=lambda *_: FakeHand())
-            except Exception as exc:
-                errors.append(exc)
-
-        with (
-            patch("robojudo.controller.omnihand_runtime.time", clock),
-            patch.object(OmniHandRuntime, "_update_measured_joint_positions", blocked_update),
-        ):
-            constructor = threading.Thread(target=start)
-            constructor.start()
-            try:
-                self.assertTrue(entered.wait(1))
-                commands = ObservedCommandQueue()
-                runtime._command_queue = commands
-                runtime.set_takeover_enabled(True)
-                runtime.set_joint_commands(np.zeros(12), np.zeros(12), 123, 9)
-                now[0] += 0.1
-                release.set()
-                constructor.join(1)
-                self.assertFalse(constructor.is_alive())
-                self.assertEqual(errors, [])
-                self.assertTrue(commands.processed.wait(1))
-                self.assertEqual(sent, [])
-                self.assertIsNone(runtime.get_data()["applied_frame_id"])
-            finally:
-                release.set()
-                constructor.join(3)
-                runtime.close()
-
-    def test_frame_expiring_during_left_write_cancels_right(self):
-        now = [10.0]
-        sent = []
-        clock = SimpleNamespace(monotonic=lambda: now[0], time_ns=time.time_ns)
-
-        class FakeHand:
-            def __init__(self, side):
-                self.side = side
-
-            def get_all_active_joint_angles(self):
-                return np.zeros(12)
-
-            def set_all_active_joint_angles(self, positions):
-                sent.append(self.side)
-                now[0] += 0.1
-
-        with patch("robojudo.controller.omnihand_runtime.time", clock):
-            runtime = OmniHandRuntime(OmniHandCfg(command_timeout_s=0.03), hand_factory=lambda _, side: FakeHand(side))
-            try:
-                commands = ObservedCommandQueue()
-                runtime._command_queue = commands
-                runtime.set_takeover_enabled(True)
-                runtime.set_joint_commands(np.zeros(12), np.zeros(12), 123, 9)
-                self.assertTrue(commands.processed.wait(1))
-                self.assertEqual(sent, ["left"])
-                data = runtime.get_data()
-                self.assertIsNone(data["applied_frame_id"])
-                self.assertFalse(data["fresh"])
-            finally:
-                runtime.close()
-
-    def test_runtime_applies_controller_queued_dual_hand_frame(self):
-        class FakeHand:
-            def __init__(self):
-                self.positions = np.zeros(12)
-
-            def set_all_active_joint_angles(self, positions):
-                self.positions = np.asarray(positions)
-
-            def get_all_active_joint_angles(self):
-                return self.positions
-
-        hands = {"left": FakeHand(), "right": FakeHand()}
-        runtime = OmniHandRuntime(
-            OmniHandCfg(joint_state_fps=100.0),
-            hand_factory=lambda _, side: hands[side],
-        )
-        try:
-            runtime.set_takeover_enabled(True)
-            runtime.set_joint_commands(np.full(12, 0.1), np.full(12, 0.2), 123, 9)
-            deadline = time.monotonic() + 1.0
-            data = runtime.get_data()
-            while data["applied_frame_id"] != 9 and time.monotonic() < deadline:
-                time.sleep(0.005)
-                data = runtime.get_data()
-
-            self.assertEqual(data["applied_frame_id"], 9)
-            self.assertEqual(data["applied_source_timestamp_ns"], 123)
-            np.testing.assert_allclose(
-                hands["left"].positions,
-                np.clip(0.1, OMNIHAND_LEFT_LIMITS[:, 0], OMNIHAND_LEFT_LIMITS[:, 1]),
-            )
-            np.testing.assert_allclose(
-                hands["right"].positions,
-                np.clip(0.2, OMNIHAND_RIGHT_LIMITS[:, 0], OMNIHAND_RIGHT_LIMITS[:, 1]),
-            )
-        finally:
-            runtime.close()
-
-    def test_joint_command_queue_keeps_only_newest_clipped_atomic_frame(self):
-        runtime = OmniHandRuntime.__new__(OmniHandRuntime)
-        runtime._command_queue = queue.Queue(maxsize=1)
-        runtime._lock = threading.Lock()
-        runtime._takeover_generation = 0
-
-        first = runtime.set_joint_commands(np.full(12, 100.0), np.full(12, -100.0), 10, 1)
-        second = runtime.set_joint_commands(np.zeros(12), np.zeros(12), 20, 2)
-
-        np.testing.assert_allclose(first[:12], OMNIHAND_LEFT_LIMITS[:, 1])
-        np.testing.assert_allclose(first[12:], OMNIHAND_RIGHT_LIMITS[:, 0])
-        command = runtime._command_queue.get_nowait()
-        self.assertEqual(command.frame_id, 2)
-        self.assertEqual(command.source_timestamp_ns, 20)
-        np.testing.assert_array_equal(second, np.zeros(24))
-
-    def test_hcan_factory_always_uses_channel_zero(self):
-        calls = []
-
-        class FakeHand:
-            def init(self):
-                return True
-
-        class FakeOmniHandPro2025:
-            kDefaultHandDeviceId = 7
-
-            @staticmethod
-            def create_hand_by_hcan(**kwargs):
-                calls.append(kwargs)
-                return FakeHand()
-
-        module = SimpleNamespace(
-            HandType=SimpleNamespace(LEFT=1, RIGHT=2),
-            OmniHandPro2025=FakeOmniHandPro2025,
-        )
-        cfg = OmniHandCfg(transport="hcan", left_adapter_index=4, right_adapter_index=5)
-        with patch.dict(sys.modules, {"omnihand": module}):
-            OmniHandRuntime._create_hand(cfg, "left")
-            OmniHandRuntime._create_hand(cfg, "right")
-
-        self.assertEqual([call["canfd_device_id"] for call in calls], [4, 5])
-        self.assertEqual([call["canfd_channel_id"] for call in calls], [0, 0])
-
-    def test_data_requires_fresh_commands_and_joint_states(self):
+    def setUp(self):
+        self.clock = self.enterContext(patch("time.monotonic", return_value=10.0))
         runtime = OmniHandRuntime.__new__(OmniHandRuntime)
         runtime.cfg = OmniHandCfg()
-        runtime._error = None
-        runtime._lock = __import__("threading").Lock()
-        runtime._enabled = True
-        now = time.monotonic()
-        runtime._last_command_at = {"left": now, "right": now}
-        runtime._last_joint_state_at = {"left": now, "right": now}
-        runtime._applied_commands = {
-            "left": np.zeros(12, dtype=np.float32),
-            "right": np.ones(12, dtype=np.float32),
+        runtime.read_only = False
+        runtime._gate = mp.get_context("spawn").Array("q", [0, 0])
+        runtime._pending = None
+        runtime._sequence = 0
+        runtime._poll = lambda: None
+        runtime._workers = {
+            side: (None, _CommandMailbox(mp.get_context("spawn")), queue.Queue(1)) for side in ("left", "right")
         }
-        runtime._measured_joint_positions = {
-            "left": np.full(12, 2.0, dtype=np.float32),
-            "right": np.full(12, 3.0, dtype=np.float32),
+        runtime._states = {
+            side: {
+                "positions": [0.0] * 19,
+                "sampled_at": 10.0,
+                "targets": None,
+                "applied": None,
+                "commanded_at": None,
+                "generation": None,
+            }
+            for side in ("left", "right")
         }
-        runtime._applied_source_timestamp_ns = 123
-        runtime._applied_frame_id = 7
+        self.runtime = runtime
+        self.positions = dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0)
 
-        data = runtime.get_data()
-        self.assertTrue(data["fresh"])
-        self.assertEqual(len(data["joint_names"]), 24)
-        np.testing.assert_array_equal(data["joint_position_commands"][:12], np.zeros(12))
-        np.testing.assert_array_equal(data["joint_positions"][12:], np.full(12, 3.0))
-        self.assertEqual(data["applied_frame_id"], 7)
+    def test_disabled_dex_frames_do_not_enqueue_hardware_work(self):
+        self.runtime.set_joint_commands(np.zeros(12), np.zeros(12), 123, 1)
+        for worker in self.runtime._workers.values():
+            with self.assertRaises(queue.Empty):
+                worker[1].get_nowait()
+        self.assertFalse(self.runtime.get_data()["fresh"])
+        self.assertTrue(self.runtime.get_data()["joint_state_fresh"])
 
-        runtime._last_command_at["right"] = now - 1.0
-        self.assertFalse(runtime.get_data()["fresh"])
+    def test_dex_frames_keep_newest_clipped_targets_and_source_identity(self):
+        self.runtime.set_takeover_enabled(True)
+        clipped = self.runtime.set_joint_commands(np.full(12, 100.0), np.full(12, -100.0), 10, 1)
+        np.testing.assert_allclose(clipped[:12], OMNIHAND_LEFT_LIMITS[:, 1])
+        np.testing.assert_allclose(clipped[12:], OMNIHAND_RIGHT_LIMITS[:, 0])
+        self.runtime.set_joint_commands(np.zeros(12), np.zeros(12), 20, 2)
+        frames = [worker[1].get_nowait() for worker in self.runtime._workers.values()]
+        self.assertEqual(frames[0][2], frames[1][2])
+        self.assertEqual(frames[0][2][1:], (2, 20))
+        self.assertTrue(all(frame[3] == [0.0] * 12 for frame in frames))
+
+    def test_checked_frames_reject_invalid_targets_and_multiple_pending_commands(self):
+        self.runtime.set_takeover_enabled(True)
+        bad = {**self.positions, "L_index_mcp_joint": 100.0}
+        with self.assertRaisesRegex(ValueError, "limits"):
+            self.runtime.submit(bad, (1, 1), 10.1)
+        self.runtime.submit(self.positions, (1, 2), 10.1)
+        with self.assertRaisesRegex(RuntimeError, "pending"):
+            self.runtime.submit(self.positions, (1, 3), 10.1)
+
+    def test_expired_or_disabled_checked_frames_are_rejected(self):
+        with self.assertRaises(RuntimeError):
+            self.runtime.submit(self.positions, (1, 1), 10.1)
+        self.runtime.set_takeover_enabled(True)
+        with self.assertRaises(RuntimeError):
+            self.runtime.submit(self.positions, (1, 1), 9.9)
+
+    def test_disable_revokes_pending_generation_and_applied_identity(self):
+        self.runtime.set_takeover_enabled(True)
+        self.runtime.submit(self.positions, (1, 1), 10.1)
+        generation = self.runtime._gate[0]
+        for state in self.runtime._states.values():
+            state.update(applied=(1, 7, 123), commanded_at=10.0, generation=generation, targets=[0.0] * 12)
+        self.assertEqual(self.runtime.get_data()["applied_frame_id"], 7)
+        self.runtime.reset()
+        self.runtime.set_takeover_enabled(True)
+        result = self.runtime.get_data()
+        self.assertIsNone(self.runtime._pending)
+        self.assertIsNone(result["applied_frame_id"])
+        self.assertFalse(result["left_fresh"])
+        self.assertFalse(result["fresh"])
+
+    def test_command_leases_and_sample_ages_remain_independent(self):
+        self.runtime.set_takeover_enabled(True)
+        for state in self.runtime._states.values():
+            state.update(applied=(1, 7, 123), commanded_at=10.0, generation=self.runtime._gate[0], targets=[0.0] * 12)
+        result = self.runtime.get_data()
+        self.assertTrue(result["fresh"])
+        self.assertEqual(result["applied_source_timestamp_ns"], 123)
+        self.clock.return_value = 10.3
+        for state in self.runtime._states.values():
+            state["sampled_at"] = 10.3
+        result = self.runtime.get_data()
+        self.assertFalse(result["fresh"])
+        self.assertTrue(result["joint_state_fresh"])
+
+    def test_invalid_dex_arrays_are_rejected(self):
+        for left in ([0.0] * 11, [float("nan")] * 12):
+            with self.assertRaisesRegex(ValueError, "12 finite"):
+                self.runtime.set_joint_commands(left, np.zeros(12))
+
+    def test_xr_can_require_serials_without_removing_index_support(self):
+        with self.assertRaisesRegex(ValueError, "serial"):
+            OmniHandRuntime(OmniHandCfg(), require_serials=True)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestOmniHandTransports(unittest.TestCase):
+    def test_existing_transport_factory_arguments_remain_supported(self):
+        hand = Mock()
+        hand.init.return_value = True
+        vendor = SimpleNamespace(
+            kDefaultHandDeviceId=1,
+            create_hand_by_hcan=Mock(return_value=hand),
+            create_hand_by_zlgcan=Mock(return_value=hand),
+            create_hand_socketcan=Mock(return_value=hand),
+        )
+        module = SimpleNamespace(HandType=SimpleNamespace(LEFT=1, RIGHT=2), OmniHandPro2025=vendor)
+        with patch.dict(sys.modules, omnihand=module):
+            cfg = OmniHandCfg(left_adapter_index=4, right_adapter_index=5)
+            create_hand(cfg, "left")
+            create_hand(cfg, "right")
+            self.assertEqual(
+                [call.kwargs["canfd_device_id"] for call in vendor.create_hand_by_hcan.call_args_list], [4, 5]
+            )
+            self.assertEqual(
+                [call.kwargs["canfd_channel_id"] for call in vendor.create_hand_by_hcan.call_args_list], [0, 0]
+            )
+            create_hand(OmniHandCfg(transport="zlgcan"), "right")
+            self.assertEqual(vendor.create_hand_by_zlgcan.call_args.kwargs["canfd_channel_id"], 1)
+            create_hand(OmniHandCfg(transport="socketcan", right_interface="can8"), "right")
+            self.assertEqual(vendor.create_hand_socketcan.call_args.kwargs["can_interface"], "can8")
+        self.assertEqual(hand.init.call_count, 4)

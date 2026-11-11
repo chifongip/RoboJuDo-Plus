@@ -45,6 +45,18 @@ class UpperBodyFeedback:
             self.socket.close(linger=0)
             raise
 
+    @property
+    def schema_version(self):
+        return getattr(self.cfg, "schema_version", 1)
+
+    @property
+    def command_names(self):
+        if self.schema_version == 2:
+            from robojudo.controller.omnihand_runtime import OMNIHAND_JOINT_NAMES
+
+            return [*self.cfg.joint_names, *OMNIHAND_JOINT_NAMES]
+        return self.cfg.joint_names
+
     def reset(self, reason="controller session reset"):
         self.reset_reason = reason
         self.generation += 1
@@ -77,7 +89,7 @@ class UpperBodyFeedback:
         valid = valid and all(math.isfinite(value) for value in (*positions.values(), *targets.values()))
         self.state_id += 1
         frame = {
-            "schema_version": 1,
+            "schema_version": self.schema_version,
             "type": "upper_body_state",
             "session_id": self.session_id,
             "generation": self.generation,
@@ -101,6 +113,8 @@ class UpperBodyFeedback:
             "visualize_targets": self.cfg.visualize_targets,
             "pipeline_timing_ms": {} if timing_ms is None else dict(timing_ms),
         }
+        if self.schema_version == 2:
+            frame["hand_velocity_limit"] = self.cfg.hand_velocity_limit
         deadline = min(sample_times.values(), default=float("-inf")) + self.cfg.feedback_timeout_s
         self._states[self.state_id] = (deadline, frame)
         while len(self._states) > 16:
@@ -113,10 +127,10 @@ class UpperBodyFeedback:
     def validate(self, message, positions, *, receiving=False):
         if (
             type(message.get("schema_version")) is not int
-            or message["schema_version"] != 1
+            or message["schema_version"] != self.schema_version
             or message.get("type") != "upper_body_proposal"
         ):
-            raise ValueError("expected upper_body_proposal schema version 1")
+            raise ValueError(f"expected upper_body_proposal schema version {self.schema_version}")
         if message.get("session_id") != self.session_id or _counter(message.get("generation")) != self.generation:
             raise ValueError("obsolete upper-body session or generation")
         frame_id = _counter(message.get("frame_id"))
@@ -150,7 +164,7 @@ class UpperBodyFeedback:
             raise ValueError("superseded arm command baseline")
         if message.get("intent") != self.intent or self.intent not in {"TRACK", "HOME"}:
             raise ValueError("arm proposal is not authorized by the current intent")
-        if set(positions) != set(self.cfg.joint_names):
+        if set(positions) != set(self.command_names):
             raise ValueError("feedback proposals must contain all configured arm joints")
         if receiving and frame_id <= self._frame_id:
             raise ValueError("duplicate or out-of-order arm proposal")
@@ -166,8 +180,13 @@ class UpperBodyFeedback:
                 raise ValueError(
                     f"arm target exceeds position limits: {name}={value!r}, allowed [{lower!r}, {upper!r}]"
                 )
-            if abs(value - feedback["last_commanded_positions"][name]) > speed * feedback["control_dt"] + 1e-6:
+            joint_speed = speed
+            if self.schema_version == 2 and name not in self.cfg.joint_names:
+                joint_speed = 0.0 if status == "homing" else feedback["hand_velocity_limit"]
+            if abs(value - feedback["last_commanded_positions"][name]) > joint_speed * feedback["control_dt"] + 1e-6:
                 raise ValueError(f"arm target exceeds command velocity limit: {name}")
+        if self.schema_version == 2 and any(float(np.float32(value)) != value for value in positions.values()):
+            raise ValueError("proposals must contain already checked float32 targets")
         if receiving:
             self.bridge_id = bridge_id
             self._frame_id = frame_id
@@ -182,7 +201,7 @@ class UpperBodyFeedback:
         """Validate display-only poses without authorizing or refreshing commands."""
         if (
             type(message.get("schema_version")) is not int
-            or message["schema_version"] != 1
+            or message["schema_version"] != self.schema_version
             or message.get("session_id") != self.session_id
         ):
             raise ValueError("invalid visualization session")
