@@ -325,19 +325,29 @@ class OmniHandPro2025:
         self.assertEqual(states.get_nowait()["sampled_at"], 10.0)
 
     def test_invalid_measurements_and_write_errors_revoke_gate(self):
-        for failure in ("shape", "nan", "write"):
+        for failure in ("shape", "empty", "nan", "inf", "write"):
             with self.subTest(failure=failure), patch("time.monotonic", return_value=10.0):
                 hand = Mock()
                 hand.get_all_joint_angles.return_value = [0.0] * 19
                 if failure == "write":
                     hand.set_all_active_joint_angles.side_effect = OSError("write failed")
                 else:
-                    hand.get_all_joint_angles.return_value = [0.0] * 18 if failure == "shape" else [float("nan")] * 19
+                    hand.get_all_joint_angles.return_value = {
+                        "shape": [0.0] * 18,
+                        "empty": [],
+                        "nan": [float("nan")] * 19,
+                        "inf": [0.0] * 18 + [float("inf")],
+                    }[failure]
                 states, errors, gate = self.run_hand_cycle(hand, "right")
                 self.assertTrue(states.empty())
                 self.assertEqual(gate[1], 0)
                 self.assertGreater(gate[0], 3)
-                self.assertIn("right:", errors.get_nowait())
+                error = errors.get_nowait()
+                self.assertIn("right:", error)
+                if failure != "write":
+                    angles = np.asarray(hand.get_all_joint_angles.return_value)
+                    self.assertIn(f"received shape={angles.shape}", error)
+                    self.assertIn(f"nonfinite_indices={np.flatnonzero(~np.isfinite(angles)).tolist()}", error)
 
 
 class SharedWorkerTimingTests(unittest.TestCase):

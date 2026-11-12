@@ -281,7 +281,11 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail):
             sampled_at = time.monotonic()
             angles = np.asarray(hand.get_all_joint_angles(), dtype=float)
             if angles.shape != (19,) or not np.isfinite(angles).all():
-                raise RuntimeError("expected 19 finite finger angles")
+                raise RuntimeError(
+                    f"expected 19 finite finger angles; received shape={angles.shape}, "
+                    f"nonfinite_indices={np.flatnonzero(~np.isfinite(angles)).tolist()}, "
+                    f"values={angles.ravel()[:19].tolist()}"
+                )
             state.update(positions=angles.tolist(), sampled_at=sampled_at)
             publish(side, state.copy())
             stop.wait(max(0.0, 1.0 / cfg.joint_state_fps - (time.monotonic() - cycle_started)))
