@@ -145,6 +145,24 @@ class InstallerTests(InstallerFixture):
         self.assertEqual(commands[1][-4:], ["--install-prefix", str(prefix), "--jobs", "3"])
         self.assertNotIn("remove", str(commands))
 
+    def test_successful_setup_persists_target_runtime_for_activation(self):
+        prefix = self.directory / "new-env"
+        runtime = prefix / "lib/libstdc++.so.6"
+        runtime.parent.mkdir(parents=True)
+        runtime.touch()
+        with (
+            patch.object(installer, "find_conda", return_value="conda"),
+            patch.object(installer, "environment_prefix", side_effect=[None, prefix]),
+            patch.object(installer, "run") as run,
+        ):
+            installer.create_environment(installer.parse_args(["--name", "test-xr"]))
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn("--install-prefix", commands[-2])
+        self.assertEqual(
+            commands[-1],
+            ["conda", "env", "config", "vars", "set", "--prefix", str(prefix), f"LD_PRELOAD={runtime}"],
+        )
+
     def test_reuse_validates_target_before_installing_conda_dependencies(self):
         with (
             patch.object(installer, "find_conda", return_value="conda"),

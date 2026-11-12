@@ -33,6 +33,10 @@ The launcher works with Python 3.10+ and does not require PyYAML or activation o
 It uses Conda to create Python 3.11, installs the editable `[x2]` package and pinned native dependencies,
 downloads checksum-verified Pinocchio 4.1.0 sources, and builds the symbolic bindings for this interpreter.
 The bindings are registered permanently inside the environment; no `PYTHONPATH` export is needed, including in new terminals.
+After successful setup, the installer saves `LD_PRELOAD` pointing to the environment's `lib/libstdc++.so.6`
+when that library is present. This makes normal Python sessions use the same C++ runtime as the installer checks,
+including on Jetson. This replaces any previously configured `LD_PRELOAD` value for this environment.
+If the environment is already active, run `conda deactivate` and `conda activate robojudo-xr` to apply the setting.
 The initial compilation can take several minutes. The default is two build jobs; use `--jobs 1` on memory-limited systems.
 
 If `robojudo-xr` already exists, setup stops before changing it. Choose a different name or explicitly reuse/repair it:

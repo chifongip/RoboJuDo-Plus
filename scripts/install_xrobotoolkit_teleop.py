@@ -63,7 +63,16 @@ FOREIGN_PATHS = (
 
 
 def clean_environment():
-    return {key: value for key, value in os.environ.items() if key not in FOREIGN_PATHS}
+    env = {key: value for key, value in os.environ.items() if key not in FOREIGN_PATHS}
+
+    # Internal installation runs under the target Conda interpreter. Load its
+    # C++ runtime before Placo or other native extensions (needed on Jetson).
+    if "--install-prefix" in sys.argv:
+        runtime = Path(sys.prefix) / "lib" / "libstdc++.so.6"
+        if runtime.is_file():
+            env["LD_PRELOAD"] = str(runtime)
+
+    return env
 
 
 def run(command, *, capture=False, log=None):
@@ -214,6 +223,11 @@ def create_environment(args):
             str(args.jobs),
         ]
     )
+    runtime = prefix / "lib" / "libstdc++.so.6"
+    if runtime.is_file():
+        # Keep normal Python sessions consistent with installer verification.
+        run([conda, "env", "config", "vars", "set", "--prefix", str(prefix), f"LD_PRELOAD={runtime}"])
+        print("Saved the Conda C++ runtime preload. Reactivate the environment if it is already active.")
     print(f"\nSetup complete. Activate with: conda activate {args.name}")
     print("Run: python -m xrobotoolkit_teleop.integrations.robojudo --robot x2 --ik-backend placo")
     print("Or select: --ik-backend lerobot")
