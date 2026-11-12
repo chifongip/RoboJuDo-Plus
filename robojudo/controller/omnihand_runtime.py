@@ -1,4 +1,4 @@
-"""Dual OmniHand Pro control with one isolated SDK process per adapter.
+"""Dual OmniHand Pro control with one isolated SDK process owning both adapters.
 
 Both dex-teleop and checked XR proposals use this runtime. Connection policy is
 configuration-driven; XR explicitly requires serial-verified robot-side HCAN.
@@ -7,6 +7,7 @@ configuration-driven; XR explicitly requires serial-verified robot-side HCAN.
 import multiprocessing as mp
 import pickle
 import queue
+import threading
 import time
 
 import numpy as np
@@ -117,19 +118,31 @@ def connect_verified_hand(cfg, side):
     if not serial or not expected:
         raise ValueError(f"{side} HCAN adapter serial and expected hand serial are required")
     device_id = cfg.hand_can_id or 1
-    hand = OmniHandPro2025.create_hand_by_hcan(
-        hand_type=HandType.LEFT if side == "left" else HandType.RIGHT,
-        hand_device_id=device_id,
-        hcan_serial_number=serial,
-        canfd_channel_id=0,
-    )
+    context = f"{side}: HCAN adapter {serial!r}"
+    try:
+        hand = OmniHandPro2025.create_hand_by_hcan(
+            hand_type=HandType.LEFT if side == "left" else HandType.RIGHT,
+            hand_device_id=device_id,
+            hcan_serial_number=serial,
+            canfd_channel_id=0,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"{context}: open failed: {exc}") from exc
     if hand is None:
         raise RuntimeError(f"{side}: HCAN adapter {serial!r} could not be opened")
-    hand.set_frame_recv_timeout(cfg.frame_recv_timeout_ms)
-    vendor, device = hand.get_vendor_info(), hand.get_device_info()
-    actual = vendor.product_seq_num.rstrip("\0")
-    if not vendor.product_model or device.hand_device_id != device_id or actual != expected:
-        raise RuntimeError(f"{side}: hand identity mismatch: expected {expected!r}, received {actual!r}")
+    try:
+        hand.set_frame_recv_timeout(cfg.frame_recv_timeout_ms)
+        vendor, device = hand.get_vendor_info(), hand.get_device_info()
+        actual = vendor.product_seq_num.rstrip("\0")
+    except Exception as exc:
+        raise RuntimeError(f"{context}: identity read failed (expected {expected!r}): {exc}") from exc
+    if not vendor.product_model or not actual:
+        raise RuntimeError(f"{context}: identity unreadable: expected {expected!r}, received {actual!r}")
+    if device.hand_device_id != device_id or actual != expected:
+        raise RuntimeError(
+            f"{context}: hand identity mismatch: expected {expected!r}/CAN ID {device_id}, "
+            f"received {actual!r}/CAN ID {device.hand_device_id}"
+        )
     return hand
 
 
@@ -226,56 +239,129 @@ def _publish_state(channel, value):
             pass
 
 
-def _worker(cfg, side, commands, states, stop, gate):
-    """Never import the SDK in the parent; verify before reading or commanding."""
+def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail):
+    """Serialize calls on one handle, publishing writes before the next read."""
+    state = {
+        "positions": None,
+        "sampled_at": None,
+        "applied": None,
+        "targets": None,
+        "commanded_at": None,
+        "generation": None,
+    }
+    stage = "read measurements"
+
+    def allowed(generation, deadline):
+        with gate.get_lock():
+            return not stop.is_set() and gate[0] == generation and gate[1] == 1 and time.monotonic() <= deadline
+
     try:
-        hand = create_hand(cfg, side)
-        applied = None
-        target = None
-        commanded_at = None
-        applied_generation = None
+        while not stop.is_set():
+            cycle_started = time.monotonic()
+            try:
+                generation, deadline, identity, angles, submitted_at = commands.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                state["applied"], state["generation"] = None, None
+                if allowed(generation, deadline):
+                    stage = "write"
+                    hand.set_all_active_joint_angles(angles)
+                    # In-flight writes cannot be undone, even after revocation.
+                    state["targets"], state["commanded_at"] = angles, submitted_at
+                    if allowed(generation, deadline):
+                        state["applied"], state["generation"] = identity, generation
+                if state["positions"] is not None:
+                    # Acknowledgements must not wait for another blocking read.
+                    # Keep the previous measurement's original sample timestamp.
+                    publish(side, state.copy())
+            if stop.is_set():
+                return
+            stage = "read measurements"
+            sampled_at = time.monotonic()
+            angles = np.asarray(hand.get_all_joint_angles(), dtype=float)
+            if angles.shape != (19,) or not np.isfinite(angles).all():
+                raise RuntimeError("expected 19 finite finger angles")
+            state.update(positions=angles.tolist(), sampled_at=sampled_at)
+            publish(side, state.copy())
+            stop.wait(max(0.0, 1.0 / cfg.joint_state_fps - (time.monotonic() - cycle_started)))
+    except Exception as exc:
+        fail(side, stage, exc)
+
+
+def _worker(cfg, commands, states, stop, gate, errors):
+    """Initialize sequentially, then give each handle its own I/O thread."""
+    hands, snapshot, threads = {}, {}, []
+    local_commands = {side: queue.Queue(1) for side in ("left", "right")}
+    snapshot_lock = threading.Lock()
+    failure_lock = threading.Lock()
+    failed = False
+
+    def publish(side, state):
+        with snapshot_lock:
+            snapshot[side] = state
+            if len(snapshot) == 2:
+                _publish_state(states, snapshot.copy())
+
+    def fail(side, stage, exc):
+        nonlocal failed
+        with failure_lock:
+            if failed:
+                return
+            failed = True
+            with gate.get_lock():
+                gate[0] += 1
+                gate[1] = 0
+            if cfg.transport == "socketcan":
+                adapter = getattr(cfg, f"{side}_interface")
+            else:
+                adapter = getattr(cfg, f"{side}_hcan_serial") or getattr(cfg, f"{side}_adapter_index")
+            # Faults have a separate reliable slot, independent of measurements.
+            errors.put_nowait(
+                f"{side}: {cfg.transport} adapter {adapter!r}: {stage}: {type(exc).__name__}: {exc}"[:4000]
+            )
+            stop.set()
+
+    side = "left"
+    try:
+        for side in ("left", "right"):
+            if stop.is_set():
+                return
+            hands[side] = create_hand(cfg, side)
+        for side in ("left", "right"):
+            thread = threading.Thread(
+                target=_hand_loop,
+                args=(cfg, side, hands[side], local_commands[side], stop, gate, publish, fail),
+                daemon=True,
+                name=f"omnihand-{side}",
+            )
+            threads.append(thread)
+            thread.start()
         while not stop.is_set():
             try:
                 generation, deadline, identity, angles, submitted_at = commands.get_nowait()
             except queue.Empty:
                 pass
             else:
-                with gate.get_lock():
-                    allowed = gate[0] == generation and gate[1] == 1 and time.monotonic() <= deadline
-                if allowed:
-                    hand.set_all_active_joint_angles(angles)
-                    # A successful in-flight write cannot be undone by revocation.
-                    # Report its actual target, but never acknowledge an expired lease.
-                    target, commanded_at = angles, submitted_at
-                    with gate.get_lock():
-                        allowed = gate[0] == generation and gate[1] == 1 and time.monotonic() <= deadline
-                    if allowed:
-                        applied = identity
-                        applied_generation = generation
-                    else:
-                        applied, applied_generation = None, None
-            sampled_at = time.monotonic()
-            angles = np.asarray(hand.get_all_joint_angles(), dtype=float)
-            if angles.shape != (19,) or not np.isfinite(angles).all():
-                raise RuntimeError(f"{side}: expected 19 finite finger angles")
-            _publish_state(
-                states,
-                {
-                    "positions": angles.tolist(),
-                    "sampled_at": sampled_at,
-                    "applied": applied,
-                    "targets": target,
-                    "commanded_at": commanded_at,
-                    "generation": applied_generation,
-                },
-            )
-            stop.wait(1.0 / cfg.joint_state_fps)
+                for index, side in enumerate(("left", "right")):
+                    message = (generation, deadline, identity, angles[index * 12 : (index + 1) * 12], submitted_at)
+                    _publish_state(local_commands[side], message)
+            stop.wait(0.001)
     except Exception as exc:
-        _publish_state(states, {"error": f"{side}: {type(exc).__name__}: {exc}"})
+        fail(side, "connect/start worker", exc)
+    finally:
+        stop.set()
+        # Never destroy handles while an I/O thread is using them. The parent
+        # terminates this process if a native call prevents these joins.
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join()
+        snapshot.clear()
+        hands.clear()
 
 
 class OmniHandRuntime:
-    """Bounded parent-side coordinator; application IDs require both worker writes."""
+    """Bounded parent-side coordinator; application IDs require both hand writes."""
 
     def __init__(self, cfg, *, read_only=False, require_serials=False):
         if require_serials and (
@@ -288,51 +374,60 @@ class OmniHandRuntime:
         self._ctx = mp.get_context("spawn")
         self._stop = self._ctx.Event()
         self._gate = self._ctx.Array("q", [0, 0])
-        self._workers = {}
+        self._process = None
+        self._commands = _CommandMailbox(self._ctx)
+        self._state_queue = self._ctx.Queue(1)
+        self._errors = _CommandMailbox(self._ctx)
+        self._error = None
         self._states = {}
         self._pending = None
         self._sequence = 0
         self._closed = False
         try:
-            for side in ("left", "right"):
-                commands, states = _CommandMailbox(self._ctx), self._ctx.Queue(1)
-                process = self._ctx.Process(
-                    target=_worker,
-                    args=(cfg, side, commands, states, self._stop, self._gate),
-                    daemon=True,
-                )
-                self._workers[side] = (process, commands, states)
-                process.start()
             deadline = time.monotonic() + cfg.startup_timeout_s
+            self._process = self._ctx.Process(
+                target=_worker,
+                args=(cfg, self._commands, self._state_queue, self._stop, self._gate, self._errors),
+                daemon=True,
+            )
+            self._process.start()
             while len(self._states) < 2:
                 self._poll()
                 if time.monotonic() > deadline:
                     raise TimeoutError("OmniHand startup verification timed out")
                 self._stop.wait(0.01)
-            self._initial_targets = measured_command_baseline(self.get_data()["positions"])
+            initial = self.get_data()
+            if not initial["joint_state_fresh"]:
+                raise RuntimeError("OmniHand startup measurements are stale")
+            self._initial_targets = measured_command_baseline(initial["positions"])
         except Exception:
             self.close()
             raise
 
     def _poll(self):
-        for side, (process, _, states) in self._workers.items():
+        try:
+            self._error = self._errors.get_nowait()
+        except queue.Empty:
+            pass
+        if self._error is None and self._process.exitcode is not None and not self._closed:
+            # Check once more after observing exit so a final SDK error wins.
             try:
-                state = states.get_nowait()
+                self._error = self._errors.get_nowait()
             except queue.Empty:
-                state = None
-            if state is not None:
-                if "error" in state:
-                    self.set_takeover_enabled(False)
-                    raise RuntimeError(state["error"])
-                self._states[side] = state
-            if process.exitcode is not None and not self._closed:
-                self.set_takeover_enabled(False)
-                raise RuntimeError(f"{side} OmniHand worker exited ({process.exitcode})")
+                self._error = f"OmniHand worker exited ({self._process.exitcode})"
+        if self._error is not None:
+            self._stop.set()
+            self.set_takeover_enabled(False)
+            raise RuntimeError(self._error)
+        try:
+            self._states = self._state_queue.get_nowait()
+        except queue.Empty:
+            pass
 
     def set_takeover_enabled(self, enabled):
         with self._gate.get_lock():
             self._gate[0] += 1
-            self._gate[1] = int(enabled and not self.read_only)
+            self._gate[1] = int(enabled and not self.read_only and not self._closed and not self._stop.is_set())
         self._pending = None
 
     def submit(self, positions, identity, deadline, *, replace_pending=False):
@@ -352,9 +447,7 @@ class OmniHandRuntime:
         self._pending = identity
         submitted_at = time.monotonic()
         try:
-            for index, side in enumerate(("left", "right")):
-                message = (generation, deadline, identity, angles[index * 12 : (index + 1) * 12].tolist(), submitted_at)
-                self._workers[side][1].put_nowait(message)
+            self._commands.put_nowait((generation, deadline, identity, angles.tolist(), submitted_at))
         except Exception:
             self.set_takeover_enabled(False)
             raise
@@ -454,17 +547,19 @@ class OmniHandRuntime:
         self.set_takeover_enabled(False)
 
     def close(self):
+        if self._closed:
+            return
         self._closed = True
         self.set_takeover_enabled(False)
         self._stop.set()
-        for process, _, states in self._workers.values():
-            if process.pid is not None:
+        process = self._process
+        if process is not None and process.pid is not None:
+            process.join(timeout=2)
+            if process.is_alive():
+                process.terminate()
                 process.join(timeout=2)
-                if process.is_alive():
-                    process.terminate()
-                    process.join(timeout=2)
-                if process.is_alive():
-                    process.kill()
-                    process.join()
-            states.cancel_join_thread()
-            states.close()
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2)
+        self._state_queue.cancel_join_thread()
+        self._state_queue.close()

@@ -317,7 +317,7 @@ Create a robot-local JSON file, for example `.local/omnihand.json` (JSON files a
 ```
 
 Adapter selection uses `hcan_serial_number`, following the vendor HCAN demos. Hand identity uses **exact**
-`product_seq_num` matching after removing trailing NUL padding only; suffixes are not accepted. Both workers
+`product_seq_num` matching after removing trailing NUL padding only; suffixes are not accepted. Both hands
 must verify product information, device ID, hand serial, and finite joint measurements before takeover. Missing
 or incorrect serial configuration stops startup rather than falling back to adapter enumeration indices.
 Both dex-teleop and XR controllers use the single `OmniHandRuntime` in `omnihand_runtime.py`, with the same
@@ -335,10 +335,69 @@ python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_real
 ```
 
 The bridge command is identical to simulation. Follow the normal X2 real-robot preparation procedure.
-The check only verifies identity and reads joint angles; it does not send motion commands. Each adapter has its
-own persistent spawned SDK process. Startup, SDK receive, and cleanup waits are bounded; a worker fault cancels
-outstanding work. Default receive timeout is 200 ms and worker startup budget is 15 s. These do not relax the
+The check only verifies identity and reads joint angles; it does not send motion commands. One persistent spawned
+SDK process owns both adapters for HCAN, ZLGCAN, and SocketCAN. It opens and verifies the left hand before opening
+the right, retaining both connections in the same SDK context. This avoids competing per-process HCAN scans;
+the parent never loads the SDK. After initialization each hand has its own I/O thread, so the two reads overlap
+without making concurrent calls on the same hand handle. Each thread checks authorization and deadline before
+its hand write and publishes the write result before starting another read. Measurement timestamps are retained
+when publishing acknowledgements; a write does not make old measurements fresh. A command is acknowledged only
+when both hands applied it under the current authorization. Startup and cleanup waits are bounded, and SDK receives
+retain their timeout;
+a worker fault cancels outstanding work. A native call that hangs makes measurements stale; shutdown escalates
+to process termination if needed. Partial startup failure also releases the process and its adapters.
+Default receive timeout is 200 ms and worker startup budget is 15 s. These do not relax the
 100 ms robot feedback/proposal deadline. Repeated slow replies cause holds and need diagnosis on the robot.
+
+After updating a Jetson deployment, stop all other OmniHand clients and validate USB reliability:
+
+```bash
+for attempt in $(seq 1 10); do
+  python scripts/check_omnihand_hcan.py --config .local/omnihand.json || break
+done
+```
+
+All ten runs must verify both hands and exit successfully. Then run this 60-second read-only check from the
+repository root in the installed RoboJuDo environment. It uses the existing freshness limits and reports the
+oldest observed sample age. It never enables takeover or sends motion commands. The file and main guard are
+required for multiprocessing spawn. Repeat the normal check afterward to verify adapters can be reopened.
+
+```bash
+cat > /tmp/check_omnihand_duration.py <<'PY'
+import json
+import time
+from pathlib import Path
+from robojudo.controller.ctrl_cfgs import OmniHandCfg
+from robojudo.controller.omnihand_runtime import OmniHandRuntime
+
+
+def main():
+    cfg = OmniHandCfg.model_validate(json.loads(Path(".local/omnihand.json").read_text()))
+    runtime = OmniHandRuntime(cfg, read_only=True, require_serials=True)
+    oldest_age = 0.0
+    try:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            state = runtime.get_data()
+            if not state["joint_state_fresh"]:
+                raise RuntimeError("OmniHand measurements became stale")
+            oldest_age = max(oldest_age, time.monotonic() - min(state["sample_times"].values()))
+            time.sleep(0.01)
+        print(f"Both hands remained fresh for 60 s; oldest sample age: {oldest_age:.3f} s")
+    finally:
+        runtime.close()
+
+
+if __name__ == "__main__":
+    main()
+PY
+python /tmp/check_omnihand_duration.py
+python scripts/check_omnihand_hcan.py --config .local/omnihand.json
+```
+
+Keep the default safety thresholds during validation. Staleness under normal load blocks deployment and needs
+diagnosis; do not compensate by increasing freshness timeouts. Retain the validation logs. The installer still
+installs the Python wheel; first-time USB permissions remain a separate `setup_udev.sh` step.
 
 Schema version 2 keeps the existing message types and session/generation/deadline fields. State `positions` and
 `joint_age_s` cover 69 joints (31 body + 38 fingers); proposal `positions`, state `last_commanded_positions`,

@@ -41,12 +41,12 @@ class TestOmniHandRuntime(unittest.TestCase):
         self.runtime.set_takeover_enabled(True)
         for frame_id in range(100):
             self.runtime.set_joint_commands(np.zeros(12), np.zeros(12), 123, frame_id)
-        for _, mailbox, _ in self.runtime._workers.values():
-            message = mailbox.get_nowait()
-            self.assertEqual(message[0], self.runtime._gate[0])
-            self.assertEqual(message[2][1], 99)
-            with self.assertRaises(queue.Empty):
-                mailbox.get_nowait()
+        message = self.runtime._commands.get_nowait()
+        self.assertEqual(message[0], self.runtime._gate[0])
+        self.assertEqual(message[2][1], 99)
+        self.assertEqual(len(message[3]), 24)
+        with self.assertRaises(queue.Empty):
+            self.runtime._commands.get_nowait()
 
     def setUp(self):
         self.clock = self.enterContext(patch("time.monotonic", return_value=10.0))
@@ -57,9 +57,13 @@ class TestOmniHandRuntime(unittest.TestCase):
         runtime._pending = None
         runtime._sequence = 0
         runtime._poll = lambda: None
-        runtime._workers = {
-            side: (None, _CommandMailbox(mp.get_context("spawn")), queue.Queue(1)) for side in ("left", "right")
-        }
+        runtime._commands = _CommandMailbox(mp.get_context("spawn"))
+        runtime._stop = mp.get_context("spawn").Event()
+        runtime._closed = False
+        runtime._process = SimpleNamespace(exitcode=None)
+        runtime._errors = _CommandMailbox(mp.get_context("spawn"))
+        runtime._error = None
+        runtime._state_queue = queue.Queue(1)
         runtime._states = {
             side: {
                 "positions": [0.0] * 19,
@@ -76,9 +80,8 @@ class TestOmniHandRuntime(unittest.TestCase):
 
     def test_disabled_dex_frames_do_not_enqueue_hardware_work(self):
         self.runtime.set_joint_commands(np.zeros(12), np.zeros(12), 123, 1)
-        for worker in self.runtime._workers.values():
-            with self.assertRaises(queue.Empty):
-                worker[1].get_nowait()
+        with self.assertRaises(queue.Empty):
+            self.runtime._commands.get_nowait()
         self.assertFalse(self.runtime.get_data()["fresh"])
         self.assertTrue(self.runtime.get_data()["joint_state_fresh"])
 
@@ -88,10 +91,9 @@ class TestOmniHandRuntime(unittest.TestCase):
         np.testing.assert_allclose(clipped[:12], OMNIHAND_LEFT_LIMITS[:, 1])
         np.testing.assert_allclose(clipped[12:], OMNIHAND_RIGHT_LIMITS[:, 0])
         self.runtime.set_joint_commands(np.zeros(12), np.zeros(12), 20, 2)
-        frames = [worker[1].get_nowait() for worker in self.runtime._workers.values()]
-        self.assertEqual(frames[0][2], frames[1][2])
-        self.assertEqual(frames[0][2][1:], (2, 20))
-        self.assertTrue(all(frame[3] == [0.0] * 12 for frame in frames))
+        frame = self.runtime._commands.get_nowait()
+        self.assertEqual(frame[2][1:], (2, 20))
+        self.assertEqual(frame[3], [0.0] * 24)
 
     def test_checked_frames_reject_invalid_targets_and_multiple_pending_commands(self):
         self.runtime.set_takeover_enabled(True)
@@ -146,6 +148,29 @@ class TestOmniHandRuntime(unittest.TestCase):
     def test_xr_can_require_serials_without_removing_index_support(self):
         with self.assertRaisesRegex(ValueError, "serial"):
             OmniHandRuntime(OmniHandCfg(), require_serials=True)
+
+    def test_fault_wins_over_queued_measurements_and_remains_latched(self):
+        runtime = self.runtime
+        runtime.set_takeover_enabled(True)
+        runtime._state_queue.put(runtime._states)
+        runtime._errors.put_nowait("right: read measurements: SDK failure")
+        runtime._stop.set()
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, "right: read measurements: SDK failure"):
+                OmniHandRuntime._poll(runtime)
+            self.assertEqual(runtime._gate[1], 0)
+            runtime.set_takeover_enabled(True)
+            self.assertEqual(runtime._gate[1], 0)
+
+    def test_unexpected_child_exit_revokes_commands(self):
+        runtime = self.runtime
+        runtime.set_takeover_enabled(True)
+        runtime._process.exitcode = -9
+        with self.assertRaisesRegex(RuntimeError, r"worker exited \(-9\)"):
+            OmniHandRuntime._poll(runtime)
+        self.assertEqual(runtime._gate[1], 0)
+        runtime.set_takeover_enabled(True)
+        self.assertEqual(runtime._gate[1], 0)
 
 
 class TestOmniHandTransports(unittest.TestCase):

@@ -21,6 +21,7 @@ from robojudo.controller.omnihand_runtime import (
     ALL_HAND_NAMES,
     OMNIHAND_JOINT_NAMES,
     OmniHandRuntime,
+    _hand_loop,
     _worker,
     connect_verified_hand,
     measured_command_baseline,
@@ -38,9 +39,13 @@ def serial_config():
 
 
 class HcanIdentityTests(unittest.TestCase):
-    def test_persistent_spawned_workers_verify_apply_and_reap(self):
+    def test_shared_spawned_worker_verifies_applies_and_reaps(self):
         fake_sdk = """
 from types import SimpleNamespace
+import multiprocessing as mp
+import weakref
+assert mp.parent_process() is not None, 'SDK imported in parent'
+_opened = {}
 HandType = SimpleNamespace(LEFT=1, RIGHT=2)
 class Hand:
     def __init__(self, side):
@@ -55,13 +60,21 @@ class Hand:
     def set_all_active_joint_angles(self, angles): self.angles = angles
 class OmniHandPro2025:
     @staticmethod
-    def create_hand_by_hcan(**kwargs): return Hand(kwargs['hand_type'])
+    def create_hand_by_hcan(**kwargs):
+        side = kwargs['hand_type']
+        if side == 1:
+            assert not _opened, 'left must open first'
+        else:
+            assert _opened[1]() is not None, 'left must remain alive in same process'
+        hand = Hand(side)
+        _opened[side] = weakref.ref(hand)
+        return hand
 """
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "omnihand.py").write_text(fake_sdk)
             with patch.object(sys, "path", [directory, *sys.path]):
                 runtime = OmniHandRuntime(serial_config())
-                processes = [worker[0] for worker in runtime._workers.values()]
+                process = runtime._process
                 try:
                     runtime.set_takeover_enabled(True)
                     positions = dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0)
@@ -90,24 +103,66 @@ class OmniHandPro2025:
                     self.assertEqual(state["applied_source_timestamp_ns"], 123)
                 finally:
                     runtime.close()
-                self.assertTrue(all(not process.is_alive() for process in processes))
-                # Identity failure in one child must also reap the verified sibling.
+                self.assertFalse(process.is_alive())
+                runtime.close()
+                # Read-only startup verifies both hands but never writes to either.
+                Path(directory, "omnihand.py").write_text(
+                    fake_sdk.replace("self.angles = angles", "raise AssertionError('read-only worker wrote motion')")
+                )
+                runtime = OmniHandRuntime(serial_config(), read_only=True, require_serials=True)
+                try:
+                    runtime.set_takeover_enabled(True)
+                    self.assertFalse(runtime.get_data()["enabled"])
+                    self.assertTrue(runtime.get_data()["joint_state_fresh"])
+                    with self.assertRaisesRegex(RuntimeError, "unauthorized"):
+                        runtime.submit(positions, (2, 8), time.monotonic() + 1)
+                finally:
+                    runtime.close()
+                self.assertFalse(runtime._process.is_alive())
+
+                # Right identity failure must release the process holding the left hand.
                 Path(directory, "omnihand.py").write_text(fake_sdk.replace("RIGHT-HAND-EXACT", "WRONG-RIGHT-HAND"))
                 failed = OmniHandRuntime.__new__(OmniHandRuntime)
                 with self.assertRaises(RuntimeError):
                     failed.__init__(serial_config())
-                self.assertTrue(all(not worker[0].is_alive() for worker in failed._workers.values()))
+                self.assertFalse(failed._process.is_alive())
 
                 # Native open may block indefinitely; startup and cleanup remain bounded.
                 Path(directory, "omnihand.py").write_text(
-                    fake_sdk.replace("return Hand(kwargs['hand_type'])", "__import__('time').sleep(60)")
+                    fake_sdk.replace(
+                        "side = kwargs['hand_type']",
+                        "side = kwargs['hand_type']; __import__('time').sleep(60) if side == 2 else None",
+                    )
                 )
                 blocked = OmniHandRuntime.__new__(OmniHandRuntime)
                 cfg = serial_config()
-                cfg.startup_timeout_s = 0.1
+                cfg.startup_timeout_s = 2.0
                 with self.assertRaises(TimeoutError):
                     blocked.__init__(cfg)
-                self.assertTrue(all(not worker[0].is_alive() for worker in blocked._workers.values()))
+                self.assertFalse(blocked._process.is_alive())
+
+                # A native read can also hang after successful startup. The parent
+                # must become stale and close must still reap the SDK process.
+                Path(directory, "omnihand.py").write_text(
+                    fake_sdk.replace(
+                        "def get_all_joint_angles(self): return self.angles + [0.] * 7",
+                        """def get_all_joint_angles(self):
+        from pathlib import Path
+        if Path(__file__).with_name('block-read').exists():
+            __import__('time').sleep(60)
+        return self.angles + [0.] * 7""",
+                    )
+                )
+                runtime = OmniHandRuntime(serial_config(), read_only=True)
+                try:
+                    Path(directory, "block-read").touch()
+                    time.sleep(0.4)
+                    self.assertFalse(runtime.get_data()["joint_state_fresh"])
+                finally:
+                    started = time.monotonic()
+                    runtime.close()
+                self.assertLess(time.monotonic() - started, 6)
+                self.assertFalse(runtime._process.is_alive())
 
     def test_measured_baseline_is_bounded_and_float32(self):
         measured = dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0)
@@ -146,6 +201,30 @@ class OmniHandPro2025:
             with self.subTest(actual=actual, device_id=device_id), self.assertRaisesRegex(RuntimeError, "identity"):
                 self.connect(actual, device_id)
 
+    def test_unreadable_identity_is_not_reported_as_serial_mismatch(self):
+        with self.assertRaisesRegex(RuntimeError, "adapter-left.*identity unreadable"):
+            self.connect("")
+
+    def test_adapter_open_and_identity_read_errors_have_context(self):
+        cfg = serial_config()
+        factory = Mock(return_value=None)
+        module = SimpleNamespace(
+            HandType=SimpleNamespace(LEFT=1, RIGHT=2),
+            OmniHandPro2025=SimpleNamespace(create_hand_by_hcan=factory),
+        )
+        with patch.dict(sys.modules, omnihand=module):
+            with self.assertRaisesRegex(RuntimeError, "left.*adapter-left.*could not be opened"):
+                connect_verified_hand(cfg, "left")
+            factory.side_effect = OSError("USB unavailable")
+            with self.assertRaisesRegex(RuntimeError, "left.*adapter-left.*open failed.*USB unavailable"):
+                connect_verified_hand(cfg, "left")
+            factory.side_effect = None
+            hand = Mock()
+            hand.get_vendor_info.side_effect = TimeoutError("no response")
+            factory.return_value = hand
+            with self.assertRaisesRegex(RuntimeError, "adapter-left.*identity read failed.*no response"):
+                connect_verified_hand(cfg, "left")
+
     def test_invalid_serial_configuration_is_rejected(self):
         for values in (
             {"left_hcan_serial": "one"},
@@ -158,24 +237,25 @@ class OmniHandPro2025:
 
     def test_workers_drop_expired_or_revoked_commands(self):
         commands, states, stop = queue.Queue(1), queue.Queue(1), threading.Event()
+        errors = queue.Queue(1)
         gate = mp.get_context("spawn").Array("q", [3, 1])
         hand = Mock()
         hand.get_all_joint_angles.return_value = [0.0] * 19
-        commands.put((2, time.monotonic() + 1, (2, 1), [0.0] * 12, time.monotonic()))
+        commands.put((2, time.monotonic() + 1, (2, 1), [0.0] * 24, time.monotonic()))
         with patch("robojudo.controller.omnihand_runtime.connect_verified_hand", return_value=hand):
-            thread = threading.Thread(target=_worker, args=(serial_config(), "left", commands, states, stop, gate))
+            thread = threading.Thread(target=_worker, args=(serial_config(), commands, states, stop, gate, errors))
             thread.start()
             try:
-                state = states.get(timeout=1)
+                state = states.get(timeout=1)["left"]
                 self.assertEqual(len(state["positions"]), 19)
                 hand.set_all_active_joint_angles.assert_not_called()
-                commands.put((3, time.monotonic() - 1, (3, 2), [0.0] * 12, time.monotonic()))
+                commands.put((3, time.monotonic() - 1, (3, 2), [0.0] * 24, time.monotonic()))
                 time.sleep(0.04)
                 hand.set_all_active_joint_angles.assert_not_called()
-                commands.put((3, time.monotonic() + 1, (3, 3), [0.0] * 12, time.monotonic()))
+                commands.put((3, time.monotonic() + 1, (3, 3), [0.0] * 24, time.monotonic()))
                 deadline = time.monotonic() + 1
                 while time.monotonic() < deadline:
-                    state = states.get(timeout=1)
+                    state = states.get(timeout=1)["left"]
                     if state["applied"] == (3, 3):
                         break
                 self.assertEqual(state["applied"], (3, 3))
@@ -184,32 +264,172 @@ class OmniHandPro2025:
                 thread.join(timeout=1)
                 self.assertFalse(thread.is_alive())
 
-    def test_in_flight_expiry_reports_target_without_acknowledging_it(self):
-        commands, states, stop = queue.Queue(1), queue.Queue(1), threading.Event()
-        gate = mp.get_context("spawn").Array("q", [3, 1])
+    def run_hand_cycle(self, hand, side="left", gate=None):
+        """Run one fake-handle cycle with a deterministic clock."""
+        states, errors, stop = queue.Queue(), queue.Queue(), threading.Event()
+        gate = gate if gate is not None else mp.get_context("spawn").Array("q", [3, 1])
+        commands = queue.Queue(1)
+        commands.put((3, 10.1, (3, 1), [0.1] * 12, 10.0))
+
+        def fail(side, stage, exc):
+            with gate.get_lock():
+                gate[0] += 1
+                gate[1] = 0
+            errors.put(f"{side}: {stage}: {exc}")
+            stop.set()
+
+        with patch.object(stop, "wait", side_effect=lambda _: stop.set()):
+            _hand_loop(serial_config(), side, hand, commands, stop, gate, lambda _, state: states.put(state), fail)
+        return states, errors, gate
+
+    def test_in_flight_expiry_preserves_target_without_acknowledgement(self):
         hand = Mock()
         hand.get_all_joint_angles.return_value = [0.0] * 19
-        with (
-            patch("robojudo.controller.omnihand_runtime.connect_verified_hand", return_value=hand),
-            patch("time.monotonic", return_value=10.0) as clock,
-        ):
+        with patch("time.monotonic", return_value=10.0) as clock:
             hand.set_all_active_joint_angles.side_effect = lambda _: setattr(clock, "return_value", 10.2)
-            thread = threading.Thread(target=_worker, args=(serial_config(), "left", commands, states, stop, gate))
-            thread.start()
+            states, errors, _ = self.run_hand_cycle(hand)
+        state = states.get_nowait()
+        self.assertTrue(errors.empty())
+        self.assertEqual(state["targets"], [0.1] * 12)
+        self.assertIsNone(state["applied"])
+        self.assertIsNone(state["generation"])
+
+    def test_in_flight_revocation_does_not_acknowledge_write(self):
+        hand = Mock()
+        hand.get_all_joint_angles.return_value = [0.0] * 19
+        gate = mp.get_context("spawn").Array("q", [3, 1])
+
+        def revoke(_):
+            with gate.get_lock():
+                gate[0] += 1
+                gate[1] = 0
+
+        hand.set_all_active_joint_angles.side_effect = revoke
+        with patch("time.monotonic", return_value=10.0):
+            states, _, _ = self.run_hand_cycle(hand, gate=gate)
+        state = states.get_nowait()
+        self.assertEqual(state["targets"], [0.1] * 12)
+        self.assertIsNone(state["applied"])
+
+    def test_samples_keep_read_start_time(self):
+        hand = Mock()
+        with patch("time.monotonic", return_value=10.0) as clock:
+
+            def read():
+                clock.return_value = 10.05
+                return [0.0] * 19
+
+            hand.get_all_joint_angles.side_effect = read
+            states, errors, _ = self.run_hand_cycle(hand)
+        self.assertTrue(errors.empty())
+        self.assertEqual(states.get_nowait()["sampled_at"], 10.0)
+
+    def test_invalid_measurements_and_write_errors_revoke_gate(self):
+        for failure in ("shape", "nan", "write"):
+            with self.subTest(failure=failure), patch("time.monotonic", return_value=10.0):
+                hand = Mock()
+                hand.get_all_joint_angles.return_value = [0.0] * 19
+                if failure == "write":
+                    hand.set_all_active_joint_angles.side_effect = OSError("write failed")
+                else:
+                    hand.get_all_joint_angles.return_value = [0.0] * 18 if failure == "shape" else [float("nan")] * 19
+                states, errors, gate = self.run_hand_cycle(hand, "right")
+                self.assertTrue(states.empty())
+                self.assertEqual(gate[1], 0)
+                self.assertGreater(gate[0], 3)
+                self.assertIn("right:", errors.get_nowait())
+
+
+class SharedWorkerTimingTests(unittest.TestCase):
+    def start_worker(self, left, right):
+        self.commands, self.states, self.errors = queue.Queue(1), queue.Queue(1), queue.Queue(1)
+        self.stop = threading.Event()
+        self.gate = mp.get_context("spawn").Array("q", [3, 1])
+        self.enterContext(patch("robojudo.controller.omnihand_runtime.create_hand", side_effect=[left, right]))
+        self.thread = threading.Thread(
+            target=_worker,
+            args=(serial_config(), self.commands, self.states, self.stop, self.gate, self.errors),
+        )
+        self.thread.start()
+        self.addCleanup(self.stop_worker)
+
+    def stop_worker(self):
+        self.stop.set()
+        self.thread.join(timeout=2)
+        self.assertFalse(self.thread.is_alive())
+        self.assertTrue(self.errors.empty(), list(self.errors.queue))
+
+    def test_two_80ms_reads_remain_fresh_at_default_threshold(self):
+        def read():
+            time.sleep(0.08)
+            return [0.0] * 19
+
+        hands = [Mock(), Mock()]
+        for hand in hands:
+            hand.get_all_joint_angles.side_effect = read
+        self.start_worker(*hands)
+        snapshot = self.states.get(timeout=1)
+        deadline = time.monotonic() + 0.8
+        while time.monotonic() < deadline:
             try:
-                states.get(timeout=1)
-                commands.put((3, 10.1, (3, 1), [0.1] * 12, 10.0))
-                for _ in range(100):
-                    state = states.get(timeout=1)
-                    if state["targets"] is not None:
-                        break
-                self.assertEqual(state["targets"], [0.1] * 12)
-                self.assertIsNone(state["applied"])
-                self.assertIsNone(state["generation"])
-            finally:
-                stop.set()
-                thread.join(timeout=1)
-                self.assertFalse(thread.is_alive())
+                snapshot = self.states.get_nowait()
+            except queue.Empty:
+                pass
+            now = time.monotonic()
+            self.assertTrue(all(0 <= now - state["sampled_at"] < 0.25 for state in snapshot.values()))
+            time.sleep(0.005)
+
+    def test_acknowledgement_precedes_next_reads_and_retains_sample_times(self):
+        release_second, release_third = threading.Event(), threading.Event()
+        started_second = [threading.Event(), threading.Event()]
+        started_third = [threading.Event(), threading.Event()]
+        hands = [Mock(), Mock()]
+
+        def reader(index):
+            calls = 0
+
+            def read():
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    started_second[index].set()
+                    if not release_second.wait(timeout=2):
+                        raise TimeoutError("test second read blocked")
+                elif calls >= 3:
+                    started_third[index].set()
+                    if not release_third.wait(timeout=2):
+                        raise TimeoutError("test third read blocked")
+                return [0.0] * 19
+
+            return read
+
+        for index, hand in enumerate(hands):
+            hand.get_all_joint_angles.side_effect = reader(index)
+        self.start_worker(*hands)
+        # Release barriers before cleanup tries to join the worker.
+        self.addCleanup(release_third.set)
+        self.addCleanup(release_second.set)
+        for event in started_second:
+            self.assertTrue(event.wait(timeout=1))
+        submitted_at = time.monotonic()
+        self.commands.put((3, submitted_at + 0.1, (3, 7), [0.1] * 24, submitted_at))
+        # Let the dispatcher transfer the pair before the reads finish.
+        deadline = time.monotonic() + 0.05
+        while not self.commands.empty() and time.monotonic() < deadline:
+            time.sleep(0.001)
+        self.assertTrue(self.commands.empty())
+        for hand in hands:
+            hand.set_all_active_joint_angles.assert_not_called()
+        release_second.set()
+        for event in started_third:
+            self.assertTrue(event.wait(timeout=1))
+        snapshot = self.states.get(timeout=1)
+        self.assertLess(time.monotonic(), submitted_at + 0.1)
+        self.assertTrue(all(state["applied"] == (3, 7) for state in snapshot.values()))
+        self.assertTrue(all(state["targets"] == [0.1] * 12 for state in snapshot.values()))
+        self.assertTrue(all(state["sampled_at"] < submitted_at for state in snapshot.values()))
+        for hand in hands:
+            hand.set_all_active_joint_angles.assert_called_once_with([0.1] * 12)
 
 
 class CombinedFeedbackTests(unittest.TestCase):
