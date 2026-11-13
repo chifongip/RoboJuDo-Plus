@@ -27,6 +27,7 @@ import sys
 import time
 import numpy as np
 from xrobotoolkit_teleop.integrations.robojudo import RoboJuDoBridge
+from xrobotoolkit_teleop.common.teleop_settings import TeleopSettings
 
 class SyntheticXR:
     def __init__(self):
@@ -56,7 +57,9 @@ class SyntheticXR:
 if os.environ.get("XROBOTOOLKIT_TEST_DIAGNOSTICS"):
     logging.basicConfig(level=logging.INFO)
 xr = SyntheticXR()
-bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], xr_client=xr, ik_backend=sys.argv[3], robot=sys.argv[4])
+settings = TeleopSettings(collision_checking=sys.argv[5] == "True")
+bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], settings=settings, xr_client=xr,
+                       ik_backend=sys.argv[3], robot=sys.argv[4])
 try:
     while True:
         if select.select([sys.stdin], [], [], 0)[0]:
@@ -81,6 +84,7 @@ finally:
 )
 class XrobotoolkitIntegrationTests(unittest.TestCase):
     with_omnihand = False
+    collision_checking = True
 
     def setUp(self):
         from robojudo.config.x2 import x2_xrobotoolkit, x2_xrobotoolkit_omnihand
@@ -151,6 +155,7 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
                 self.feedback_endpoint,
                 os.environ.get("XROBOTOOLKIT_TEST_BACKEND", "placo"),
                 "x2_omnihand" if self.with_omnihand else "x2",
+                str(self.collision_checking),
             ],
             stdin=subprocess.PIPE,
             stdout=log,
@@ -285,6 +290,14 @@ class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
         self.pipeline._set_upper_body_enabled(True)
         self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["L_index_mcp_joint"] < 0.01)
         self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["R_index_mcp_joint"] < 0.01)
+
+
+class XrobotoolkitCollisionDisabledIntegrationTests(XrobotoolkitIntegrationTests):
+    collision_checking = False
+
+
+class XrobotoolkitOmniHandCollisionDisabledIntegrationTests(XrobotoolkitOmniHandIntegrationTests):
+    collision_checking = False
 
 
 if __name__ == "__main__":

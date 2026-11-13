@@ -1,13 +1,13 @@
 # XRoboToolkit X2 arm teleoperation
 
-The optional `third_party/xrobotoolkit_teleop` submodule runs XR input, arm inverse kinematics, and self-collision
+The optional `third_party/xrobotoolkit_teleop` submodule runs XR input, arm inverse kinematics, and optional self-collision
 checks in a separate process. RoboJuDo's existing X2 locomanipulation pipeline owns walking, runtime modes, recording,
 and robot hardware. The default bridge observes all 31 X2 joints and commands the 14 arm joints. Optional OmniHand Pro presets add
 24 active finger commands and 38 finger observations. Both use the existing loco-mimic runtime.
 
 ```text
 Headset/controllers -> PC Service -> XR bridge (XR environment)
-                                        | checked arm targets (8559)
+                                        | bounded arm targets (8559)
                                         v
 Joystick/keyboard -> RoboJuDo locomanipulation -> MuJoCo OR X2/AimDK
                                         |
@@ -92,6 +92,22 @@ conda activate robojudo-xr
 python -m xrobotoolkit_teleop.integrations.robojudo --robot x2 --ik-backend placo
 ```
 
+The bridge uses one startup flag for arm, finger and homing collision checking:
+include `--collision-checking` to enable checks; omit it to disable them (the CLI
+default). The flag takes no value. For example, to enable these checks with OmniHand:
+
+```bash
+python -m xrobotoolkit_teleop.integrations.robojudo --robot x2_omnihand --collision-checking
+```
+
+Disabling this option skips IK collision avoidance/recovery and collision path
+checks, including partial arm/hand application checks. Joint position and velocity
+limits, finite-value validation, freshness deadlines, and acknowledgements remain
+enforced. The setting is logged at startup and stays fixed until bridge restart.
+It does not change simulation contacts, robot watchdogs, or standalone demo behavior.
+Programmatic `TeleopSettings()` retains its enabled default; the CLI explicitly
+selects the setting based on whether the flag is present.
+
 Complete the usual preparation sequence: simulation keyboard `i` / joystick `Y` selects `JOINT_DEFAULT`; after
 interpolation completes, `j` / `X` selects `RL_DEFAULT`. Toggle arm tracking with `t` / joystick `L`. Release both XR grips
 before engaging; hold the corresponding grip to move an arm. Release a grip to hold that arm's target. XR `Y` held
@@ -124,12 +140,13 @@ Real-robot presets leave target visualization disabled.
 | Return speed cap | 1.0 rad/s |
 | Control frequency | 50 Hz |
 | Translation scale | 1.0 |
+| CLI collision checking | Disabled; enable with `--collision-checking` |
 | Collision margin / activation distance | 0.02 / 0.08 m |
 | XR tracking timeout | 0.25 s |
 | Robot measurement timeout | 0.1 s |
 | Grip activation | greater than 0.9 |
 
-The standalone demo and retargeter share upstream defaults. Per-joint URDF velocity limits and the intersection of
+The standalone demo and retargeter share upstream numeric defaults. Per-joint URDF velocity limits and the intersection of
 URDF/deployment position limits also apply. The bridge accepts explicit overrides such as `--arm-velocity-limit 2.0`;
 its effective caps cannot exceed those advertised by RoboJuDo's controller configuration. The new presets disable
 additional EMA smoothing and reject invalid proposals instead of modifying a collision-checked target.
@@ -137,8 +154,9 @@ additional EMA smoothing and reject invalid proposals instead of modifying a col
 - Tracking loss, stale robot feedback, or bridge loss holds the last commanded arm targets. Brief interruptions
   automatically rebase controller references on fresh data, discarding motion made during the hold. Startup,
   explicit mode/intent changes, and a restarted bridge still require grip release before engagement.
-- Explicit teleop disable requests a collision-checked return to defaults. If the bridge is offline, the request
-  remains pending and the arms hold. After reconnection the return uses fresh measurements and does not require XR.
+- Explicit teleop disable requests a bounded return to defaults, with collision checks when enabled. If the bridge
+  is offline, the request remains pending and the arms hold. After reconnection the return uses fresh measurements
+  and does not require XR.
 - Re-enabling tracking cancels the pending return and requires grip engagement. Whole-robot mode changes and AimDK
   safety states take priority over arm tracking/return requests.
 - Recording accepts fresh tracking proposals, excluding homing and outage holds.
@@ -148,7 +166,7 @@ with its command speed bounds. Placo's posture objective uses the fixed configur
 command; its shared solver also applies the upstream manipulability objective. LeRobot uses its upstream joint-angle
 and filtered-history regularization. These objectives can choose different redundant-joint postures for the same hand pose.
 Collision checks cover sampled paths from measured and previous commanded positions.
-Rejected full steps try a bounded set of shorter, independently checked steps before holding.
+With collision checking enabled, rejected full steps try a bounded set of shorter, independently checked steps before holding.
 They do not predict future locomotion motion or external obstacles. The XR SDK exposes a shared stream timestamp;
 it cannot distinguish one device's cached pose from a live stationary pose while other devices keep streaming.
 
@@ -295,7 +313,7 @@ The bridge now uses the shared upstream IK backends. Select LeRobot with
 `python -m xrobotoolkit_teleop.integrations.robojudo --robot x2 --ik-backend lerobot`.
 The existing `robojudo_x2` entrypoint and constructor remain compatible, and Placo remains the default.
 Placo now uses the upstream manipulability objective; matching hand poses can produce different redundant-joint postures.
-LeRobot uses its upstream posture objective and filter. Both preserve the same command bounds and collision checks.
+LeRobot uses its upstream posture objective and filter. Both preserve the same command bounds and honor the collision-checking flag.
 Stateful solver history is committed only after feedback confirms the exact submitted command.
 
 The installer builds and registers LeRobot's Pinocchio CasADi bindings alongside Placo in `robojudo-xr`.
@@ -336,7 +354,7 @@ Use the normal preparation sequence and tracking toggle. Squeeze either trigger 
 trigger to open. Triggers work independently of the grips and arm IK. Grips clutch only the arms; release both
 grips before engaging arm tracking. Finger targets use a coordinated ramp capped at 2 rad/s by default; the bridge supports
 `--hand-velocity-limit`, additionally bounded by the robot's configured cap and model limits. XR Y and explicit
-tracking disable return the arms through checked HOME while retaining finger targets. Outages hold targets.
+tracking disable return the arms through bounded HOME while retaining finger targets. Outages hold targets.
 
 Physical hands connect through HCAN adapters attached to the **robot**, with channel 0 and hand device ID 1 by
 default. The XR host does not open adapters or install the vendor SDK. In the robot's RoboJuDo environment:
@@ -456,7 +474,7 @@ Partial application cannot be rolled back; it
 invalidates the generation and cancels pending work. New feedback exposes the resulting baseline. Recording
 includes the 14 arm and 24 active finger observations/commands only on acknowledged fresh tracking frames.
 
-Collision checks use measured fingers, nonlinear passive coupling, and sampled combined command paths. When
+When enabled, collision checks use measured fingers, nonlinear passive coupling, and sampled combined command paths. When
 finger motion fails, the bridge may send an independently checked arm escape with fingers held. Internal same-hand
 collision pairs remain excluded as in the standalone model. Hand contacts are disabled in simulation; this is
 not an object-grasp physics or tactile-control implementation. Wrist mounts remain provisional until checked
