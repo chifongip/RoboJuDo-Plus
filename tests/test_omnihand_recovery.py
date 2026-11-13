@@ -126,6 +126,7 @@ class Hand:
         self.reads += 1
         mode = (root / "mode").read_text()
         if self.side == "right":
+            if mode == "overshoot": return [0.] * 5 + [-.002] + [0.] * 13
             if mode == "startup" and self.reads == 1: return []
             if mode == "blocked": time.sleep(60)
             if mode == "invalid": return []
@@ -304,6 +305,21 @@ class SupervisedRecoveryTests(unittest.TestCase):
         runtime = self.runtime()
         self.assertTrue(runtime.get_data()["joint_state_fresh"])
         self.assertEqual(runtime._connection_generation, 1)
+
+    def test_measured_overshoot_does_not_block_startup_or_reconnection(self):
+        self.mode("overshoot")
+        runtime = self.runtime()
+        data = runtime.get_data()
+        self.assertTrue(data["joint_state_fresh"])
+        self.assertEqual(data["positions"]["R_index_mcp_joint"], -0.002)
+        self.assertEqual(data["targets"]["R_index_mcp_joint"], 0.0)
+        self.mode("invalid")
+        self.until(runtime, lambda data: data["connection_status"] == "reconnecting")
+        self.mode("overshoot")
+        data = self.until(runtime, lambda data: data["connection_generation"] > 1 and data["joint_state_fresh"])
+        self.assertEqual(data["positions"]["R_index_mcp_joint"], -0.002)
+        self.assertEqual(data["targets"]["R_index_mcp_joint"], 0.0)
+        self.assertFalse((self.root / "writes").exists())
 
     def test_failed_reconnect_attempts_keep_retrying_until_adapter_returns(self):
         runtime = self.runtime()

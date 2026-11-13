@@ -105,13 +105,17 @@ ALL_HAND_NAMES = tuple(
 
 
 def measured_command_baseline(positions):
-    """Represent a sampled startup pose as bounded float32 command values."""
+    """Clamp a measured pose to command limits without modifying feedback.
+
+    Sensor offsets and mechanical compliance can put valid measurements beyond
+    the SDK's command range. Only the command baseline needs to fit that range.
+    """
     result = {}
     limits = np.concatenate((OMNIHAND_LEFT_LIMITS, OMNIHAND_RIGHT_LIMITS))
     for name, (lower, upper) in zip(OMNIHAND_JOINT_NAMES, limits, strict=True):
         value = positions[name]
-        if not np.isfinite(value) or value < lower - 1e-6 or value > upper + 1e-6:
-            raise ValueError(f"measured startup finger is outside SDK limits: {name}")
+        if not np.isfinite(value):
+            raise ValueError(f"measured startup finger is not finite: {name}")
         value = np.float32(np.clip(value, lower, upper))
         if float(value) < lower:
             value = np.nextafter(value, np.float32(np.inf))

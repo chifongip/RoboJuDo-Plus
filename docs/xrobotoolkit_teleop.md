@@ -260,11 +260,19 @@ serve different purposes. Reads and writes remain serialized per hand handle.
 A slow or stuck SDK call can still make measurements stale and trigger a hold;
 the feedback freshness checks remain enforced independently of the receive timeout.
 
-OmniHand skips invalid measurements and read exceptions, keeping the previous valid
-positions and their original timestamps. Both hands must have fresh feedback before
+OmniHand skips empty, incorrectly sized (expected 19 angles), nonnumeric, or nonfinite
+measurements and read exceptions, keeping the previous valid positions and their
+original timestamps. Both hands must have fresh feedback before
 either hand can receive another command. The worker enforces the stricter of the
 hand measurement timeout and feedback measurement budget, even if the main loop is
 delayed. Recoverable outages hold arm targets and skip recording stale samples.
+
+SDK joint limits constrain outgoing commands, not measurement acceptance. Finite
+measured angles outside those limits are retained unchanged and do not stop startup
+or reconnection. Calibration offsets, sensor noise, or mechanical compliance can put
+measurements outside the command range. Only the initial float32 command baseline is
+clamped to that range; creating this baseline sends no motion command. Previously
+issued targets remain retained across reconnection, as described below.
 
 For serial-verified HCAN configurations, `omnihand.auto_reconnect` defaults to `true`.
 After `reconnect_timeout_s` (default 1 second) without valid measurements, a background

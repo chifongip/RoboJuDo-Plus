@@ -54,6 +54,9 @@ RoboJuDo subscribes to dex teleop's synchronized arm-and-hand stream on port 856
 `UpperBodyOmniHandZmqCtrl`, and calls the SDK directly. This dedicated controller and its
 `X2OmniHandLocomanipulationPipeline` leave the existing arm-only controller, simulation pipeline, and GR00T path
 unchanged. The old per-hand ports 5555/5556 and a standalone OmniHand ZMQ server are not used.
+Finite measured finger angles outside the SDK command limits do not stop startup or reconnection. Raw feedback
+is preserved; only the initial command baseline is clamped. See the
+[OmniHand HCAN guide](xrobotoolkit_teleop.md#omnihand-pro-through-robot-side-hcan) for shared runtime and recovery behavior.
 
 Verify the native backend explicitly after installation:
 

@@ -173,8 +173,29 @@ class OmniHandPro2025:
         self.assertEqual(result["L_thumb_mcp_joint"], 0.0)
         self.assertTrue(all(float(np.float32(value)) == value for value in result.values()))
         measured["L_thumb_mcp_joint"] = 0.01
-        with self.assertRaises(ValueError):
-            measured_command_baseline(measured)
+        self.assertEqual(measured_command_baseline(measured)["L_thumb_mcp_joint"], 0.0)
+        self.assertEqual(measured["L_thumb_mcp_joint"], 0.01)
+
+    def test_measured_baseline_clamps_both_bounds_and_preserves_raw_feedback(self):
+        from robojudo.controller.omnihand_runtime import OMNIHAND_LEFT_LIMITS, OMNIHAND_RIGHT_LIMITS
+
+        limits = np.concatenate((OMNIHAND_LEFT_LIMITS, OMNIHAND_RIGHT_LIMITS))
+        for above in (False, True):
+            measured = dict(zip(OMNIHAND_JOINT_NAMES, limits[:, int(above)] + (0.01 if above else -0.01), strict=True))
+            original = measured.copy()
+            baseline = measured_command_baseline(measured)
+            for name, (lower, upper) in zip(OMNIHAND_JOINT_NAMES, limits, strict=True):
+                self.assertGreaterEqual(baseline[name], lower)
+                self.assertLessEqual(baseline[name], upper)
+                self.assertAlmostEqual(baseline[name], upper if above else lower, places=6)
+            self.assertEqual(measured, original)
+
+    def test_measured_baseline_rejects_nonfinite_values(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            measured = dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0)
+            measured["R_index_mcp_joint"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "not finite"):
+                measured_command_baseline(measured)
 
     def connect(self, actual="LEFT-HAND-EXACT", device_id=1):
         hand = Mock()
