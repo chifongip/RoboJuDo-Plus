@@ -321,7 +321,8 @@ invalidate the command. Fresh measurements and matching session/generation still
   local scheduling or blocking also needs investigation. An average rate alone cannot explain intermittent timeouts.
   The recent p95 uses the latest 4096 observed update gaps; history is bounded for long captures.
 - For repeated XR timestamp timeouts, run the bridge with `--xr-diagnostics`. Every two seconds it reports the SDK's
-  raw timestamp, seconds since its last observed change, observed update rate, grip values, and robot intent.
+  observed update rate, milliseconds since its last timestamp change, robot intent, and grip/trigger values in
+  left/right order. Unknown values are shown as `?`; the raw timestamp is omitted.
   The observed rate measures bridge reads, not network packet rate. In TRACK intent, check whether the timestamp
   advances and whether a squeezed grip exceeds `0.9`. A stationary pose alone does not indicate a stale stream.
 - The same flag separates measurement ages from execution durations. `feedback_age_at_publish` remains the age of
@@ -333,8 +334,12 @@ invalidate the command. Fresh measurements and matching session/generation still
   generation, and send status for the preceding publication, because current send time is not yet known when
   encoding its frame. These optional diagnostic fields do not change the wire schema version; older feedback
   messages without diagnostics are still accepted.
-  Every two seconds, diagnostics report sample count, p50, p95 and maximum for each metric, plus proposal and
-  acknowledgement counts. Idle intervals do not report a historical acknowledgement as a new round trip.
+  Every two seconds, the console shows a short feedback summary: latest measurement age, the oldest source
+  (body/left hand/right hand), p95 age, and sent/acknowledged command counts. A second line shows p95 processing
+  times for policy inference, `env_step`, retargeting and successful acknowledgement waits. Missing stages are omitted;
+  unavailable feedback is labelled explicitly. Raw timing dictionaries and snapshot IDs are not printed.
+  Detailed fields remain available in the feedback message. Idle intervals do not report a historical
+  acknowledgement as a new round trip.
   These are local durations, not cross-host clock comparisons. `measurement_age_lower_bound` excludes network transit
   and queueing; the robot's age check remains authoritative. For command expiry, RoboJuDo logs the validation stage,
   deadline overrun, publication age, and configured budget. The 100 ms measurement deadline remains enforced.
