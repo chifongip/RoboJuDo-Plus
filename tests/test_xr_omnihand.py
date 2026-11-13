@@ -612,6 +612,84 @@ class CombinedFeedbackTests(unittest.TestCase):
 
 
 class CombinedApplicationTests(unittest.TestCase):
+    def test_timely_application_observed_after_deadline_is_acknowledged(self):
+        receiver = self.receiver()
+        receiver.pending = ({"status": "tracking"}, (2, 10), 10.1)
+        receiver._hand_runtime.get_data.return_value = {"joint_state_fresh": True, "applied": (2, 10)}
+        with patch("time.monotonic", return_value=10.11), patch.object(receiver, "invalidate") as invalidate:
+            self.assertTrue(receiver.finish_pending())
+        invalidate.assert_not_called()
+        receiver.feedback.acknowledge.assert_called_once()
+
+    def test_unapplied_command_still_expires(self):
+        receiver = self.receiver()
+        receiver.pending = ({"status": "tracking"}, (2, 10), 10.1)
+        receiver._hand_runtime.get_data.return_value = {"joint_state_fresh": True, "applied": None}
+        with patch("time.monotonic", return_value=10.11), patch.object(receiver, "invalidate") as invalidate:
+            self.assertFalse(receiver.finish_pending())
+        invalidate.assert_called_once()
+        receiver.feedback.acknowledge.assert_not_called()
+
+    def test_hand_admission_precedes_arm_submission_and_failure_holds_arms(self):
+        from robojudo.pipeline.upper_body_zmq_pipeline import UpperBodyZmqPipelineMixin
+
+        for failure in (None, ValueError("expired")):
+            with self.subTest(failure=failure):
+                pipeline = UpperBodyZmqPipelineMixin.__new__(UpperBodyZmqPipelineMixin)
+                receiver = Mock()
+                receiver.feedback.schema_version = 2
+                receiver.synchronize_intent.return_value = False
+                receiver.hand_snapshot.return_value = {"fresh": True}
+                order = []
+
+                def submit(proposal, order=order, failure=failure):
+                    order.append("hands")
+                    if failure:
+                        raise failure
+
+                receiver.submit_hands.side_effect = submit
+                pipeline._feedback_receiver = lambda receiver=receiver: receiver
+                pipeline._feedback_intent = lambda: "TRACK"
+                pipeline._upper_body_pending = {"positions": {"arm": 0.2}}
+                pipeline._upper_body_indices = np.array([0])
+                pipeline._upper_body_previous = np.array([0.1], dtype=np.float32)
+                pipeline.env = SimpleNamespace(step=lambda *args, order=order: order.append("arms"))
+                target = np.array([0.2], dtype=np.float32)
+                pipeline._send_upper_body_target(target)
+                self.assertEqual(order, ["hands", "arms"])
+                self.assertAlmostEqual(target[0], 0.1 if failure else 0.2)
+                self.assertEqual(receiver.invalidate.called, failure is not None)
+
+    def test_feedback_runtime_preserves_configured_read_timeout(self):
+        from robojudo.controller.upper_body_omnihand_zmq_ctrl import UpperBodyOmniHandZmqCtrl
+
+        cfg = UpperBodyOmniHandZmqCtrlCfg(joint_names=["arm"], feedback_endpoint="tcp://127.0.0.1:8571", ema_alpha=0)
+        receiver = UpperBodyOmniHandZmqCtrl.__new__(UpperBodyOmniHandZmqCtrl)
+        for timeout_ms in (200, 50):
+            with self.subTest(timeout_ms=timeout_ms):
+                cfg.omnihand.frame_recv_timeout_ms = timeout_ms
+                with patch("robojudo.controller.upper_body_omnihand_zmq_ctrl.OmniHandRuntime") as runtime:
+                    receiver._create_hand_runtime(cfg)
+                self.assertEqual(runtime.call_args.args[0].frame_recv_timeout_ms, timeout_ms)
+                self.assertEqual(cfg.omnihand.frame_recv_timeout_ms, timeout_ms)
+
+    def test_arm_submission_failure_revokes_pending_hand_writes(self):
+        from robojudo.pipeline.upper_body_zmq_pipeline import UpperBodyZmqPipelineMixin
+
+        pipeline = UpperBodyZmqPipelineMixin.__new__(UpperBodyZmqPipelineMixin)
+        receiver = Mock()
+        receiver.feedback.schema_version = 2
+        receiver.synchronize_intent.return_value = False
+        receiver.hand_snapshot.return_value = {"fresh": True}
+        pipeline._feedback_receiver = lambda: receiver
+        pipeline._feedback_intent = lambda: "TRACK"
+        pipeline._upper_body_pending = {"positions": {"arm": 0.2}}
+        pipeline.env = SimpleNamespace(step=Mock(side_effect=RuntimeError("body failed")))
+        with self.assertRaisesRegex(RuntimeError, "body failed"):
+            pipeline._send_upper_body_target(np.array([0.2], dtype=np.float32))
+        receiver.invalidate.assert_called_once_with("arm submission failed")
+        self.assertIsNone(pipeline._upper_body_pending)
+
     def test_recoverable_application_failure_uses_bridge_rebase_reason(self):
         receiver = self.receiver()
         with patch.object(receiver, "reset"), patch.object(receiver, "_log_invalid_message"):

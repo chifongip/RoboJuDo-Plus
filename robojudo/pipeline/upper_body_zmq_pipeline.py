@@ -245,12 +245,45 @@ class UpperBodyZmqPipelineMixin:
                         receiver._clear_positions()
                         receiver.synchronize_generation()
             else:
+                self._upper_body_previous = self._upper_body_filtered.copy()
                 self._upper_body_filtered = candidate
                 self._upper_body_pending = proposal
                 self._upper_body_stream_was_fresh = self._upper_body_enabled and proposal.get("status") == "tracking"
         target = np.asarray(pd_target, dtype=np.float32).copy()
         target[self._upper_body_indices] = self._upper_body_filtered
         return target
+
+    def _send_upper_body_target(self, pd_target, hand_pose=None):
+        """Admit hands before issuing the corresponding arm target.
+
+        Physical writes remain asynchronous; the bridge checks independent
+        application paths. Failure revokes further writes, never rolls hardware back.
+        """
+        receiver = self._feedback_receiver()
+        hands = receiver is not None and receiver.feedback.schema_version == 2
+        proposal = getattr(self, "_upper_body_pending", None)
+        if hands and proposal is not None:
+            try:
+                if receiver.synchronize_intent(self._feedback_intent()):
+                    raise ValueError("control intent changed before submission")
+                receiver.feedback.validate(proposal, proposal["positions"])
+                if not receiver.hand_snapshot()["fresh"]:
+                    raise ValueError("finger measurements are stale before submission")
+                receiver.submit_hands(proposal)
+            except (ValueError, KeyError, RuntimeError) as exc:
+                receiver.invalidate(str(exc), recoverable=isinstance(exc, ValueError | KeyError))
+                self._upper_body_pending = None
+                self._upper_body_stream_was_fresh = False
+                self._upper_body_filtered = self._upper_body_previous.copy()
+                pd_target[self._upper_body_indices] = self._upper_body_filtered
+        try:
+            self.env.step(pd_target, hand_pose)
+        except Exception:
+            if hands:
+                receiver.invalidate("arm submission failed")
+                self._upper_body_pending = None
+            raise
+        self._upper_body_command_submitted = True
 
     def _update_upper_body_feedback(self, env_data, ctrl_data, pd_target):
         cfg = getattr(self, "_upper_body_cfg", None)
@@ -274,8 +307,10 @@ class UpperBodyZmqPipelineMixin:
                 self._upper_body_filtered = np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices].copy()
                 if self._upper_body_pending is not None:
                     if hands:
-                        receiver.feedback.validate(self._upper_body_pending, self._upper_body_pending["positions"])
-                        receiver.submit_hands(self._upper_body_pending)
+                        # Admission happened before env.step; do not re-apply or
+                        # expire an already issued command after a blocking step.
+                        if receiver.pending is None:
+                            raise ValueError("combined command was not admitted before arm submission")
                     else:
                         receiver.acknowledge()
             if hands:

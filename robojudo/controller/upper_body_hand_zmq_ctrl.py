@@ -290,7 +290,10 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
             return False
         proposal, identity, deadline = self.pending
         state = self.hand_snapshot()
-        if not state["fresh"] or time.monotonic() > deadline:
+        # A matching hardware identity is only published after both writes
+        # completed before their deadline. Observing it later is not a failure.
+        applied = self._hand_runtime is not None and state["applied"] == identity
+        if not state["fresh"] or (not applied and time.monotonic() > deadline):
             self.invalidate("finger application expired or measurements stale", recoverable=True)
             return False
         if self._hand_runtime is not None and state["applied"] != identity:

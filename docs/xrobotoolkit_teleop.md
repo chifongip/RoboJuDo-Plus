@@ -209,6 +209,48 @@ remains a separate standalone simulation.
 
 ## Troubleshooting
 
+To measure OmniHand receive limits independently of XR and policy inference, stop
+other hand clients and run this read-only probe on the robot using the same local
+serial configuration as `check_omnihand_hcan.py`:
+
+```bash
+python scripts/probe_omnihand_receive.py --config /path/to/omnihand_serials.json \
+  --timeouts-ms 10 20 25 50 100 200 --duration 30 --rate-hz 100 \
+  --output-prefix /tmp/omnihand-receive
+```
+
+Both hands are read concurrently in an isolated SDK process for each candidate.
+Identity verification uses the configured timeout (200 ms by default), then the
+probe applies the candidate timeout directly.
+It sends no motion commands. A parent watchdog terminates stuck reads or startup.
+JSON summaries and per-read CSV record full SDK read latency (p50/p95/p99/max),
+invalid readings/exceptions, valid receive rate, gaps between valid readings, and
+the previous measurement's age when a read returns. Read-start timestamps match
+the runtime's conservative timestamp convention. `--feedback-budget-ms` only
+compares results against a budget; it does not change control configuration.
+
+Use failure counts and tail latency to compare candidates. A read exceeding its
+configured frame timeout shows that the timeout does not bound the full API call.
+Finite joint arrays alone cannot prove that firmware returned a new sample. This
+probe measures reads only; it does not establish an end-to-end control deadline or
+measure command writes. Exit status is nonzero for failed stages or invalid reads.
+
+OmniHand control uses the configured `frame_recv_timeout_ms` unchanged in both
+feedback and streaming modes (200 ms by default). Configure it independently of
+`feedback_timeout_s`: the SDK receive wait and robot measurement freshness budget
+serve different purposes. Reads and writes remain serialized per hand handle.
+A slow or stuck SDK call can still make measurements stale and trigger a hold;
+the feedback freshness checks remain enforced independently of the receive timeout.
+
+Combined proposals are admitted to the hand runtime immediately before body submission.
+Admission failure retains the previous arm target, and body submission failure revokes
+pending hand writes. Hardware writes cannot be rolled back or made simultaneous across
+the robot and two hand handles. Collision checks therefore sample independent progress
+of the arms, left hand and right hand, including partial application, with a bounded
+sample budget. A matching hardware application ID proves both hand writes finished
+before their measurement deadline; delayed observation of that ID does not itself
+invalidate the command. Fresh measurements and matching session/generation still apply.
+
 - To measure SDK timestamp updates independently of IK and ZMQ, stop the bridge and other XR SDK clients, leave
   PC Service/headset streaming, and run in `robojudo-xr`:
 

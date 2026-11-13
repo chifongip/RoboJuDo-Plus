@@ -273,8 +273,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
 
     def _send_policy_target(self, pd_target, hand_pose=None):
         self._sync_observer_eligibility()
-        self.env.step(pd_target, hand_pose)
-        self._upper_body_command_submitted = True
+        self._send_upper_body_target(pd_target, hand_pose)
 
     def _step_rl_policy(self, env_data, ctrl_data, dry_run: bool):
         started = time.perf_counter()
