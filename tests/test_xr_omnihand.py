@@ -645,6 +645,7 @@ class CombinedFeedbackTests(unittest.TestCase):
         self.clock.return_value = 10.11
         receiver = SimpleNamespace(
             feedback=self.feedback,
+            pending=None,
             synchronize_intent=Mock(return_value=False),
             synchronize_generation=Mock(),
             _clear_positions=Mock(),
@@ -662,6 +663,95 @@ class CombinedFeedbackTests(unittest.TestCase):
         self.assertEqual(self.feedback.generation, generation)
         receiver._clear_positions.assert_called_once()
         self.assertIsNone(pipeline._upper_body_pending)
+
+    def test_receiver_keeps_newest_frame_while_combined_application_is_busy(self):
+        from robojudo.controller.upper_body_omnihand_zmq_ctrl import UpperBodyOmniHandZmqCtrl
+        from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import X2LocomanipulationLocoMimicPipeline
+
+        snapshot = {
+            "positions": dict.fromkeys(ALL_HAND_NAMES, 0.0),
+            "sample_times": dict.fromkeys(ALL_HAND_NAMES, 10.0),
+            "targets": dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0),
+            "joint_state_fresh": True,
+            "applied": None,
+        }
+        runtime = Mock()
+        runtime.get_data.side_effect = lambda: dict(snapshot)
+        env = SimpleNamespace(
+            cfg_env=SimpleNamespace(is_sim=False),
+            joint_names=["arm"],
+            position_limits=np.array([[-1.0, 1.0]]),
+            step=Mock(),
+            get_joint_feedback=lambda: {"positions": {"arm": 0.0}, "sample_times": {"arm": 10.0}},
+        )
+        with (
+            patch("robojudo.controller.upper_body_zmq_ctrl.zmq.Context.instance", return_value=MemoryContext()),
+            patch.object(UpperBodyOmniHandZmqCtrl, "_create_hand_runtime", return_value=runtime),
+        ):
+            receiver = UpperBodyOmniHandZmqCtrl(self.cfg, env)
+        self.addCleanup(receiver.close)
+        self.feedback = receiver.feedback
+        first = self.proposal()
+        first["positions"]["arm"] = float(np.float32(0.01))
+        receiver.synchronize_generation()
+        pipeline = X2LocomanipulationLocoMimicPipeline.__new__(X2LocomanipulationLocoMimicPipeline)
+        pipeline.env, pipeline.dt = env, 0.02
+        pipeline._upper_body_cfg = self.cfg
+        pipeline._upper_body_indices = np.array([0])
+        pipeline._upper_body_filtered = pipeline._upper_body_default = np.zeros(1)
+        pipeline._upper_body_enabled = True
+        pipeline._upper_body_control_available = lambda: True
+        pipeline._feedback_intent = lambda: "TRACK"
+        pipeline._feedback_receiver = lambda: receiver
+        pipeline.mode = SimpleNamespace(value="RL_DEFAULT")
+
+        def select():
+            return pipeline._apply_feedback_proposal(np.zeros(1), {self.cfg.ctrl_type: receiver.get_data()}, receiver)
+
+        receiver._socket.messages.append(first)
+        target = select()
+        pipeline._send_upper_body_target(target)
+        pending = receiver.pending
+        runtime.submit.assert_called_once()
+        # Even a partially updated hardware snapshot cannot advance the baseline.
+        snapshot["targets"][OMNIHAND_JOINT_NAMES[0]] = 0.01
+        pipeline._publish_upper_body_feedback(None, target)
+        state = self.feedback.socket.frames[-1]
+        self.assertEqual(state["last_commanded_positions"], self.targets)
+        self.assertIsNone(state["applied_frame_id"])
+        self.assertEqual(state["command_id"], 0)
+
+        for frame_id in (2, 3):
+            newer = dict(first, frame_id=frame_id)
+            receiver._socket.messages.append(newer)
+        target = select()
+        self.assertEqual(receiver._proposal["frame_id"], 3)
+        self.assertIs(receiver.pending, pending)
+        self.assertIsNone(pipeline._upper_body_pending)
+        pipeline._send_upper_body_target(target)
+        runtime.submit.assert_called_once()
+        self.assertGreaterEqual(self.feedback.command_counts["superseded"], 1)
+
+        snapshot["applied"] = pending[1]
+        pipeline._publish_upper_body_feedback(None, target)
+        state = self.feedback.socket.frames[-1]
+        self.assertEqual(state["applied_frame_id"], 1)
+        self.assertEqual(state["applied_bridge_id"], "test")
+        self.assertEqual(state["last_commanded_positions"], first["positions"])
+        self.assertEqual(state["command_id"], 1)
+        self.assertIsNone(receiver.pending)
+        # The queued frame was checked against the previous completed baseline.
+        select()
+        self.assertIsNone(pipeline._upper_body_pending)
+        runtime.submit.assert_called_once()
+
+        fresh = dict(first, frame_id=4, state_id=state["state_id"], command_id=1)
+        fresh["positions"] = dict(first["positions"], arm=float(np.float32(0.02)))
+        receiver._socket.messages.append(fresh)
+        target = select()
+        pipeline._send_upper_body_target(target)
+        self.assertEqual(runtime.submit.call_count, 2)
+        self.assertEqual(receiver.pending[0]["frame_id"], 4)
 
     def test_safety_hold_after_body_submission_cancels_hand_dispatch(self):
         from robojudo.controller.upper_body_omnihand_zmq_ctrl import UpperBodyOmniHandZmqCtrl

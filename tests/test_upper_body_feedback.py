@@ -284,6 +284,44 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         fresh = self.proposal(next_state, bridge_id="restarted")
         self.feedback.validate(fresh, fresh["positions"], receiving=True)
 
+    def test_completion_identity_and_targets_are_cleared_on_generation_reset(self):
+        state = self.publish()
+        proposal = self.proposal(state)
+        self.feedback.acknowledge(proposal)
+        completed = self.publish()
+        self.assertEqual(completed["applied_bridge_id"], proposal["bridge_id"])
+        self.assertEqual(completed["applied_frame_id"], proposal["frame_id"])
+        self.assertEqual(completed["last_commanded_positions"], proposal["positions"])
+        self.feedback.reset()
+        reset = self.publish()
+        self.assertIsNone(reset["applied_bridge_id"])
+        self.assertIsNone(reset["applied_frame_id"])
+        self.assertGreater(reset["generation"], completed["generation"])
+
+    def test_invalid_initial_targets_recover_without_a_generation_reset(self):
+        for invalid in (np.nan, np.inf, -np.inf):
+            with self.subTest(invalid=invalid):
+                self.feedback.reset()
+                self.pipeline._upper_body_filtered[0] = invalid
+                first = self.publish()
+                self.assertFalse(first["valid"])
+                self.assertIsNone(self.feedback._completed_positions)
+                self.assertIsNone(first["last_commanded_positions"][self.arm_cfg.joint_names[0]])
+
+                self.pipeline._upper_body_filtered[0] = self.pipeline._upper_body_default[0]
+                recovered = self.publish()
+                self.assertTrue(recovered["valid"])
+                self.assertEqual(recovered["generation"], first["generation"])
+                self.assertEqual(self.feedback._completed_positions, recovered["last_commanded_positions"])
+                self.assertTrue(all(np.isfinite(value) for value in recovered["last_commanded_positions"].values()))
+
+    def test_completed_baseline_cannot_hide_nonfinite_current_targets(self):
+        self.publish()
+        self.pipeline._upper_body_filtered[0] = np.nan
+        state = self.publish()
+        self.assertFalse(state["valid"])
+        self.assertTrue(all(np.isfinite(value) for value in state["last_commanded_positions"].values()))
+
     def test_nonfinite_measurements_publish_invalid_json_safe_state(self):
         self.env_data.dof_pos = self.env.dof_pos.copy()
         self.env_data.dof_pos[0] = np.nan

@@ -29,6 +29,10 @@ class UpperBodyFeedback:
         self.session_id = uuid.uuid4().hex
         self.generation = 0
         self.command_id = 0
+        self.applied_bridge_id = None
+        self.applied_frame_id = None
+        self._completed_positions = None
+        self.command_counts = dict.fromkeys(("received", "superseded", "rejected", "completed"), 0)
         self.state_id = 0
         self.intent = "HOLD"
         self.reset_reason = "startup"
@@ -64,6 +68,9 @@ class UpperBodyFeedback:
         self._frame_id = -1
         self._states.clear()
         self.last_proposal_at = None
+        self.applied_bridge_id = None
+        self.applied_frame_id = None
+        self._completed_positions = None
 
     def expire_tracking(self, now):
         if (
@@ -99,13 +106,21 @@ class UpperBodyFeedback:
         if intent != self.intent:
             self.reset("control intent changed")
             self.intent = intent
+        current_targets = targets
+        if self._completed_positions is not None:
+            targets = self._completed_positions
         ages = {name: now - stamp for name, stamp in sample_times.items()}
         valid = (
             bool(measurements_available)
             and set(ages) == set(positions)
             and all(math.isfinite(age) and 0 <= age <= self.cfg.feedback_timeout_s for age in ages.values())
         )
-        valid = valid and all(math.isfinite(value) for value in (*positions.values(), *targets.values()))
+        valid = valid and all(
+            math.isfinite(value) for value in (*positions.values(), *targets.values(), *current_targets.values())
+        )
+        # An invalid startup snapshot must not become a permanent baseline.
+        if valid and self._completed_positions is None:
+            self._completed_positions = dict(targets)
         self.state_id += 1
         oldest = max(ages, key=ages.get, default=None)
         feedback_diagnostics = {
@@ -116,6 +131,7 @@ class UpperBodyFeedback:
                 for source, names in (source_groups or {}).items()
             },
             "previous_publication": self._last_publication_timing,
+            "command_counts": self.command_counts.copy(),
         }
         feedback_diagnostics["source_age_ms"] = {
             source: value if value is not None and math.isfinite(value) else None
@@ -129,6 +145,8 @@ class UpperBodyFeedback:
             "reset_reason": self.reset_reason,
             "state_id": self.state_id,
             "command_id": self.command_id,
+            "applied_bridge_id": self.applied_bridge_id,
+            "applied_frame_id": self.applied_frame_id,
             "intent": intent,
             "mode": mode,
             "valid": valid,
@@ -235,8 +253,16 @@ class UpperBodyFeedback:
             self._frame_id = frame_id
             self.last_proposal_at = time.monotonic()
 
-    def acknowledge(self):
+    def acknowledge(self, proposal=None):
         self.command_id += 1
+        self.command_counts["completed"] += 1
+        if proposal is not None:
+            self.applied_bridge_id = proposal["bridge_id"]
+            self.applied_frame_id = proposal["frame_id"]
+            self._completed_positions = dict(proposal["positions"])
+        else:
+            self.applied_bridge_id = self.applied_frame_id = None
+            self._completed_positions = None
         # Command IDs invalidate old proposals. Keep the bounded snapshots until
         # their deadlines so acknowledgement does not discard valid overlays.
 

@@ -61,19 +61,22 @@ settings = TeleopSettings(collision_checking=sys.argv[5] == "True")
 bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], settings=settings, xr_client=xr,
                        ik_backend=sys.argv[3], robot=sys.argv[4])
 try:
+    deadline = time.monotonic()
     while True:
+        time.sleep(max(0, deadline - time.monotonic()))
         if select.select([sys.stdin], [], [], 0)[0]:
             line = sys.stdin.readline()
             if not line:
                 break
             for name, value in json.loads(line).items():
                 setattr(xr, name, value)
-        bridge.feedback.poll(timeout=20)
-        started = time.monotonic()
-        if bridge.poll():
-            time.sleep(max(0, 0.02 - (time.monotonic() - started)))
+        bridge.poll()
         if os.environ.get("XROBOTOOLKIT_TEST_DIAGNOSTICS"):
             bridge.report_xr_diagnostics()
+        deadline += 0.02
+        now = time.monotonic()
+        if deadline < now:
+            deadline += (int((now - deadline) / 0.02) + 1) * 0.02
 finally:
     bridge.close()
 """
@@ -264,6 +267,88 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("XROBOTOOLKIT_TEST_PYTHON"), "set XROBOTOOLKIT_TEST_PYTHON")
 class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
     with_omnihand = True
+
+    def test_delayed_hand_writes_do_not_pace_bridge_publishing(self):
+        if self.collision_checking:
+            self.skipTest("50 Hz timing check isolates hand I/O from collision sampling cost")
+        env = self.pipeline.env
+
+        class DelayedHands:
+            takeover_requested = True
+
+            def __init__(self):
+                self.delay = 0.04
+                self.pending = None
+                self.applied = None
+
+            def get_data(self):
+                if self.pending is not None:
+                    positions, identity, ready_at, deadline = self.pending
+                    if time.monotonic() >= ready_at and ready_at <= deadline:
+                        env.submit_hand_targets(positions)
+                        self.applied = identity
+                        self.pending = None
+                snapshot = env.hand_snapshot()
+                return dict(snapshot, joint_state_fresh=snapshot["fresh"], applied=self.applied)
+
+            def submit(self, positions, identity, deadline):
+                if self.pending is not None:
+                    raise AssertionError("in-flight hand command was overwritten")
+                self.applied = None
+                self.pending = (positions.copy(), identity, time.monotonic() + self.delay, deadline)
+
+            def acknowledge(self):
+                pass
+
+            def set_takeover_enabled(self, enabled):
+                self.takeover_requested = enabled
+                if not enabled:
+                    self.reset()
+
+            def invalidate_commands(self):
+                self.reset()
+
+            def reset(self):
+                self.pending = self.applied = None
+
+            def close(self):
+                self.reset()
+
+        hands = DelayedHands()
+        self.receiver._hand_runtime = hands
+        # Include a 100 ms hardware delay without intentionally expiring the
+        # default 100 ms measurement lease during this scheduling test.
+        self.receiver.cfg_ctrl.feedback_timeout_s = 0.3
+        self.pipeline._set_upper_body_enabled(True)
+        child = self.start_bridge()
+        self.wait_until(lambda: self.receiver.feedback.command_id > 0)
+        self.control(child, trigger=0.4)
+        monitor = zmq.Context.instance().socket(zmq.SUB)
+        self.addCleanup(monitor.close, linger=0)
+        monitor.setsockopt(zmq.SUBSCRIBE, b"")
+        monitor.connect(self.command_endpoint)
+        self.cycles(0.15)
+        for delay in (0.04, 0.06, 0.1):
+            with self.subTest(hand_delay=delay):
+                hands.delay = delay
+                while monitor.poll(0):
+                    monitor.recv()
+                completed = self.receiver.feedback.command_id
+                started = time.monotonic()
+                self.cycles(0.8)
+                elapsed = time.monotonic() - started
+                frames = []
+                while monitor.poll(0):
+                    frame = monitor.recv_json()
+                    if frame["type"] == "upper_body_proposal":
+                        frames.append(frame)
+                rate = len(frames) / elapsed
+                print(f"Injected hand delay={delay * 1000:.0f} ms: bridge publish={rate:.1f} Hz")
+                self.assertGreater(rate, 35.0)
+                self.assertGreater(self.receiver.feedback.command_id, completed)
+                self.assertGreater(len(frames), self.receiver.feedback.command_id - completed)
+                self.assertEqual(len({frame["frame_id"] for frame in frames}), len(frames))
+                self.assertIsNone(child.poll())
 
     def test_independent_triggers_and_home_holds_fingers(self):
         child = self.start_bridge()

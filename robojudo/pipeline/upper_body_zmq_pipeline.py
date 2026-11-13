@@ -225,7 +225,13 @@ class UpperBodyZmqPipelineMixin:
             return pd_target
         stream = ctrl_data.get(self._upper_body_cfg.ctrl_type, {})
         proposal = stream.get("proposal")
-        if stream.get("fresh") and proposal is not None and proposal.get("intent") == self._feedback_intent():
+        busy = hands and receiver.pending is not None
+        if (
+            not busy
+            and stream.get("fresh")
+            and proposal is not None
+            and proposal.get("intent") == self._feedback_intent()
+        ):
             positions = stream.get("joint_positions", {})
             try:
                 receiver.feedback.validate(proposal, positions)
@@ -237,6 +243,7 @@ class UpperBodyZmqPipelineMixin:
                 checked.update(zip(self._upper_body_cfg.joint_names, candidate.tolist(), strict=True))
                 receiver.feedback.validate(proposal, checked)
             except (ValueError, KeyError, OverflowError, RuntimeError) as exc:
+                receiver.feedback.command_counts["rejected"] += 1
                 if hands and isinstance(exc, RuntimeError):
                     receiver.invalidate(str(exc))
                 else:
@@ -313,7 +320,7 @@ class UpperBodyZmqPipelineMixin:
                         if receiver.pending is None:
                             raise ValueError("combined command was not admitted before arm submission")
                     else:
-                        receiver.acknowledge()
+                        receiver.acknowledge(self._upper_body_pending)
             hand_state = None
             timing = dict(getattr(self, "_upper_body_timing_ms", {}))
             if hands:

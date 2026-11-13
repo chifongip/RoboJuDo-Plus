@@ -263,8 +263,6 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         return ctrl_data, []
 
     def _decode_message(self, message):
-        if self.pending is not None:
-            raise ValueError("combined proposal still awaiting application")
         return super()._decode_message(message)
 
     def hand_snapshot(self):
@@ -347,7 +345,7 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
             return False
         if self._hand_runtime is not None and state["applied"] != identity:
             return False
-        self.feedback.acknowledge()
+        self.feedback.acknowledge(proposal)
         if self._hand_runtime is not None:
             self._hand_runtime.acknowledge()
         self.pending = None

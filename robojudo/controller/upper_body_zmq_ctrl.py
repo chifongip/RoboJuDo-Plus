@@ -136,6 +136,9 @@ class UpperBodyZmqCtrl(Controller):
             decoded[name] = value
         if self.feedback is not None:
             self.feedback.validate(message, decoded, receiving=True)
+            self.feedback.command_counts["received"] += 1
+            if self._proposal is not None:
+                self.feedback.command_counts["superseded"] += 1
             self._proposal = message
         return decoded
 
@@ -202,6 +205,8 @@ class UpperBodyZmqCtrl(Controller):
                     continue
                 positions = self._decode_message(message)
             except (TypeError, ValueError, RecursionError) as exc:
+                if self.feedback is not None:
+                    self.feedback.command_counts["rejected"] += 1
                 self._log_invalid_message(exc, now)
                 continue
             self._latest_positions = positions
@@ -242,8 +247,8 @@ class UpperBodyZmqCtrl(Controller):
             )
         return result
 
-    def acknowledge(self):
-        self.feedback.acknowledge()
+    def acknowledge(self, proposal=None):
+        self.feedback.acknowledge(self._proposal if proposal is None else proposal)
         self._clear_positions()
 
     def process_triggers(self, ctrl_data):

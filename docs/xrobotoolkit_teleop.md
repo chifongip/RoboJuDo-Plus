@@ -102,7 +102,7 @@ python -m xrobotoolkit_teleop.integrations.robojudo --robot x2_omnihand --collis
 
 Disabling this option skips IK collision avoidance/recovery and collision path
 checks, including partial arm/hand application checks. Joint position and velocity
-limits, finite-value validation, freshness deadlines, and acknowledgements remain
+limits, finite-value validation, freshness deadlines, and robot-side command validation remain
 enforced. The setting is logged at startup and stays fixed until bridge restart.
 It does not change simulation contacts, robot watchdogs, or standalone demo behavior.
 Programmatic `TeleopSettings()` retains its enabled default; the CLI explicitly
@@ -161,7 +161,7 @@ additional EMA smoothing and reject invalid proposals instead of modifying a col
   safety states take priority over arm tracking/return requests.
 - Recording accepts fresh tracking proposals, excluding homing and outage holds.
 
-IK starts from acknowledged arm targets with the measured body pose, so servo lag in an ungripped arm cannot conflict
+IK starts from robot-reported completed arm targets with the measured body pose, so servo lag in an ungripped arm cannot conflict
 with its command speed bounds. Placo's posture objective uses the fixed configured default, rather than the previous
 command; its shared solver also applies the upstream manipulability objective. LeRobot uses its upstream joint-angle
 and filtered-history regularization. These objectives can choose different redundant-joint postures for the same hand pose.
@@ -201,9 +201,38 @@ Feedback publication uses the environment's post-step cached snapshot and its or
 Proposals are polled again after policy inference, immediately before arm override, to avoid an extra cycle of queueing.
 A tracking-command timeout revokes the generation even when robot feedback stays healthy, so old proposals cannot
 resume motion. Feedback identifies this reset separately from mode/session changes, allowing the bridge to rebase
-an already engaged controller using fresh state. Acknowledgement retries also rebase without revoking engagement.
+an already engaged controller using fresh state. Missing completion reports do not trigger bridge retries or rebases.
 The bridge expects the bundled X2 kinematics; custom geometry requires a matching
 retargeting model.
+
+### Continuous publishing and robot-side selection
+
+Every bridge profile, including arm-only control, samples XR and publishes complete checked targets at
+`--control-frequency` (50 Hz by default), independently of command completion. There is no acknowledgement wait
+or compatibility switch. During valid idle tracking, complete holding targets keep the stream alive after grip-release
+prerequisites are met. HOLD, invalid XR, expired feedback, and rejected safety checks suppress command publication;
+HOME can run without XR. Feedback snapshots may be reused only while their measurements remain fresh.
+
+RoboJuDo keeps the newest valid waiting frame and discards intermediate frames. Arm-only targets are selected at
+robot control ticks. Combined arm-and-hand control finishes the current hand writes before selecting another frame;
+new arrivals never interrupt a write. Selection does not make physical arm and finger motion simultaneous. Freshness,
+intent, limits, velocity bounds, and the exact command baseline are rechecked before submission. A frame made obsolete
+by completion of an earlier command is discarded; the bridge continuously supplies replacements using updated feedback.
+Consequently, robot execution frequency may be lower than bridge publishing frequency.
+
+Feedback schemas 1 and 2 include nullable `applied_bridge_id` and `applied_frame_id`, identifying the last completed
+proposal in the current generation. Arm-only completion means successful environment submission. Combined completion
+also requires both hand writes; neither waits for joints to reach their targets. `last_commanded_positions` stays at a
+coherent completed baseline while a combined command is in flight. Resetting the generation clears completion identity.
+Update RoboJuDo and the bridge together. Solver history is committed only for an explicitly matching completed frame;
+uncompleted proposals remain bounded and cannot advance the solver's accepted history.
+
+With `--xr-diagnostics`, `XR` reports observed SDK timestamp updates, and `publish` reports sent command frames per
+second. `completion_latency` reports asynchronous send-to-observed-completion latency; it does not pace publishing.
+Robot `received`, `superseded`, `rejected`, and `completed` counters are cumulative diagnostics for command selection.
+The former `ack_wait` diagnostic has been removed. Expired solver transactions are discarded separately from the
+bounded completion metadata, so a late confirmation still contributes to completion counts and latency without
+committing expired solver history. Completion metadata retains the newest 512 sent frames and clears on rebases/resets.
 
 ## Automated validation
 
