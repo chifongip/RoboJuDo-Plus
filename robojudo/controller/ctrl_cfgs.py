@@ -218,8 +218,14 @@ class OmniHandCfg(Config):
     joint_state_timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
     startup_timeout_s: float = Field(default=15.0, gt=0.0, allow_inf_nan=False)
 
+    auto_reconnect: bool = True
+    reconnect_timeout_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    reconnect_interval_s: float = Field(default=1.0, gt=0.0, le=5.0, allow_inf_nan=False)
+
     @model_validator(mode="after")
     def validate_omnihand(self):
+        if self.reconnect_timeout_s < self.joint_state_timeout_s:
+            raise ValueError("reconnect_timeout_s must be at least joint_state_timeout_s")
         serials = (self.left_hcan_serial, self.right_hcan_serial, self.left_hand_serial, self.right_hand_serial)
         if any(value is not None for value in serials):
             if self.transport != "hcan":

@@ -38,6 +38,13 @@ class UpperBodyOmniHandZmqCtrl(UpperBodyHandZmqCtrlBase):
             if not isinstance(values, dict) or set(values) != allowed:
                 raise ValueError("local hand configuration must contain exactly the four serial fields")
             hand_cfg = type(hand_cfg).model_validate({**hand_cfg.model_dump(), **values})
+        if cfg_ctrl.feedback_endpoint is not None:
+            hand_cfg = type(hand_cfg).model_validate(
+                {
+                    **hand_cfg.model_dump(),
+                    "joint_state_timeout_s": min(hand_cfg.joint_state_timeout_s, cfg_ctrl.feedback_timeout_s),
+                }
+            )
         return OmniHandRuntime(hand_cfg, require_serials=cfg_ctrl.feedback_endpoint is not None)
 
     def hand_feedback_payload(self):

@@ -4,6 +4,7 @@ Both dex-teleop and checked XR proposals use this runtime. Connection policy is
 configuration-driven; XR explicitly requires serial-verified robot-side HCAN.
 """
 
+import logging
 import multiprocessing as mp
 import pickle
 import queue
@@ -13,6 +14,17 @@ import time
 import numpy as np
 
 from robojudo.controller.ctrl_cfgs import OmniHandCfg
+
+logger = logging.getLogger(__name__)
+
+
+class HandIdentityError(RuntimeError):
+    """An opened adapter reported a different physical hand."""
+
+
+class HandConfigurationError(RuntimeError):
+    """The SDK installation cannot support this runtime."""
+
 
 OMNIHAND_JOINT_SUFFIXES = (
     "thumb_roll_joint",
@@ -139,7 +151,7 @@ def connect_verified_hand(cfg, side):
     if not vendor.product_model or not actual:
         raise RuntimeError(f"{context}: identity unreadable: expected {expected!r}, received {actual!r}")
     if device.hand_device_id != device_id or actual != expected:
-        raise RuntimeError(
+        raise HandIdentityError(
             f"{context}: hand identity mismatch: expected {expected!r}/CAN ID {device_id}, "
             f"received {actual!r}/CAN ID {device.hand_device_id}"
         )
@@ -150,7 +162,7 @@ def create_hand(cfg: OmniHandCfg, side: str):
     try:
         from omnihand import HandType, OmniHandPro2025
     except ImportError as exc:
-        raise RuntimeError(
+        raise HandConfigurationError(
             "OmniHand control requires the vendor Python SDK; run "
             "`python submodule_install.py omnihand_sdk` in the active environment"
         ) from exc
@@ -201,6 +213,28 @@ def create_hand(cfg: OmniHandCfg, side: str):
     return hand
 
 
+class _StopFlag:
+    """A process may die while waiting, so cancellation must not use a Condition."""
+
+    def __init__(self, context):
+        self._value = context.Value("b", 0, lock=False)
+
+    def is_set(self):
+        return bool(self._value.value)
+
+    def set(self):
+        self._value.value = 1
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while not self.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(remaining, 0.005))
+        return True
+
+
 class _CommandMailbox:
     """Single shared command slot; overwriting never depends on a Queue feeder."""
 
@@ -239,7 +273,7 @@ def _publish_state(channel, value):
             pass
 
 
-def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail):
+def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurements=None):
     """Serialize calls on one handle, publishing writes before the next read."""
     state = {
         "positions": None,
@@ -248,12 +282,24 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail):
         "targets": None,
         "commanded_at": None,
         "generation": None,
+        "consecutive_failures": 0,
+        "last_read_error": None,
     }
     stage = "read measurements"
+    last_read_log = float("-inf")
+    adapter = (
+        getattr(cfg, f"{side}_interface")
+        if cfg.transport == "socketcan"
+        else getattr(cfg, f"{side}_hcan_serial") or getattr(cfg, f"{side}_adapter_index")
+    )
 
     def allowed(generation, deadline):
         with gate.get_lock():
-            return not stop.is_set() and gate[0] == generation and gate[1] == 1 and time.monotonic() <= deadline
+            now = time.monotonic()
+            fresh = measurements is None or all(
+                stamp > 0 and 0 <= now - stamp <= cfg.joint_state_timeout_s for stamp in measurements
+            )
+            return fresh and not stop.is_set() and gate[0] == generation and gate[1] == 1 and now <= deadline
 
     try:
         while not stop.is_set():
@@ -279,21 +325,39 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail):
                 return
             stage = "read measurements"
             sampled_at = time.monotonic()
-            angles = np.asarray(hand.get_all_joint_angles(), dtype=float)
-            if angles.shape != (19,) or not np.isfinite(angles).all():
-                raise RuntimeError(
-                    f"expected 19 finite finger angles; received shape={angles.shape}, "
-                    f"nonfinite_indices={np.flatnonzero(~np.isfinite(angles)).tolist()}, "
-                    f"values={angles.ravel()[:19].tolist()}"
+            try:
+                angles = np.asarray(hand.get_all_joint_angles(), dtype=float)
+                if angles.shape != (19,) or not np.isfinite(angles).all():
+                    raise ValueError(
+                        f"expected 19 finite finger angles; received shape={angles.shape}, "
+                        f"nonfinite_indices={np.flatnonzero(~np.isfinite(angles)).tolist()}"
+                    )
+            except Exception as exc:
+                state["consecutive_failures"] += 1
+                state["last_read_error"] = f"{type(exc).__name__}: {exc}"[:1000]
+                if time.monotonic() - last_read_log >= 1.0:
+                    logger.warning(
+                        "%s: %s adapter %r: measurement rejected: %s",
+                        side,
+                        cfg.transport,
+                        adapter,
+                        state["last_read_error"],
+                    )
+                    last_read_log = time.monotonic()
+            else:
+                state.update(
+                    positions=angles.tolist(), sampled_at=sampled_at, consecutive_failures=0, last_read_error=None
                 )
-            state.update(positions=angles.tolist(), sampled_at=sampled_at)
+                if measurements is not None:
+                    with gate.get_lock():
+                        measurements[0 if side == "left" else 1] = sampled_at
             publish(side, state.copy())
             stop.wait(max(0.0, 1.0 / cfg.joint_state_fps - (time.monotonic() - cycle_started)))
     except Exception as exc:
         fail(side, stage, exc)
 
 
-def _worker(cfg, commands, states, stop, gate, errors):
+def _worker(cfg, commands, states, stop, gate, errors, measurements=None):
     """Initialize sequentially, then give each handle its own I/O thread."""
     hands, snapshot, threads = {}, {}, []
     local_commands = {side: queue.Queue(1) for side in ("left", "right")}
@@ -322,7 +386,13 @@ def _worker(cfg, commands, states, stop, gate, errors):
                 adapter = getattr(cfg, f"{side}_hcan_serial") or getattr(cfg, f"{side}_adapter_index")
             # Faults have a separate reliable slot, independent of measurements.
             errors.put_nowait(
-                f"{side}: {cfg.transport} adapter {adapter!r}: {stage}: {type(exc).__name__}: {exc}"[:4000]
+                {
+                    "message": f"{side}: {cfg.transport} adapter {adapter!r}: {stage}: {type(exc).__name__}: {exc}"[
+                        :4000
+                    ],
+                    "fatal": stage != "connect/start worker"
+                    or isinstance(exc, HandIdentityError | HandConfigurationError | ValueError | ImportError),
+                }
             )
             stop.set()
 
@@ -335,13 +405,22 @@ def _worker(cfg, commands, states, stop, gate, errors):
         for side in ("left", "right"):
             thread = threading.Thread(
                 target=_hand_loop,
-                args=(cfg, side, hands[side], local_commands[side], stop, gate, publish, fail),
+                args=(cfg, side, hands[side], local_commands[side], stop, gate, publish, fail, measurements),
                 daemon=True,
                 name=f"omnihand-{side}",
             )
             threads.append(thread)
             thread.start()
         while not stop.is_set():
+            if measurements is not None:
+                with gate.get_lock():
+                    if gate[1] and not all(
+                        stamp > 0 and 0 <= time.monotonic() - stamp <= cfg.joint_state_timeout_s
+                        for stamp in measurements
+                    ):
+                        gate[0] += 1
+                        gate[1] = 0
+                        gate[2] += 1
             try:
                 generation, deadline, identity, angles, submitted_at = commands.get_nowait()
             except queue.Empty:
@@ -368,79 +447,294 @@ class OmniHandRuntime:
     """Bounded parent-side coordinator; application IDs require both hand writes."""
 
     def __init__(self, cfg, *, read_only=False, require_serials=False):
-        if require_serials and (
-            cfg.transport != "hcan"
-            or not all(getattr(cfg, f"{side}_{kind}_serial") for side in ("left", "right") for kind in ("hcan", "hand"))
-        ):
+        verified = cfg.transport == "hcan" and all(
+            getattr(cfg, f"{side}_{kind}_serial") for side in ("left", "right") for kind in ("hcan", "hand")
+        )
+        if require_serials and not verified:
             raise ValueError("XR hardware requires HCAN adapter and exact hand serials for both sides")
-        self.cfg = cfg
-        self.read_only = read_only
+        self.cfg, self.read_only = cfg, read_only
+        self._can_reconnect = cfg.auto_reconnect and verified
         self._ctx = mp.get_context("spawn")
-        self._stop = self._ctx.Event()
-        self._gate = self._ctx.Array("q", [0, 0])
+        self._lock = threading.RLock()
+        self._shutdown = threading.Event()
+        self._started = threading.Event()
         self._process = None
-        self._commands = _CommandMailbox(self._ctx)
-        self._state_queue = self._ctx.Queue(1)
-        self._errors = _CommandMailbox(self._ctx)
         self._error = None
         self._states = {}
         self._pending = None
         self._sequence = 0
         self._closed = False
+        self._requested = False
+        self._healthy = False
+        self._status = "starting"
+        self._connection_generation = 0
+        self._stream_generation = 0
+        self._last_error = None
+        self._initial_targets = None
+        self._attempt_ready = False
+        self._seen_outages = 0
+        self._supervisor = threading.Thread(target=self._supervise, name="omnihand-supervisor", daemon=True)
+        self._supervisor.start()
         try:
-            deadline = time.monotonic() + cfg.startup_timeout_s
-            self._process = self._ctx.Process(
-                target=_worker,
-                args=(cfg, self._commands, self._state_queue, self._stop, self._gate, self._errors),
-                daemon=True,
-            )
-            self._process.start()
-            while len(self._states) < 2:
-                self._poll()
-                if time.monotonic() > deadline:
-                    raise TimeoutError("OmniHand startup verification timed out")
-                self._stop.wait(0.01)
-            initial = self.get_data()
-            if not initial["joint_state_fresh"]:
-                raise RuntimeError("OmniHand startup measurements are stale")
-            self._initial_targets = measured_command_baseline(initial["positions"])
+            if not self._started.wait(cfg.startup_timeout_s):
+                raise TimeoutError("OmniHand startup verification timed out")
+            self._poll()
         except Exception:
             self.close()
             raise
 
-    def _poll(self):
+    def _start_worker(self):
+        # A killed native process may leave IPC locks held. Each attempt gets
+        # completely new IPC; old snapshots retain their actual timestamps.
+        with self._lock:
+            self._stop = _StopFlag(self._ctx)
+            # Generation, effective authorization, worker-observed outages.
+            self._gate = self._ctx.Array("q", [0, 0, 0])
+            self._seen_outages = 0
+            self._attempt_ready = False
+            self._measurements = self._ctx.Array("d", [0.0, 0.0], lock=False)
+            self._commands = _CommandMailbox(self._ctx)
+            self._state_queue = self._ctx.Queue(1)
+            self._errors = _CommandMailbox(self._ctx)
+            self._process = self._ctx.Process(
+                target=_worker,
+                args=(
+                    self.cfg,
+                    self._commands,
+                    self._state_queue,
+                    self._stop,
+                    self._gate,
+                    self._errors,
+                    self._measurements,
+                ),
+                daemon=True,
+            )
+            self._process.start()
+            self._connection_generation += 1
+            self._attempt_started = time.monotonic()
+
+    def _reap_worker(self):
+        process = self._process
+        if process is None:
+            return
+        self._stop.set()
+        if process.pid is not None:
+            process.join(timeout=0.2)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=0.5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=0.5)
+            if process.is_alive():
+                raise RuntimeError("OmniHand worker could not be stopped; refusing a second SDK owner")
+        self._state_queue.cancel_join_thread()
+        self._state_queue.close()
+        self._process = None
+
+    def _set_health(self, healthy):
+        if healthy != self._healthy:
+            self._stream_generation += 1
+            self._pending = None
+            self._healthy = healthy
+            with self._gate.get_lock():
+                self._gate[0] += 1
+                self._gate[1] = 0
+            if not self._shutdown.is_set():
+                log = logger.info if healthy else logger.warning
+                log("OmniHand hardware feedback %s", "recovered" if healthy else "stale; holding commands")
+        if healthy:
+            with self._gate.get_lock():
+                self._gate[1] = int(self._requested and not self.read_only and not self._closed)
+
+    def _merge_snapshot(self, snapshot):
+        """Keep historical targets and measurements when a new worker has none."""
+        for side, state in snapshot.items():
+            previous = self._states.get(side, {})
+            merged = state.copy()
+            if state["positions"] is None and previous.get("positions") is not None:
+                merged.update(positions=previous["positions"], sampled_at=previous["sampled_at"])
+            if state["targets"] is None and previous.get("targets") is not None:
+                merged.update(targets=previous["targets"], commanded_at=previous["commanded_at"])
+            # Application identity always comes from the current worker.
+            self._states[side] = merged
+
+    def _refresh_health(self):
+        """Reconcile freshness and worker holds while the parent lock is held."""
+        with self._gate.get_lock():
+            stamps = list(self._measurements)
+            outages = self._gate[2]
+        if outages != self._seen_outages:
+            self._seen_outages = outages
+            # Even an outage that recovered between supervisor ticks must
+            # invalidate parent proposals and pending application identities.
+            self._set_health(False)
+        now = time.monotonic()
+        fresh = self._attempt_ready and all(
+            stamp > 0 and 0 <= now - stamp <= self.cfg.joint_state_timeout_s for stamp in stamps
+        )
+        fresh = (
+            fresh
+            and len(self._states) == 2
+            and all(
+                state["sampled_at"] is not None and 0 <= now - state["sampled_at"] <= self.cfg.joint_state_timeout_s
+                for state in self._states.values()
+            )
+        )
+        self._set_health(fresh and not self._closed and not self._stop.is_set() and self._error is None)
+        if self._attempt_ready and self._status not in ("fault", "reconnecting", "closed"):
+            self._status = "streaming" if self._healthy else "stale"
+        return stamps
+
+    def _supervise(self):
+        delay = self.cfg.reconnect_interval_s
+        ever_ready = False
         try:
-            self._error = self._errors.get_nowait()
-        except queue.Empty:
-            pass
-        if self._error is None and self._process.exitcode is not None and not self._closed:
-            # Check once more after observing exit so a final SDK error wins.
+            while not self._shutdown.is_set():
+                self._start_worker()
+                reason = None
+                fatal = False
+                while not self._shutdown.wait(0.005):
+                    with self._lock:
+                        try:
+                            error = self._errors.get_nowait()
+                        except queue.Empty:
+                            error = None
+                        if error is not None:
+                            reason, fatal = error["message"], error["fatal"]
+                            break
+                        if self._process.exitcode is not None:
+                            # A final write/identity fault must win over an exit
+                            # observed just after the first mailbox check.
+                            try:
+                                error = self._errors.get_nowait()
+                            except queue.Empty:
+                                reason = f"OmniHand worker exited ({self._process.exitcode})"
+                            else:
+                                reason, fatal = error["message"], error["fatal"]
+                            break
+                        try:
+                            snapshot = self._state_queue.get_nowait()
+                        except queue.Empty:
+                            snapshot = None
+                        if snapshot is not None:
+                            self._merge_snapshot(snapshot)
+                        # A snapshot must belong to this process, with both
+                        # measurements present, before publishing recovery.
+                        now = time.monotonic()
+                        complete = snapshot is not None and all(
+                            snapshot[side]["sampled_at"] is not None
+                            and 0 <= now - snapshot[side]["sampled_at"] <= self.cfg.joint_state_timeout_s
+                            for side in ("left", "right")
+                        )
+                        if not self._attempt_ready and complete:
+                            positions = {
+                                name: value
+                                for index, side in enumerate(("left", "right"))
+                                for name, value in zip(
+                                    ALL_HAND_NAMES[index * 19 : (index + 1) * 19],
+                                    snapshot[side]["positions"],
+                                    strict=True,
+                                )
+                            }
+                            self._initial_targets = measured_command_baseline(positions)
+                            self._attempt_ready = True
+                        stamps = self._refresh_health()
+                        now = time.monotonic()
+                        if self._healthy:
+                            ever_ready = True
+                            self._status = "streaming"
+                            self._started.set()
+                            delay = self.cfg.reconnect_interval_s
+                        else:
+                            self._status = (
+                                "stale" if self._attempt_ready else "reconnecting" if ever_ready else "starting"
+                            )
+                        reference = min(stamps) if all(stamp > 0 for stamp in stamps) else self._attempt_started
+                        limit = self.cfg.reconnect_timeout_s if self._attempt_ready else self.cfg.startup_timeout_s
+                        if now - reference >= limit:
+                            reason = "hand measurements did not recover before the communication deadline"
+                            break
+                with self._lock:
+                    self._set_health(False)
+                    self._attempt_ready = False
+                    self._pending = None
+                    self._status = "reconnecting"
+                    self._last_error = reason
+                    if hasattr(self, "_gate"):
+                        with self._gate.get_lock():
+                            self._gate[0] += 1
+                            self._gate[1] = 0
+                self._reap_worker()
+                if self._shutdown.is_set():
+                    break
+                if fatal or not self._can_reconnect:
+                    with self._lock:
+                        self._error = reason
+                        self._status = "fault"
+                    logger.error("OmniHand hardware fault: %s", reason)
+                    self._started.set()
+                    break
+                logger.warning("OmniHand hardware reconnect in %.1fs: %s", delay, reason)
+                if self._shutdown.wait(delay):
+                    break
+                delay = min(delay * 2, 5.0)
+        except Exception as exc:
+            with self._lock:
+                if hasattr(self, "_gate"):
+                    self._set_health(False)
+                    self._stop.set()
+                self._error = f"OmniHand supervisor failed: {exc}"
+                self._status = "fault"
+            self._started.set()
+        finally:
             try:
-                self._error = self._errors.get_nowait()
-            except queue.Empty:
-                self._error = f"OmniHand worker exited ({self._process.exitcode})"
+                self._reap_worker()
+            except Exception:
+                logger.exception("OmniHand worker cleanup failed")
+            if self._shutdown.is_set():
+                with self._lock:
+                    self._status = "closed"
+
+    def _poll(self):
+        """Raise latched faults; the supervisor exclusively owns worker I/O."""
         if self._error is not None:
-            self._stop.set()
-            self.set_takeover_enabled(False)
             raise RuntimeError(self._error)
-        try:
-            self._states = self._state_queue.get_nowait()
-        except queue.Empty:
-            pass
 
     def set_takeover_enabled(self, enabled):
-        with self._gate.get_lock():
-            self._gate[0] += 1
-            self._gate[1] = int(enabled and not self.read_only and not self._closed and not self._stop.is_set())
-        self._pending = None
+        with self._lock:
+            self._requested = bool(enabled)
+            if not hasattr(self, "_gate"):
+                return
+            with self._gate.get_lock():
+                self._gate[0] += 1
+                self._gate[1] = int(
+                    enabled
+                    and not self.read_only
+                    and not self._closed
+                    and not self._stop.is_set()
+                    and self._healthy
+                    and self._error is None
+                )
+            self._pending = None
 
     def submit(self, positions, identity, deadline, *, replace_pending=False):
+        with self._lock:
+            return self._submit(positions, identity, deadline, replace_pending=replace_pending)
+
+    def _submit(self, positions, identity, deadline, *, replace_pending=False):
+        self._poll()
+        self._refresh_health()
+        if not self._healthy:
+            # The pipeline treats stale data as recoverable and preserves XR
+            # engagement; RuntimeError is reserved for latched/authorization faults.
+            raise ValueError("finger measurements are stale")
         angles = np.asarray([positions[n] for n in OMNIHAND_JOINT_NAMES], dtype=float)
         limits = np.concatenate((OMNIHAND_LEFT_LIMITS, OMNIHAND_RIGHT_LIMITS))
         if not np.isfinite(angles).all() or np.any(angles < limits[:, 0]) or np.any(angles > limits[:, 1]):
             raise ValueError("checked finger commands exceed SDK limits")
         with self._gate.get_lock():
-            generation, enabled = self._gate[:]
+            generation, enabled = self._gate[:2]
             if not enabled or not np.isfinite(deadline) or time.monotonic() > deadline:
                 raise RuntimeError("OmniHand command is unauthorized or expired")
             if self._pending is not None and not replace_pending:
@@ -457,6 +751,12 @@ class OmniHandRuntime:
             raise
 
     def set_joint_commands(self, left_joint_positions, right_joint_positions, source_timestamp_ns=None, frame_id=None):
+        with self._lock:
+            self._poll()
+            self._refresh_health()
+            return self._set_joint_commands(left_joint_positions, right_joint_positions, source_timestamp_ns, frame_id)
+
+    def _set_joint_commands(self, left_joint_positions, right_joint_positions, source_timestamp_ns=None, frame_id=None):
         """Accept a latest-only dex-teleop frame; XR uses strict ``submit`` instead."""
         arrays = [np.asarray(values, dtype=float) for values in (left_joint_positions, right_joint_positions)]
         if any(values.shape != (12,) or not np.isfinite(values).all() for values in arrays):
@@ -482,10 +782,14 @@ class OmniHandRuntime:
         return positions.astype(np.float32)
 
     def get_data(self):
+        with self._lock:
+            return self._get_data()
+
+    def _get_data(self):
         self._poll()
         measured, stamps, commands = {}, {}, {}
         for index, side in enumerate(("left", "right")):
-            if side not in self._states:
+            if side not in self._states or self._states[side]["positions"] is None:
                 continue
             state = self._states[side]
             names = ALL_HAND_NAMES[index * 19 : (index + 1) * 19]
@@ -493,13 +797,15 @@ class OmniHandRuntime:
             stamps.update(dict.fromkeys(names, state["sampled_at"]))
             active = OMNIHAND_JOINT_NAMES[index * 12 : (index + 1) * 12]
             commands.update(zip(active, state["targets"] or state["positions"][:12], strict=True))
-        if hasattr(self, "_initial_targets"):
+        if self._initial_targets is not None:
             for index, side in enumerate(("left", "right")):
-                if self._states[side]["targets"] is None:
+                if side in self._states and self._states[side]["targets"] is None:
                     for name in OMNIHAND_JOINT_NAMES[index * 12 : (index + 1) * 12]:
                         commands[name] = self._initial_targets[name]
+        self._refresh_health()
+        fresh = self._healthy
         with self._gate.get_lock():
-            generation, enabled = self._gate[:]
+            generation, enabled = self._gate[:2]
             enabled = bool(enabled)
         applied = None
         if len(self._states) == 2:
@@ -510,9 +816,6 @@ class OmniHandRuntime:
                 and all(state["generation"] == generation for state in self._states.values())
             ):
                 applied = left
-        fresh = len(measured) == 38 and all(
-            0 <= time.monotonic() - stamp <= self.cfg.joint_state_timeout_s for stamp in stamps.values()
-        )
         now = time.monotonic()
         command_ages = {
             side: None if state["commanded_at"] is None else now - state["commanded_at"]
@@ -527,6 +830,18 @@ class OmniHandRuntime:
         }
         source_identity = applied if applied is not None and len(applied) == 3 else (None, None, None)
         return {
+            "connection_status": self._status,
+            "connection_generation": self._connection_generation,
+            "stream_generation": self._stream_generation,
+            "last_error": self._last_error,
+            "hand_health": {
+                side: {
+                    "measurement_age_s": None if state["sampled_at"] is None else now - state["sampled_at"],
+                    "consecutive_failures": state.get("consecutive_failures", 0),
+                    "last_read_error": state.get("last_read_error"),
+                }
+                for side, state in self._states.items()
+            },
             "enabled": enabled,
             "left_fresh": side_fresh.get("left", False),
             "right_fresh": side_fresh.get("right", False),
@@ -545,25 +860,28 @@ class OmniHandRuntime:
         }
 
     def acknowledge(self):
-        self._pending = None
+        with self._lock:
+            self._pending = None
+
+    @property
+    def takeover_requested(self):
+        return self._requested
+
+    def invalidate_commands(self):
+        """Revoke work without changing the operator's requested takeover."""
+        with self._lock:
+            self.set_takeover_enabled(self._requested)
 
     def reset(self):
         self.set_takeover_enabled(False)
 
     def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        self.set_takeover_enabled(False)
-        self._stop.set()
-        process = self._process
-        if process is not None and process.pid is not None:
-            process.join(timeout=2)
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=2)
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=2)
-        self._state_queue.cancel_join_thread()
-        self._state_queue.close()
+        with self._lock:
+            if not self._closed:
+                self._closed = True
+                self.set_takeover_enabled(False)
+            self._shutdown.set()
+            self._status = "closed"
+        self._supervisor.join(timeout=3)
+        if self._supervisor.is_alive():
+            raise RuntimeError("OmniHand supervisor did not stop")

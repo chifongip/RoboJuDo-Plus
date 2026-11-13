@@ -260,6 +260,34 @@ serve different purposes. Reads and writes remain serialized per hand handle.
 A slow or stuck SDK call can still make measurements stale and trigger a hold;
 the feedback freshness checks remain enforced independently of the receive timeout.
 
+OmniHand skips invalid measurements and read exceptions, keeping the previous valid
+positions and their original timestamps. Both hands must have fresh feedback before
+either hand can receive another command. The worker enforces the stricter of the
+hand measurement timeout and feedback measurement budget, even if the main loop is
+delayed. Recoverable outages hold arm targets and skip recording stale samples.
+
+For serial-verified HCAN configurations, `omnihand.auto_reconnect` defaults to `true`.
+After `reconnect_timeout_s` (default 1 second) without valid measurements, a background
+supervisor stops the old SDK process and opens both adapters in a new process. It
+rechecks both hand identities without motor initialization. Failed attempts wait
+`reconnect_interval_s` (default 1 second), doubling up to 5 seconds; each attempt uses
+the existing `startup_timeout_s`. Reconnection does not block the control loop.
+Index-selected adapters do not reconnect automatically because their physical identity
+cannot be guaranteed. Set `auto_reconnect: false` to require a restart after persistent
+communication failures. Identity mismatches and command-write failures always require
+operator investigation and a restart.
+
+After feedback recovers, previously requested tracking resumes automatically using new
+commands and the existing XR reference rebasing and speed checks. Motion made during
+the hold is discarded. Pending commands and acknowledgements from before the outage
+are invalidated; turning tracking off during an outage keeps it off after recovery.
+The runtime retains the last reported hardware command targets across reconnection;
+measured drift does not replace them. Reconnection itself sends no motion commands.
+The runtime snapshot adds `connection_status`, `connection_generation`,
+`stream_generation`, `last_error`, and per-hand `hand_health` diagnostics with measurement
+age, consecutive read failures, and the last read error. No feedback wire schema changes
+are required.
+
 Combined proposals are admitted to the hand runtime immediately before body submission.
 Admission failure retains the previous arm target, and body submission failure revokes
 pending hand writes. Hardware writes cannot be rolled back or made simultaneous across

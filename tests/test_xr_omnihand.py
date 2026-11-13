@@ -117,15 +117,16 @@ class OmniHandPro2025:
                     with self.assertRaisesRegex(RuntimeError, "unauthorized"):
                         runtime.submit(positions, (2, 8), time.monotonic() + 1)
                 finally:
+                    process = runtime._process
                     runtime.close()
-                self.assertFalse(runtime._process.is_alive())
+                self.assertFalse(process.is_alive())
 
                 # Right identity failure must release the process holding the left hand.
                 Path(directory, "omnihand.py").write_text(fake_sdk.replace("RIGHT-HAND-EXACT", "WRONG-RIGHT-HAND"))
                 failed = OmniHandRuntime.__new__(OmniHandRuntime)
                 with self.assertRaises(RuntimeError):
                     failed.__init__(serial_config())
-                self.assertFalse(failed._process.is_alive())
+                self.assertIsNone(failed._process)
 
                 # Native open may block indefinitely; startup and cleanup remain bounded.
                 Path(directory, "omnihand.py").write_text(
@@ -139,7 +140,7 @@ class OmniHandPro2025:
                 cfg.startup_timeout_s = 2.0
                 with self.assertRaises(TimeoutError):
                     blocked.__init__(cfg)
-                self.assertFalse(blocked._process.is_alive())
+                self.assertIsNone(blocked._process)
 
                 # A native read can also hang after successful startup. The parent
                 # must become stale and close must still reap the SDK process.
@@ -162,7 +163,7 @@ class OmniHandPro2025:
                     started = time.monotonic()
                     runtime.close()
                 self.assertLess(time.monotonic() - started, 6)
-                self.assertFalse(runtime._process.is_alive())
+                self.assertIsNone(runtime._process)
 
     def test_measured_baseline_is_bounded_and_float32(self):
         measured = dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0)
@@ -324,7 +325,7 @@ class OmniHandPro2025:
         self.assertTrue(errors.empty())
         self.assertEqual(states.get_nowait()["sampled_at"], 10.0)
 
-    def test_invalid_measurements_and_write_errors_revoke_gate(self):
+    def test_invalid_measurements_are_reported_but_only_write_errors_revoke_gate(self):
         for failure in ("shape", "empty", "nan", "inf", "write"):
             with self.subTest(failure=failure), patch("time.monotonic", return_value=10.0):
                 hand = Mock()
@@ -339,15 +340,19 @@ class OmniHandPro2025:
                         "inf": [0.0] * 18 + [float("inf")],
                     }[failure]
                 states, errors, gate = self.run_hand_cycle(hand, "right")
-                self.assertTrue(states.empty())
-                self.assertEqual(gate[1], 0)
-                self.assertGreater(gate[0], 3)
-                error = errors.get_nowait()
-                self.assertIn("right:", error)
-                if failure != "write":
+                if failure == "write":
+                    self.assertTrue(states.empty())
+                    self.assertEqual(gate[1], 0)
+                    self.assertGreater(gate[0], 3)
+                    self.assertIn("right:", errors.get_nowait())
+                else:
+                    self.assertTrue(errors.empty())
+                    self.assertEqual(gate[1], 1)
+                    state = states.get_nowait()
+                    self.assertIsNone(state["positions"])
+                    self.assertEqual(state["consecutive_failures"], 1)
                     angles = np.asarray(hand.get_all_joint_angles.return_value)
-                    self.assertIn(f"received shape={angles.shape}", error)
-                    self.assertIn(f"nonfinite_indices={np.flatnonzero(~np.isfinite(angles)).tolist()}", error)
+                    self.assertIn(f"received shape={angles.shape}", state["last_read_error"])
 
 
 class SharedWorkerTimingTests(unittest.TestCase):
@@ -443,6 +448,79 @@ class SharedWorkerTimingTests(unittest.TestCase):
 
 
 class CombinedFeedbackTests(unittest.TestCase):
+    def test_legacy_frame_is_discarded_if_hand_generation_changes_during_receive(self):
+        from test_upper_body_omnihand_zmq_ctrl import TestUpperBodyOmniHandZmqCtrl
+
+        from robojudo.config.x2.env.x2_env_cfg import X2_ARM_JOINT_NAMES
+        from robojudo.controller.upper_body_omnihand_zmq_ctrl import UpperBodyOmniHandZmqCtrl
+
+        runtime = Mock()
+        runtime.get_data.return_value = {
+            "stream_generation": 2,
+            "connection_status": "streaming",
+            "joint_state_fresh": True,
+        }
+        cfg = UpperBodyOmniHandZmqCtrlCfg(joint_names=X2_ARM_JOINT_NAMES)
+        with (
+            patch("robojudo.controller.upper_body_zmq_ctrl.zmq.Context.instance", return_value=MemoryContext()),
+            patch.object(UpperBodyOmniHandZmqCtrl, "_create_hand_runtime", return_value=runtime),
+        ):
+            controller = UpperBodyOmniHandZmqCtrl(cfg)
+        self.addCleanup(controller.close)
+        controller._hand_stream_generation = 1
+        controller._socket.recv_json = Mock(return_value=TestUpperBodyOmniHandZmqCtrl.synchronized_frame())
+        controller._receive_latest(10.0)
+        runtime.set_joint_commands.assert_not_called()
+        self.assertIsNone(controller._latest_sync_frame_id)
+        self.assertTrue(controller._discard_backlog)
+
+    def test_hand_outage_and_recovery_clear_proposals_preserving_tracking_intent(self):
+        from robojudo.controller.upper_body_omnihand_zmq_ctrl import UpperBodyOmniHandZmqCtrl
+
+        runtime = Mock()
+        runtime.takeover_requested = True
+        runtime.get_data.return_value = {
+            "stream_generation": 1,
+            "connection_status": "streaming",
+            "joint_state_fresh": True,
+        }
+        with (
+            patch("robojudo.controller.upper_body_zmq_ctrl.zmq.Context.instance", return_value=MemoryContext()),
+            patch.object(UpperBodyOmniHandZmqCtrl, "_create_hand_runtime", return_value=runtime),
+        ):
+            controller = UpperBodyOmniHandZmqCtrl(self.cfg)
+        self.addCleanup(controller.close)
+        controller.feedback.intent = "TRACK"
+        controller.get_data()
+        initial_generation = controller.feedback.generation
+        controller.pending = ({}, (1, 1), 10.1)
+        controller._proposal = {"frame_id": 1}
+        runtime.get_data.return_value.update(stream_generation=2, connection_status="stale", joint_state_fresh=False)
+        self.assertFalse(controller.get_data()["fresh"])
+        self.assertIsNone(controller.pending)
+        self.assertIsNone(controller._proposal)
+        self.assertEqual(controller.feedback.intent, "TRACK")
+        self.assertEqual(controller.feedback.generation, initial_generation + 1)
+        self.assertEqual(controller.feedback.reset_reason, "tracking command timeout")
+        runtime.set_takeover_enabled.assert_called_with(True)
+        controller.get_data()
+        self.assertEqual(controller.feedback.generation, initial_generation + 1)
+        runtime.get_data.return_value.update(stream_generation=3, connection_status="streaming", joint_state_fresh=True)
+        controller.get_data()
+        self.assertEqual(controller.feedback.generation, initial_generation + 2)
+        self.assertEqual(controller.feedback.intent, "TRACK")
+        runtime.set_takeover_enabled.assert_called_with(True)
+
+    def test_feedback_runtime_uses_stricter_measurement_freshness_budget(self):
+        from robojudo.controller.upper_body_omnihand_zmq_ctrl import UpperBodyOmniHandZmqCtrl
+
+        receiver = UpperBodyOmniHandZmqCtrl.__new__(UpperBodyOmniHandZmqCtrl)
+        with patch("robojudo.controller.upper_body_omnihand_zmq_ctrl.OmniHandRuntime") as factory:
+            receiver._create_hand_runtime(self.cfg)
+        runtime_cfg = factory.call_args.args[0]
+        self.assertEqual(runtime_cfg.joint_state_timeout_s, self.cfg.feedback_timeout_s)
+        self.assertEqual(runtime_cfg.frame_recv_timeout_ms, self.cfg.omnihand.frame_recv_timeout_ms)
+
     def test_legacy_mode_reset_discards_queued_synchronized_frames(self):
         from test_upper_body_omnihand_zmq_ctrl import TestUpperBodyOmniHandZmqCtrl
 
@@ -766,7 +844,7 @@ class CombinedApplicationTests(unittest.TestCase):
         receiver = self.receiver()
         receiver.feedback.generation = 3
         self.assertFalse(receiver.finish_pending())
-        receiver._hand_runtime.reset.assert_called_once()
+        receiver._hand_runtime.invalidate_commands.assert_called_once()
         receiver.feedback.acknowledge.assert_not_called()
 
     def test_stale_measurement_cancels_partial_application(self):

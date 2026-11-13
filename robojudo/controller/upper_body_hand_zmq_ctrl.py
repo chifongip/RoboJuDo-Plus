@@ -39,6 +39,7 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         self._last_received_at: float | None = None
         self._last_invalid_log_at = float("-inf")
         self._hand_runtime = None
+        self._hand_stream_generation = None
         self.pending = None
         if self.feedback is not None:
             self._joint_names.update((*self.left_hand_joint_names, *self.right_hand_joint_names))
@@ -170,6 +171,9 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
                 and synchronized_frame_id <= self._latest_sync_frame_id
             ):
                 raise ValueError(f"frame_id {synchronized_frame_id} is not newer than {self._latest_sync_frame_id}")
+            snapshot = self._hand_runtime.get_data()
+            if self._synchronize_hand_stream(snapshot) or not snapshot.get("joint_state_fresh", False):
+                return
             combined_hand_joint_commands = self._hand_runtime.set_joint_commands(
                 left_hand_joint_commands,
                 right_hand_joint_commands,
@@ -191,6 +195,8 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
     def get_data(self):
         """Return arm commands plus measured hand positions and freshness."""
 
+        if self._hand_runtime is not None:
+            self._synchronize_hand_stream(self._hand_runtime.get_data())
         if getattr(self, "feedback", None) is not None:
             return super().get_data()
         now = time.monotonic()
@@ -199,10 +205,11 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
             self._receive_available(now)
         if not getattr(self, "_discard_backlog", False):
             self._receive_latest(now)
+        hand_data = self._hand_runtime.get_data()
+        self._synchronize_hand_stream(hand_data)
         has_received = self._last_received_at is not None
         age_s = None if self._last_received_at is None else now - self._last_received_at
-        stream_is_fresh = age_s is not None and age_s <= self.cfg_ctrl.timeout_s
-        hand_data = self._hand_runtime.get_data()
+        stream_is_fresh = age_s is not None and 0 <= age_s <= self.cfg_ctrl.timeout_s
         if self._latest_hand_joint_commands is not None:
             # Recorder action belongs to the same source frame as the arm
             # command; measured state remains independently sampled hardware data.
@@ -218,12 +225,39 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         return {
             "joint_positions": self._latest_arm_joint_positions.copy(),
             "has_received": has_received,
-            "fresh": stream_is_fresh,
+            "fresh": bool(stream_is_fresh and hand_data.get("joint_state_fresh", False)),
             "age_s": age_s,
             "frame_id": self._latest_sync_frame_id,
             "source_timestamp_ns": self._latest_source_timestamp_ns,
             self.hand_data_key: hand_data,
         }
+
+    def _synchronize_hand_stream(self, snapshot):
+        generation = snapshot.get("stream_generation")
+        if generation is None:
+            return False
+        previous = getattr(self, "_hand_stream_generation", None)
+        self._hand_stream_generation = generation
+        if previous is not None and previous != generation:
+            # Clear queued transport frames and checked proposals on both sides
+            # of a hold. Preserve operator intent through this hardware outage.
+            if self.feedback is not None:
+                self.invalidate("hand feedback stream changed", recoverable=True)
+            else:
+                super().reset()
+                self.pending = None
+                self._latest_sync_frame_id = None
+                self._latest_hand_joint_commands = None
+                self._latest_source_timestamp_ns = None
+                self._last_received_at = None
+            log = logger.info if snapshot.get("joint_state_fresh", False) else logger.warning
+            log(
+                "%s hardware feedback %s; pending proposals cleared",
+                self.hand_display_name,
+                snapshot.get("connection_status", "changed"),
+            )
+            return True
+        return False
 
     def process_triggers(self, ctrl_data):
         return ctrl_data, []
@@ -237,6 +271,7 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         if self._hand_runtime is None:
             return self.env.hand_snapshot()
         snapshot = self._hand_runtime.get_data()
+        self._synchronize_hand_stream(snapshot)
         # Robot feedback requires fresh measurements even before any command is admitted.
         snapshot["fresh"] = snapshot["joint_state_fresh"]
         return snapshot
@@ -252,16 +287,25 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         }
 
     def invalidate(self, reason, *, recoverable=False):
+        runtime = self._hand_runtime
+        requested = getattr(runtime, "takeover_requested", False)
         self.reset()
+        if recoverable and requested:
+            runtime.set_takeover_enabled(True)
         # The bridge preserves clutch engagement across transient command outages.
         self.feedback.reset_reason = "tracking command timeout" if recoverable else reason
-        self._log_invalid_message(ValueError(reason), time.monotonic())
+        if reason != "hand feedback stream changed":
+            self._log_invalid_message(ValueError(reason), time.monotonic())
 
     def synchronize_generation(self):
         if self._hand_generation != self.feedback.generation:
             self.pending = None
             if self._hand_runtime is not None:
-                self._hand_runtime.reset()
+                invalidate = getattr(self._hand_runtime, "invalidate_commands", None)
+                if invalidate is not None:
+                    invalidate()
+                else:
+                    self._hand_runtime.reset()
             self._hand_generation = self.feedback.generation
 
     def synchronize_intent(self, intent):

@@ -3,6 +3,7 @@
 import multiprocessing as mp
 import queue
 import sys
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -53,17 +54,25 @@ class TestOmniHandRuntime(unittest.TestCase):
         runtime = OmniHandRuntime.__new__(OmniHandRuntime)
         runtime.cfg = OmniHandCfg()
         runtime.read_only = False
-        runtime._gate = mp.get_context("spawn").Array("q", [0, 0])
+        runtime._gate = mp.get_context("spawn").Array("q", [0, 0, 0])
+        runtime._lock = threading.RLock()
+        runtime._shutdown = threading.Event()
+        runtime._requested = False
+        runtime._healthy = True
+        runtime._attempt_ready = True
+        runtime._seen_outages = 0
+        runtime._measurements = [10.0, 10.0]
+        runtime._stream_generation = 1
+        runtime._connection_generation = 1
+        runtime._status = "streaming"
+        runtime._last_error = None
+        runtime._initial_targets = None
         runtime._pending = None
         runtime._sequence = 0
-        runtime._poll = lambda: None
         runtime._commands = _CommandMailbox(mp.get_context("spawn"))
         runtime._stop = mp.get_context("spawn").Event()
         runtime._closed = False
-        runtime._process = SimpleNamespace(exitcode=None)
-        runtime._errors = _CommandMailbox(mp.get_context("spawn"))
         runtime._error = None
-        runtime._state_queue = queue.Queue(1)
         runtime._states = {
             side: {
                 "positions": [0.0] * 19,
@@ -136,24 +145,50 @@ class TestOmniHandRuntime(unittest.TestCase):
         self.clock.return_value = 10.3
         for state in self.runtime._states.values():
             state["sampled_at"] = 10.3
+        self.runtime._measurements[:] = [10.3, 10.3]
         result = self.runtime.get_data()
         self.assertFalse(result["fresh"])
         self.assertTrue(result["joint_state_fresh"])
+
+    def test_snapshot_expiry_revokes_generation_between_supervisor_ticks(self):
+        runtime = self.runtime
+        runtime._healthy = True
+        runtime._stream_generation = 1
+        runtime._status = "streaming"
+        runtime.set_takeover_enabled(True)
+        generation = runtime._gate[0]
+        self.clock.return_value = 10.3
+        result = runtime.get_data()
+        self.assertFalse(result["joint_state_fresh"])
+        self.assertFalse(result["enabled"])
+        self.assertEqual(result["stream_generation"], 2)
+        self.assertGreater(runtime._gate[0], generation)
+        self.assertTrue(runtime.takeover_requested)
 
     def test_invalid_dex_arrays_are_rejected(self):
         for left in ([0.0] * 11, [float("nan")] * 12):
             with self.assertRaisesRegex(ValueError, "12 finite"):
                 self.runtime.set_joint_commands(left, np.zeros(12))
 
+    def test_expiry_at_submission_is_recoverable_and_preserves_takeover_request(self):
+        runtime = self.runtime
+        runtime.set_takeover_enabled(True)
+        self.clock.return_value = 10.3
+        with self.assertRaisesRegex(ValueError, "measurements are stale"):
+            runtime.submit(self.positions, (1, 1), 10.5)
+        self.assertEqual(runtime._gate[1], 0)
+        self.assertTrue(runtime.takeover_requested)
+        self.assertIsNone(runtime._pending)
+
     def test_xr_can_require_serials_without_removing_index_support(self):
         with self.assertRaisesRegex(ValueError, "serial"):
             OmniHandRuntime(OmniHandCfg(), require_serials=True)
 
-    def test_fault_wins_over_queued_measurements_and_remains_latched(self):
+    def test_latched_fault_cannot_reenable_commands(self):
         runtime = self.runtime
         runtime.set_takeover_enabled(True)
-        runtime._state_queue.put(runtime._states)
-        runtime._errors.put_nowait("right: read measurements: SDK failure")
+        runtime._error = "right: read measurements: SDK failure"
+        runtime._set_health(False)
         runtime._stop.set()
         for _ in range(2):
             with self.assertRaisesRegex(RuntimeError, "right: read measurements: SDK failure"):
@@ -162,15 +197,15 @@ class TestOmniHandRuntime(unittest.TestCase):
             runtime.set_takeover_enabled(True)
             self.assertEqual(runtime._gate[1], 0)
 
-    def test_unexpected_child_exit_revokes_commands(self):
+    def test_cleanup_handles_process_start_failure(self):
         runtime = self.runtime
-        runtime.set_takeover_enabled(True)
-        runtime._process.exitcode = -9
-        with self.assertRaisesRegex(RuntimeError, r"worker exited \(-9\)"):
-            OmniHandRuntime._poll(runtime)
-        self.assertEqual(runtime._gate[1], 0)
-        runtime.set_takeover_enabled(True)
-        self.assertEqual(runtime._gate[1], 0)
+        process = runtime._process = Mock(pid=None)
+        runtime._state_queue = Mock()
+        runtime._reap_worker()
+        process.join.assert_not_called()
+        process.terminate.assert_not_called()
+        runtime._state_queue.close.assert_called_once()
+        self.assertIsNone(runtime._process)
 
 
 class TestOmniHandTransports(unittest.TestCase):
