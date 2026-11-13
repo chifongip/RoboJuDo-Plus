@@ -52,6 +52,46 @@ class MemoryContext:
 
 
 class UpperBodyFeedbackTests(unittest.TestCase):
+    def test_publication_uses_new_joint_snapshot_without_changing_policy_cache(self):
+        cached = self.env.dof_pos.copy()
+        positions = dict(zip(self.env.joint_names, cached.tolist(), strict=True))
+        positions[self.env.joint_names[0]] += 0.01
+        self.env.get_joint_feedback = lambda: {
+            "positions": positions.copy(),
+            "sample_times": dict.fromkeys(self.env.joint_names, 9.999),
+        }
+        frame = self.publish()
+        self.assertEqual(frame["positions"], positions)
+        self.assertAlmostEqual(frame["joint_age_s"][self.env.joint_names[0]], 0.001)
+        np.testing.assert_array_equal(self.env.dof_pos, cached)
+        self.assertIn("body_snapshot", frame["pipeline_timing_ms"])
+        self.assertAlmostEqual(frame["feedback_diagnostics"]["source_age_ms"]["body"], 1)
+
+    def test_publication_diagnostics_label_previous_send_and_keep_original_deadline(self):
+        first = self.publish()
+        self.clock.return_value = 10.02
+        second = self.publish()
+        diagnostics = second["feedback_diagnostics"]
+        self.assertIn(diagnostics["oldest_joint"], self.env.joint_names)
+        self.assertEqual(diagnostics["previous_publication"]["state_id"], first["state_id"])
+        self.assertGreaterEqual(diagnostics["previous_publication"]["encode_send_ms"], 0)
+        self.assertAlmostEqual(self.feedback._states[second["state_id"]][0], 10.1)
+
+    def test_young_retained_measurements_do_not_override_connection_readiness(self):
+        frame = self.publish()
+        self.feedback.publish(
+            positions=frame["positions"],
+            sample_times=dict.fromkeys(frame["positions"], 10.0),
+            targets=frame["last_commanded_positions"],
+            defaults=frame["default_positions"],
+            limits=frame["position_limits"],
+            intent=frame["intent"],
+            mode=frame["mode"],
+            control_dt=frame["control_dt"],
+            measurements_available=np.bool_(False),
+        )
+        self.assertFalse(self.feedback.socket.frames[-1]["valid"])
+
     def setUp(self):
         self.clock = self.enterContext(patch("time.monotonic", return_value=10.0))
         self.cfg = x2_locomanipulation()

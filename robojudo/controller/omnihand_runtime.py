@@ -263,6 +263,44 @@ class _CommandMailbox:
         return pickle.loads(payload)
 
 
+class _LatestSnapshot:
+    """Bounded, non-destructive snapshot slot with no Queue feeder or read wait."""
+
+    def __init__(self, context):
+        self._buffer = context.RawArray("B", 16_384)
+        self._lock = context.Lock()
+        self._length = context.RawValue("i", 0)
+        self._sequence = context.RawValue("Q", 0)
+        self._published_at = context.RawValue("d", 0)
+
+    def put_nowait(self, snapshot):
+        payload = pickle.dumps(snapshot, protocol=pickle.HIGHEST_PROTOCOL)
+        if len(payload) > len(self._buffer):
+            raise ValueError("OmniHand snapshot exceeds slot capacity")
+        if not self._lock.acquire(False):
+            return False
+        try:
+            self._buffer[: len(payload)] = payload
+            self._length.value = len(payload)
+            self._published_at.value = time.monotonic()
+            self._sequence.value += 1
+        finally:
+            self._lock.release()
+        return True
+
+    def read_after(self, sequence):
+        if not self._lock.acquire(False):
+            return None
+        try:
+            if self._sequence.value <= sequence:
+                return None
+            payload = bytes(self._buffer[: self._length.value])
+            identity, stamp = self._sequence.value, self._published_at.value
+        finally:
+            self._lock.release()
+        return identity, stamp, pickle.loads(payload)
+
+
 def _publish_state(channel, value):
     try:
         channel.put_nowait(value)
@@ -498,14 +536,18 @@ class OmniHandRuntime:
             self._attempt_ready = False
             self._measurements = self._ctx.Array("d", [0.0, 0.0], lock=False)
             self._commands = _CommandMailbox(self._ctx)
-            self._state_queue = self._ctx.Queue(1)
+            self._state_slot = _LatestSnapshot(self._ctx)
+            self._snapshot_sequence = 0
+            self._snapshot_published_at = None
+            self._snapshot_received_at = None
+            self._snapshot_complete = False
             self._errors = _CommandMailbox(self._ctx)
             self._process = self._ctx.Process(
                 target=_worker,
                 args=(
                     self.cfg,
                     self._commands,
-                    self._state_queue,
+                    self._state_slot,
                     self._stop,
                     self._gate,
                     self._errors,
@@ -513,9 +555,12 @@ class OmniHandRuntime:
                 ),
                 daemon=True,
             )
-            self._process.start()
             self._connection_generation += 1
             self._attempt_started = time.monotonic()
+            process = self._process
+        # Spawning imports the child interpreter and may be slow. Snapshot
+        # readers must remain able to observe the unavailable connection.
+        process.start()
 
     def _reap_worker(self):
         process = self._process
@@ -532,8 +577,6 @@ class OmniHandRuntime:
                 process.join(timeout=0.5)
             if process.is_alive():
                 raise RuntimeError("OmniHand worker could not be stopped; refusing a second SDK owner")
-        self._state_queue.cancel_join_thread()
-        self._state_queue.close()
         self._process = None
 
     def _set_health(self, healthy):
@@ -562,6 +605,22 @@ class OmniHandRuntime:
                 merged.update(targets=previous["targets"], commanded_at=previous["commanded_at"])
             # Application identity always comes from the current worker.
             self._states[side] = merged
+
+    def _refresh_snapshot(self):
+        """Copy the newest complete IPC record while the parent lock is held."""
+        record = self._state_slot.read_after(self._snapshot_sequence)
+        if record is None:
+            return None
+        sequence, published_at, snapshot = record
+        self._merge_snapshot(snapshot)
+        self._snapshot_sequence = sequence
+        self._snapshot_published_at = published_at
+        self._snapshot_received_at = time.monotonic()
+        self._snapshot_complete = all(
+            side in snapshot and snapshot[side]["positions"] is not None and snapshot[side]["sampled_at"] is not None
+            for side in ("left", "right")
+        )
+        return snapshot
 
     def _refresh_health(self):
         """Reconcile freshness and worker holds while the parent lock is held."""
@@ -617,18 +676,12 @@ class OmniHandRuntime:
                             else:
                                 reason, fatal = error["message"], error["fatal"]
                             break
-                        try:
-                            snapshot = self._state_queue.get_nowait()
-                        except queue.Empty:
-                            snapshot = None
-                        if snapshot is not None:
-                            self._merge_snapshot(snapshot)
+                        self._refresh_snapshot()
                         # A snapshot must belong to this process, with both
                         # measurements present, before publishing recovery.
                         now = time.monotonic()
-                        complete = snapshot is not None and all(
-                            snapshot[side]["sampled_at"] is not None
-                            and 0 <= now - snapshot[side]["sampled_at"] <= self.cfg.joint_state_timeout_s
+                        complete = self._snapshot_complete and all(
+                            0 <= now - self._states[side]["sampled_at"] <= self.cfg.joint_state_timeout_s
                             for side in ("left", "right")
                         )
                         if not self._attempt_ready and complete:
@@ -637,7 +690,7 @@ class OmniHandRuntime:
                                 for index, side in enumerate(("left", "right"))
                                 for name, value in zip(
                                     ALL_HAND_NAMES[index * 19 : (index + 1) * 19],
-                                    snapshot[side]["positions"],
+                                    self._states[side]["positions"],
                                     strict=True,
                                 )
                             }
@@ -791,6 +844,7 @@ class OmniHandRuntime:
 
     def _get_data(self):
         self._poll()
+        self._refresh_snapshot()
         measured, stamps, commands = {}, {}, {}
         for index, side in enumerate(("left", "right")):
             if side not in self._states or self._states[side]["positions"] is None:
@@ -834,6 +888,14 @@ class OmniHandRuntime:
         }
         source_identity = applied if applied is not None and len(applied) == 3 else (None, None, None)
         return {
+            "snapshot_sequence": self._snapshot_sequence,
+            "snapshot_connection_generation": self._connection_generation,
+            "handoff_delay_ms": None
+            if self._snapshot_received_at is None
+            else 1000 * (self._snapshot_received_at - self._snapshot_published_at),
+            "snapshot_cache_age_ms": None
+            if self._snapshot_published_at is None
+            else 1000 * (now - self._snapshot_published_at),
             "connection_status": self._status,
             "connection_generation": self._connection_generation,
             "stream_generation": self._stream_generation,

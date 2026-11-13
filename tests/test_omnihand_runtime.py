@@ -1,5 +1,6 @@
 """Shared OmniHand runtime contracts for dex-teleop and checked XR callers."""
 
+import copy
 import multiprocessing as mp
 import queue
 import sys
@@ -17,6 +18,7 @@ from robojudo.controller.omnihand_runtime import (
     OMNIHAND_RIGHT_LIMITS,
     OmniHandRuntime,
     _CommandMailbox,
+    _LatestSnapshot,
     create_hand,
 )
 
@@ -38,6 +40,48 @@ class TestOmniHandConfig(unittest.TestCase):
 
 
 class TestOmniHandRuntime(unittest.TestCase):
+    def test_worker_spawn_does_not_hold_snapshot_reader_lock(self):
+        runtime = self.runtime
+        runtime._ctx = mp.get_context("spawn")
+        acquired = threading.Event()
+
+        def read_during_start():
+            with runtime._lock:
+                acquired.set()
+
+        reader = threading.Thread(target=read_during_start, daemon=True)
+        process = Mock()
+
+        def start():
+            reader.start()
+            self.assertTrue(acquired.wait(1), "worker spawning blocked the snapshot reader")
+
+        process.start.side_effect = start
+        try:
+            with patch.object(runtime._ctx, "Process", return_value=process):
+                runtime._start_worker()
+        finally:
+            if reader.ident is not None:
+                reader.join(2)
+        self.assertFalse(reader.is_alive())
+        process.start.assert_called_once()
+
+    def test_get_data_consumes_latest_snapshot_without_supervisor_tick(self):
+        snapshot = copy.deepcopy(self.runtime._states)
+        snapshot["left"]["positions"][0] = 0.5
+        snapshot["left"]["sampled_at"] = 10.01
+        self.clock.return_value = 10.01
+        self.runtime._state_slot.put_nowait(snapshot)
+        self.clock.return_value = 10.012
+        result = self.runtime.get_data()
+        self.assertEqual(result["positions"][OMNIHAND_JOINT_NAMES[0]], 0.5)
+        self.assertEqual(result["sample_times"][OMNIHAND_JOINT_NAMES[0]], 10.01)
+        self.assertAlmostEqual(result["handoff_delay_ms"], 2)
+        self.assertEqual(result["snapshot_sequence"], 1)
+        # Reading the same sample again must not advance its receipt timestamp.
+        self.clock.return_value = 10.02
+        self.assertAlmostEqual(self.runtime.get_data()["handoff_delay_ms"], 2)
+
     def test_command_mailbox_retains_latest_frame_during_producer_burst(self):
         self.runtime.set_takeover_enabled(True)
         for frame_id in range(100):
@@ -70,6 +114,9 @@ class TestOmniHandRuntime(unittest.TestCase):
         runtime._pending = None
         runtime._sequence = 0
         runtime._commands = _CommandMailbox(mp.get_context("spawn"))
+        runtime._state_slot = _LatestSnapshot(mp.get_context("spawn"))
+        runtime._snapshot_sequence = 0
+        runtime._snapshot_published_at = runtime._snapshot_received_at = None
         runtime._stop = mp.get_context("spawn").Event()
         runtime._closed = False
         runtime._error = None
@@ -200,11 +247,9 @@ class TestOmniHandRuntime(unittest.TestCase):
     def test_cleanup_handles_process_start_failure(self):
         runtime = self.runtime
         process = runtime._process = Mock(pid=None)
-        runtime._state_queue = Mock()
         runtime._reap_worker()
         process.join.assert_not_called()
         process.terminate.assert_not_called()
-        runtime._state_queue.close.assert_called_once()
         self.assertIsNone(runtime._process)
 
 

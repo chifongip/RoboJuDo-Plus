@@ -36,6 +36,7 @@ class UpperBodyFeedback:
         self.last_proposal_at = None
         self._frame_id = -1
         self._states = OrderedDict()
+        self._last_publication_timing = None
         self.socket = context.socket(zmq.PUB)
         try:
             self.socket.setsockopt(zmq.LINGER, 0)
@@ -77,17 +78,49 @@ class UpperBodyFeedback:
     def close(self):
         self.socket.close(linger=0)
 
-    def publish(self, *, positions, sample_times, targets, defaults, limits, intent, mode, control_dt, timing_ms=None):
+    def publish(
+        self,
+        *,
+        positions,
+        sample_times,
+        targets,
+        defaults,
+        limits,
+        intent,
+        mode,
+        control_dt,
+        timing_ms=None,
+        source_groups=None,
+        diagnostics=None,
+        measurements_available=True,
+    ):
+        started = time.perf_counter()
         now = time.monotonic()
         if intent != self.intent:
             self.reset("control intent changed")
             self.intent = intent
         ages = {name: now - stamp for name, stamp in sample_times.items()}
-        valid = set(ages) == set(positions) and all(
-            math.isfinite(age) and 0 <= age <= self.cfg.feedback_timeout_s for age in ages.values()
+        valid = (
+            bool(measurements_available)
+            and set(ages) == set(positions)
+            and all(math.isfinite(age) and 0 <= age <= self.cfg.feedback_timeout_s for age in ages.values())
         )
         valid = valid and all(math.isfinite(value) for value in (*positions.values(), *targets.values()))
         self.state_id += 1
+        oldest = max(ages, key=ages.get, default=None)
+        feedback_diagnostics = {
+            **({} if diagnostics is None else diagnostics),
+            "oldest_joint": oldest,
+            "source_age_ms": {
+                source: max((1000 * ages[name] for name in names if name in ages), default=None)
+                for source, names in (source_groups or {}).items()
+            },
+            "previous_publication": self._last_publication_timing,
+        }
+        feedback_diagnostics["source_age_ms"] = {
+            source: value if value is not None and math.isfinite(value) else None
+            for source, value in feedback_diagnostics["source_age_ms"].items()
+        }
         frame = {
             "schema_version": self.schema_version,
             "type": "upper_body_state",
@@ -112,6 +145,7 @@ class UpperBodyFeedback:
             "feedback_timeout_s": self.cfg.feedback_timeout_s,
             "visualize_targets": self.cfg.visualize_targets,
             "pipeline_timing_ms": {} if timing_ms is None else dict(timing_ms),
+            "feedback_diagnostics": feedback_diagnostics,
         }
         if self.schema_version == 2:
             frame["hand_velocity_limit"] = self.cfg.hand_velocity_limit
@@ -119,10 +153,19 @@ class UpperBodyFeedback:
         self._states[self.state_id] = (deadline, frame)
         while len(self._states) > 16:
             self._states.popitem(last=False)
+        built = time.perf_counter()
+        sent = True
         try:
             self.socket.send_json(frame, flags=zmq.NOBLOCK, allow_nan=False)
         except zmq.Again:
-            pass
+            sent = False
+        self._last_publication_timing = {
+            "state_id": self.state_id,
+            "generation": self.generation,
+            "build_ms": 1000 * (built - started),
+            "encode_send_ms": 1000 * (time.perf_counter() - built),
+            "sent": sent,
+        }
 
     def validate(self, message, positions, *, receiving=False):
         if (

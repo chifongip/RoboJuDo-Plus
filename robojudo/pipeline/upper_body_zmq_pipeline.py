@@ -295,6 +295,7 @@ class UpperBodyZmqPipelineMixin:
         self._publish_upper_body_feedback(env_data, pd_target)
 
     def _publish_upper_body_feedback(self, env_data, pd_target):
+        assembly_started = time.perf_counter()
         receiver = self._feedback_receiver()
         if receiver is None or not self._upper_body_indices.size:
             return
@@ -313,23 +314,35 @@ class UpperBodyZmqPipelineMixin:
                             raise ValueError("combined command was not admitted before arm submission")
                     else:
                         receiver.acknowledge()
+            hand_state = None
+            timing = dict(getattr(self, "_upper_body_timing_ms", {}))
             if hands:
+                started = time.perf_counter()
+                hand_state = receiver.hand_snapshot()
+                timing["hand_snapshot"] = 1000 * (time.perf_counter() - started)
                 tracking = receiver.pending is not None and receiver.pending[0]["status"] == "tracking"
-                self._upper_body_stream_was_fresh = receiver.finish_pending() and tracking and self._upper_body_enabled
+                self._upper_body_stream_was_fresh = (
+                    receiver.finish_pending(hand_state) and tracking and self._upper_body_enabled
+                )
             self._upper_body_pending = None
-            get_data = getattr(self.env, "get_data", None)
-            if self._upper_body_command_submitted and get_data is not None:
-                # Keep the post-step snapshot's original measurement timestamps.
-                env_data = get_data()
+            started = time.perf_counter()
+            get_feedback = getattr(self.env, "get_joint_feedback", None)
+            if get_feedback is not None:
+                body = get_feedback()
+            else:
+                get_data = getattr(self.env, "get_data", None)
+                if self._upper_body_command_submitted and get_data is not None:
+                    env_data = get_data()
+                stamps = env_data.get("joint_sample_times")
+                body = {
+                    "positions": dict(zip(self.env.joint_names, np.asarray(env_data.dof_pos).tolist(), strict=True)),
+                    "sample_times": {} if stamps is None else dict(zip(self.env.joint_names, stamps, strict=True)),
+                }
+            timing["body_snapshot"] = 1000 * (time.perf_counter() - started)
             names = self._upper_body_cfg.joint_names
-            sample_times = env_data.get("joint_sample_times")
+            source_groups = {"body": list(body["positions"])}
             payload = {
-                "positions": dict(
-                    zip(self.env.joint_names, np.asarray(env_data.dof_pos, dtype=float).tolist(), strict=True)
-                ),
-                "sample_times": {}
-                if sample_times is None
-                else dict(zip(self.env.joint_names, sample_times, strict=True)),
+                **body,
                 "targets": dict(zip(names, self._upper_body_filtered.tolist(), strict=True)),
                 "defaults": dict(zip(names, self._upper_body_default.tolist(), strict=True)),
                 "limits": {
@@ -337,15 +350,33 @@ class UpperBodyZmqPipelineMixin:
                     for name, index in zip(names, self._upper_body_indices, strict=True)
                 },
             }
+            diagnostics = {}
             if hands:
-                for key, values in receiver.hand_feedback_payload().items():
+                hand_payload = receiver.hand_feedback_payload(hand_state)
+                for side, prefix in (("left_hand", "L_"), ("right_hand", "R_")):
+                    source_groups[side] = [name for name in hand_payload["positions"] if name.startswith(prefix)]
+                for key, values in hand_payload.items():
                     payload[key].update(values)
+                diagnostics = {
+                    key: hand_state[key]
+                    for key in (
+                        "snapshot_sequence",
+                        "snapshot_connection_generation",
+                        "handoff_delay_ms",
+                        "snapshot_cache_age_ms",
+                    )
+                    if key in hand_state
+                }
+            timing["feedback_assembly"] = 1000 * (time.perf_counter() - assembly_started)
             receiver.feedback.publish(
                 **payload,
                 intent=self._feedback_intent(),
                 mode=self.mode.value,
                 control_dt=self.dt,
-                timing_ms=getattr(self, "_upper_body_timing_ms", {}),
+                timing_ms=timing,
+                source_groups=source_groups,
+                diagnostics=diagnostics,
+                measurements_available=hand_state["fresh"] if hands else True,
             )
             if hands:
                 receiver.synchronize_generation()

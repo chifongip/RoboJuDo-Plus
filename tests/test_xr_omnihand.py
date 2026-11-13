@@ -711,6 +711,19 @@ class CombinedFeedbackTests(unittest.TestCase):
 
 
 class CombinedApplicationTests(unittest.TestCase):
+    def test_generation_change_during_snapshot_read_cannot_acknowledge(self):
+        receiver = self.receiver()
+
+        def snapshot():
+            receiver.feedback.generation += 1
+            receiver.pending = None
+            return {"fresh": True, "applied": (2, 10)}
+
+        with patch.object(receiver, "hand_snapshot", side_effect=snapshot):
+            self.assertFalse(receiver.finish_pending())
+        receiver.feedback.acknowledge.assert_not_called()
+        receiver._hand_runtime.acknowledge.assert_not_called()
+
     def test_timely_application_observed_after_deadline_is_acknowledged(self):
         receiver = self.receiver()
         receiver.pending = ({"status": "tracking"}, (2, 10), 10.1)

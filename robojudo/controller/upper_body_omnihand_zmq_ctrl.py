@@ -47,8 +47,9 @@ class UpperBodyOmniHandZmqCtrl(UpperBodyHandZmqCtrlBase):
             )
         return OmniHandRuntime(hand_cfg, require_serials=cfg_ctrl.feedback_endpoint is not None)
 
-    def hand_feedback_payload(self):
-        snapshot = self.hand_snapshot()
+    def hand_feedback_payload(self, snapshot=None):
+        if snapshot is None:
+            snapshot = self.hand_snapshot()
         names = [*self.left_hand_joint_names, *self.right_hand_joint_names]
         limits = np.concatenate((OMNIHAND_LEFT_LIMITS, OMNIHAND_RIGHT_LIMITS))
         return {

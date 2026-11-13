@@ -324,12 +324,42 @@ invalidate the command. Fresh measurements and matching session/generation still
   raw timestamp, seconds since its last observed change, observed update rate, grip values, and robot intent.
   The observed rate measures bridge reads, not network packet rate. In TRACK intent, check whether the timestamp
   advances and whether a squeezed grip exceeds `0.9`. A stationary pose alone does not indicate a stale stream.
-- The same flag prints arm round-trip timings: feedback age at publication, policy inference, environment stepping
-  (including simulation rendering/physics), retargeting, and the last observed acknowledgement wait, all in milliseconds.
+- The same flag separates measurement ages from execution durations. `feedback_age_at_publish` remains the age of
+  the oldest measurement, not publication execution time. `feedback_diagnostics` identifies that joint and the
+  maximum ages for `body`, `left_hand`, and `right_hand`. Body timestamps are local AimDK callback receipt times;
+  hand timestamps are captured before the SDK read. They are preserved when copied or acknowledged.
+  Policy/environment processing, body/hand snapshot copies, feedback assembly, hand IPC handoff, and retargeting
+  are timed separately. The `previous_publication` record contains build and JSON/send durations, state ID,
+  generation, and send status for the preceding publication, because current send time is not yet known when
+  encoding its frame. These optional diagnostic fields do not change the wire schema version; older feedback
+  messages without diagnostics are still accepted.
+  Every two seconds, diagnostics report sample count, p50, p95 and maximum for each metric, plus proposal and
+  acknowledgement counts. Idle intervals do not report a historical acknowledgement as a new round trip.
   These are local durations, not cross-host clock comparisons. `measurement_age_lower_bound` excludes network transit
   and queueing; the robot's age check remains authoritative. For command expiry, RoboJuDo logs the validation stage,
   deadline overrun, publication age, and configured budget. The 100 ms measurement deadline remains enforced.
   Timing fields show the most recent observation of each stage, rather than one synchronized command trace.
+
+Feedback publication stays on the 50 Hz control loop. Immediately before publication, AimDK feedback copies the
+latest native joint cache without rerunning policy inference, observer updates, or physics. This copy is separate
+from the earlier policy snapshot. Simulation and other environments provide their latest cached measurements.
+Both hand threads publish to a bounded shared-memory latest-snapshot slot; the main thread and recovery supervisor
+can read it without consuming it or waiting for a supervisor polling tick. Sequence numbers and connection
+generations identify each snapshot. Reads use nonblocking slot lock acquisition: contention retains the previous
+timestamped snapshot, whose normal freshness checks still apply. Worker restarts allocate fresh IPC so a killed
+writer cannot leave the replacement blocked on an abandoned lock. A single hand snapshot is reused for
+acknowledgement decisions and feedback assembly; a generation change during retrieval cancels the old decision.
+Worker spawning runs outside the parent snapshot lock. Slot contention can skip a publication or read; it does
+not wait for the other process, and the next successful publication replaces the older snapshot.
+Retained measurements during reconnection do not make feedback valid until the hand runtime is ready, even when
+their original timestamps are still within the freshness budget.
+
+For before/after measurements, run `--xr-diagnostics` with identical sampling/control settings during idle and
+active arm/finger motion. Compare per-source measurement age, hand handoff, execution-time distributions and
+timeouts. The top-level XR OmniHand presets set `omnihand.joint_state_fps=50.0`; the generic `OmniHandCfg` default
+remains 100 Hz. A sub-millisecond SDK read does not imply a sub-millisecond age at an arbitrarily phased 50 Hz
+publication. This change does not alter receive timeouts or the feedback freshness budget.
+
 - Run one XR SDK client at a time when comparing against the standalone demo. The locally supplied PC Service
   implementation stops an existing feedback client when a new one subscribes.
 - The launcher can use Python 3.10, but the target environment must use Python 3.11. If reusing a different

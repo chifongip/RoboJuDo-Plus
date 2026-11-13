@@ -5,6 +5,7 @@ from robojudo.controller.ctrl_cfgs import (
     JoystickCtrlCfg,
     KeyboardCtrlCfg,
     LocomanipulationPostureZmqCtrlCfg,
+    OmniHandCfg,
     RosJoystickCtrlCfg,
     UpperBodyOmniHandZmqCtrlCfg,
     UpperBodyZmqCtrlCfg,
@@ -66,6 +67,7 @@ def _xr_hand_controllers(base):
                     **{
                         **cfg.model_dump(),
                         "ctrl_type": "UpperBodyOmniHandZmqCtrl",
+                        "omnihand": OmniHandCfg(joint_state_fps=50.0),
                     }
                 )
             )

@@ -154,6 +154,20 @@ class AgiBotCppEnv(Environment):
         pos_ = self.base_pos if pos is None else pos
         super().set_born_place(quat_, pos_)
 
+    def get_joint_feedback(self):
+        """Read the native joint cache without updating policy or observer state."""
+        if self.aimdk is None:
+            return super().get_joint_feedback()
+        state = self.aimdk.get_robot_state()
+        positions = np.asarray(state.motor_state.q, dtype=np.float32)
+        stamps = np.asarray(getattr(state, "joint_received_time_sec", []), dtype=float)
+        if positions.shape != (self.num_dofs,) or stamps.shape != positions.shape:
+            raise ValueError("AimDK feedback positions and timestamps must cover all robot joints")
+        return {
+            "positions": dict(zip(self.joint_names, positions.tolist(), strict=True)),
+            "sample_times": dict(zip(self.joint_names, stamps.tolist(), strict=True)),
+        }
+
     def update(self):
         if self.aimdk is None:
             return

@@ -328,12 +328,17 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         self.pending = (proposal, identity, deadline)
         self._clear_positions()
 
-    def finish_pending(self):
+    def finish_pending(self, state=None):
         self.synchronize_generation()
         if self.pending is None:
             return False
-        proposal, identity, deadline = self.pending
-        state = self.hand_snapshot()
+        pending = self.pending
+        proposal, identity, deadline = pending
+        generation = self.feedback.generation
+        if state is None:
+            state = self.hand_snapshot()
+        if self.feedback.generation != generation or self.pending is not pending:
+            return False
         # A matching hardware identity is only published after both writes
         # completed before their deadline. Observing it later is not a failure.
         applied = self._hand_runtime is not None and state["applied"] == identity

@@ -171,6 +171,14 @@ class Environment(ABC):
     def fk_info(self):
         return self._fk_info.copy() if self._fk_info is not None else None
 
+    def get_joint_feedback(self):
+        """Copy positions and matching original timestamps without advancing state."""
+        stamps = getattr(self, "_joint_sample_times", None)
+        return {
+            "positions": dict(zip(self.joint_names, self.dof_pos.tolist(), strict=True)),
+            "sample_times": {} if stamps is None else dict(zip(self.joint_names, stamps, strict=True)),
+        }
+
     def get_data(self):
         sample_times = getattr(self, "_joint_sample_times", None)
         env_data = {
