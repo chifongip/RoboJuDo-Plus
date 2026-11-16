@@ -166,6 +166,7 @@ class UpperBodyFeedback:
             "feedback_diagnostics": feedback_diagnostics,
         }
         if self.schema_version == 2:
+            frame["hand_command_mode"] = getattr(self.cfg, "hand_command_mode", "velocity_limited")
             frame["hand_velocity_limit"] = self.cfg.hand_velocity_limit
         deadline = min(sample_times.values(), default=float("-inf")) + self.cfg.feedback_timeout_s
         self._states[self.state_id] = (deadline, frame)
@@ -232,6 +233,9 @@ class UpperBodyFeedback:
         status = message.get("status")
         if status not in {"tracking", "homing"} or (self.intent == "HOME" and status != "homing"):
             raise ValueError("proposal status is incompatible with its control intent")
+        hand_mode = feedback.get("hand_command_mode", "velocity_limited")
+        if self.schema_version == 2 and message.get("hand_command_mode", "velocity_limited") != hand_mode:
+            raise ValueError("finger command mode mismatch")
         speed = feedback["arm_velocity_limit"]
         if status == "homing":
             speed = min(speed, feedback["return_velocity_limit"])
@@ -244,6 +248,13 @@ class UpperBodyFeedback:
             joint_speed = speed
             if self.schema_version == 2 and name not in self.cfg.joint_names:
                 joint_speed = 0.0 if status == "homing" else feedback["hand_velocity_limit"]
+            if (
+                self.schema_version == 2
+                and name not in self.cfg.joint_names
+                and status == "tracking"
+                and hand_mode == "direct"
+            ):
+                continue
             if abs(value - feedback["last_commanded_positions"][name]) > joint_speed * feedback["control_dt"] + 1e-6:
                 raise ValueError(f"arm target exceeds command velocity limit: {name}")
         if self.schema_version == 2 and any(float(np.float32(value)) != value for value in positions.values()):

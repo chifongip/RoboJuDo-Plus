@@ -591,3 +591,26 @@ XROBOTOOLKIT_TEST_PYTHON=/path/to/robojudo-xr/bin/python \
 # Repeat with XROBOTOOLKIT_TEST_BACKEND=lerobot.
 python -m unittest discover -s tests -p test_xr_omnihand.py
 ```
+
+### Direct finger target experiment
+
+Use `python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_real_direct`
+with the updated XR bridge and the same local hand serial configuration used by
+`x2_xrobotoolkit_omnihand_real`. This real-hardware preset sends the final
+trigger-proportional grasp target without the bridge's finger velocity ramp.
+The robot accepts those larger finger steps only when both sides explicitly
+agree on `hand_command_mode=direct`. Arm limits and collision checks remain active.
+The original preset retains `velocity_limited` behavior.
+
+The experiment preserves the device's existing control mode and motor speed
+settings. It does not establish a firmware speed cap. SDK read/write scheduling
+and repeated target submission are unchanged. Revoking further commands does
+not cancel movement toward a target already accepted by the hand.
+
+For an A/B comparison, use identical device settings, arm posture, and slow
+partial/full trigger presses with each preset. Record commanded and measured
+finger positions and command intervals; compare pauses, total movement time,
+and visible jitter. SDK read/write durations require additional instrumentation
+if not available in the local diagnostic setup. Do not run a separate SDK probe
+while the pipeline owns the adapters. Hardware observations are required to
+conclude whether jitter improves.

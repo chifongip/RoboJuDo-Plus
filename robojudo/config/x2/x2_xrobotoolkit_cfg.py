@@ -105,3 +105,18 @@ class x2_xrobotoolkit_omnihand_real(x2_xrobotoolkit_real):
     """Robot-side HCAN selected by local adapter serials and exact hand identities."""
 
     ctrl: XRHandControllers = _xr_hand_controllers(x2_xrobotoolkit_real())
+
+
+def _direct_hand_controllers():
+    controllers = _xr_hand_controllers(x2_xrobotoolkit_real())
+    for controller in controllers:
+        if isinstance(controller, UpperBodyOmniHandZmqCtrlCfg):
+            controller.hand_command_mode = "direct"
+    return controllers
+
+
+@cfg_registry.register
+class x2_xrobotoolkit_omnihand_real_direct(x2_xrobotoolkit_omnihand_real):
+    """Experimental final finger targets using unchanged device motor settings."""
+
+    ctrl: XRHandControllers = _direct_hand_controllers()

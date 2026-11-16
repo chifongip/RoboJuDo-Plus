@@ -315,6 +315,7 @@ class UpperBodyOmniHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
     ctrl_type: str = "UpperBodyOmniHandZmqCtrl"
     endpoint: str = "tcp://127.0.0.1:8560"
     schema_version: Literal[2] = 2
+    hand_command_mode: Literal["velocity_limited", "direct"] = "velocity_limited"
     hand_velocity_limit: float = Field(default=2.0, gt=0.0, allow_inf_nan=False)
     omnihand: OmniHandCfg = OmniHandCfg()
     serial_config: str | None = None
