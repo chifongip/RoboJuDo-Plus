@@ -304,16 +304,77 @@ class _LatestSnapshot:
 
 def _publish_state(channel, value):
     try:
-        channel.put_nowait(value)
+        return channel.put_nowait(value) is not False
     except queue.Full:
         try:
             channel.get_nowait()
         except queue.Empty:
             pass
         try:
-            channel.put_nowait(value)
+            return channel.put_nowait(value) is not False
         except queue.Full:
-            pass
+            return False
+
+
+class _WorkerSnapshotPublisher:
+    """Child-only aggregation; a hint follows publication, never replaces it."""
+
+    def __init__(self, channel, gate, stop, notification=None):
+        self.channel, self.gate, self.stop, self.notification = channel, gate, stop, notification
+        self.snapshot = {}
+        self._lock = threading.Lock()
+        self._ready_key = self._ready_at = self._pending = self._notified = None
+        self._warned = False
+
+    def _completion_key(self):
+        if len(self.snapshot) != 2 or self.stop.is_set():
+            return None
+        left, right = (self.snapshot[side] for side in ("left", "right"))
+        if left["applied"] is None or left["applied"] != right["applied"]:
+            return None
+        with self.gate.get_lock():
+            generation, enabled = self.gate[:2]
+        if not enabled or left["generation"] != generation or right["generation"] != generation:
+            return None
+        return generation, left["applied"]
+
+    def _publish(self):
+        key = self._completion_key()
+        if key != self._ready_key:
+            self._ready_key = key
+            self._ready_at = time.monotonic() if key is not None else None
+        payload = {side: {**state, "completion_ready_at": self._ready_at} for side, state in self.snapshot.items()}
+        published = _publish_state(self.channel, payload)
+        self._pending = key if not published and self.notification is not None else None
+        if published and key is not None and self.notification is not None and key != self._notified:
+            try:
+                self.notification.send(b"\x01")
+            except BlockingIOError:
+                pass  # An unread hint already makes the socket ready.
+            except OSError as exc:
+                if not self._warned:
+                    logger.warning("Direct hand completion notification failed; using periodic checks: %s", exc)
+                    self._warned = True
+            self._notified = key
+
+    def publish(self, side, state):
+        with self._lock:
+            self.snapshot[side] = state
+            if len(self.snapshot) == 2:
+                self._publish()
+
+    def retry(self):
+        # Do not hold up command dispatch behind an SDK thread's publication.
+        if self.notification is None or not self._lock.acquire(False):
+            return
+        try:
+            if self._pending is not None:
+                if self._pending == self._completion_key():
+                    self._publish()
+                else:
+                    self._pending = None
+        finally:
+            self._lock.release()
 
 
 def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurements=None, wake=None):
@@ -420,20 +481,19 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurement
         fail(side, stage, exc)
 
 
-def _worker(cfg, commands, states, stop, gate, errors, measurements=None):
+def _worker(cfg, commands, states, stop, gate, errors, measurements=None, notification=None):
     """Initialize sequentially, then give each handle its own I/O thread."""
-    hands, snapshot, threads = {}, {}, []
+    hands, threads = {}, []
     local_commands = {side: queue.Queue(1) for side in ("left", "right")}
     command_wakes = {side: threading.Event() for side in ("left", "right")}
-    snapshot_lock = threading.Lock()
+    publisher = _WorkerSnapshotPublisher(states, gate, stop, notification)
     failure_lock = threading.Lock()
     failed = False
+    if notification is not None:
+        notification.setblocking(False)
 
     def publish(side, state):
-        with snapshot_lock:
-            snapshot[side] = state
-            if len(snapshot) == 2:
-                _publish_state(states, snapshot.copy())
+        publisher.publish(side, state)
 
     def fail(side, stage, exc):
         nonlocal failed
@@ -505,6 +565,7 @@ def _worker(cfg, commands, states, stop, gate, errors, measurements=None):
                     message = (generation, deadline, identity, angles[index * 12 : (index + 1) * 12], submitted_at)
                     _publish_state(local_commands[side], message)
                     command_wakes[side].set()
+            publisher.retry()
             stop.wait(0.001)
     except Exception as exc:
         fail(side, "connect/start worker", exc)
@@ -515,7 +576,7 @@ def _worker(cfg, commands, states, stop, gate, errors, measurements=None):
         for thread in threads:
             if thread.ident is not None:
                 thread.join()
-        snapshot.clear()
+        publisher.snapshot.clear()
         hands.clear()
 
 
@@ -552,6 +613,10 @@ class OmniHandRuntime:
         self._notification_reader, self._notification_writer = socket.socketpair()
         self._notification_reader.setblocking(False)
         self._notification_writer.setblocking(False)
+        logger.info(
+            "OmniHand direct completion notifications: %s",
+            "enabled" if cfg.direct_completion_notifications else "disabled (supervisor notifications)",
+        )
         self._supervisor = threading.Thread(target=self._supervise, name="omnihand-supervisor", daemon=True)
         self._supervisor.start()
         try:
@@ -600,6 +665,7 @@ class OmniHandRuntime:
             self._snapshot_published_at = None
             self._snapshot_received_at = None
             self._snapshot_complete = False
+            self._completion_observation = None
             self._errors = _CommandMailbox(self._ctx)
             self._process = self._ctx.Process(
                 target=_worker,
@@ -611,6 +677,7 @@ class OmniHandRuntime:
                     self._gate,
                     self._errors,
                     self._measurements,
+                    self._notification_writer if self.cfg.direct_completion_notifications else None,
                 ),
                 daemon=True,
             )
@@ -686,6 +753,10 @@ class OmniHandRuntime:
         self._snapshot_sequence = sequence
         self._snapshot_published_at = published_at
         self._snapshot_received_at = time.monotonic()
+        if current[0][0] is not None and current[0] == current[1]:
+            key = self._connection_generation, current[0]
+            if getattr(self, "_completion_observation", None) is None or self._completion_observation[0] != key:
+                self._completion_observation = key, self._snapshot_received_at
         self._snapshot_complete = all(
             side in snapshot and snapshot[side]["positions"] is not None and snapshot[side]["sampled_at"] is not None
             for side in ("left", "right")
@@ -844,6 +915,7 @@ class OmniHandRuntime:
                     and self._error is None
                 )
             self._pending = None
+            self._completion_observation = None
 
     def submit(self, positions, identity, deadline, *, replace_pending=False):
         with self._lock:
@@ -957,6 +1029,14 @@ class OmniHandRuntime:
             for side, age in command_ages.items()
         }
         source_identity = applied if applied is not None and len(applied) == 3 else (None, None, None)
+        observation = getattr(self, "_completion_observation", None)
+        completion_timestamps = {}
+        if applied is not None:
+            ready_at = self._states["left"].get("completion_ready_at")
+            if ready_at is not None:
+                completion_timestamps["worker_completion_ready"] = ready_at
+            if observation is not None and observation[0] == (self._connection_generation, (applied, generation)):
+                completion_timestamps["parent_snapshot_received"] = observation[1]
         return {
             "snapshot_sequence": self._snapshot_sequence,
             "snapshot_connection_generation": self._connection_generation,
@@ -989,16 +1069,19 @@ class OmniHandRuntime:
             "targets": commands,
             "applied": applied,
             "command_timestamps": {
-                f"{side}_{label}": state[key]
-                for side, state in self._states.items()
-                for label, key in (
-                    ("submitted", "commanded_at"),
-                    ("write_started", "write_started_at"),
-                    ("write_completed", "write_completed_at"),
-                    ("read_started", "read_started_at"),
-                    ("read_completed", "read_completed_at"),
-                )
-                if applied is not None and state.get(key) is not None
+                **completion_timestamps,
+                **{
+                    f"{side}_{label}": state[key]
+                    for side, state in self._states.items()
+                    for label, key in (
+                        ("submitted", "commanded_at"),
+                        ("write_started", "write_started_at"),
+                        ("write_completed", "write_completed_at"),
+                        ("read_started", "read_started_at"),
+                        ("read_completed", "read_completed_at"),
+                    )
+                    if applied is not None and state.get(key) is not None
+                },
             },
             "joint_names": list(OMNIHAND_JOINT_NAMES),
             "joint_positions": np.array([measured.get(n, 0) for n in OMNIHAND_JOINT_NAMES], dtype=np.float32),

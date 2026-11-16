@@ -34,6 +34,8 @@ class UpperBodyFeedback:
         self.applied_bridge_id = None
         self.applied_frame_id = None
         self._completed_positions = None
+        self._first_feedback_built = None
+        self._completion_observation_source = None
         self._command_timestamps = {}
         self.command_counts = dict.fromkeys(("received", "superseded", "rejected", "completed"), 0)
         self.state_id = 0
@@ -74,6 +76,8 @@ class UpperBodyFeedback:
         self.applied_bridge_id = None
         self.applied_frame_id = None
         self._completed_positions = None
+        self._first_feedback_built = None
+        self._completion_observation_source = None
         self._command_timestamps = {}
 
     def expire_tracking(self, now):
@@ -141,9 +145,15 @@ class UpperBodyFeedback:
             source: value if value is not None and math.isfinite(value) else None
             for source, value in feedback_diagnostics["source_age_ms"].items()
         }
+        if self._completion_observation_source is not None:
+            feedback_diagnostics["completion_observation_source"] = self._completion_observation_source
         if self._command_timestamps:
             # All stamps use the robot host monotonic clock, including its workers.
-            feedback_diagnostics["command_timestamps"] = {**self._command_timestamps, "feedback_built": now}
+            feedback_diagnostics["command_timestamps"] = {
+                **self._command_timestamps,
+                "feedback_built": now,
+                "first_feedback_built": now if self._first_feedback_built is None else self._first_feedback_built,
+            }
         frame = {
             "schema_version": self.schema_version,
             "type": "upper_body_state",
@@ -189,6 +199,8 @@ class UpperBodyFeedback:
             self.socket.send_json(frame, flags=zmq.NOBLOCK, allow_nan=False)
         except zmq.Again:
             sent = False
+        if sent and self._command_timestamps and self._first_feedback_built is None:
+            self._first_feedback_built = now
         self._last_publication_timing = {
             "state_id": self.state_id,
             "generation": self.generation,
@@ -310,6 +322,9 @@ class UpperBodyFeedback:
             self.last_proposal_at = time.monotonic()
 
     def acknowledge(self, proposal=None):
+        source = None if proposal is None else proposal.get("_completion_observation_source")
+        self._completion_observation_source = source if source in ("idle", "periodic") else None
+        self._first_feedback_built = None
         self.command_id += 1
         self.command_counts["completed"] += 1
         if proposal is not None:

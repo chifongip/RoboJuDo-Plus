@@ -2,6 +2,7 @@
 
 import multiprocessing as mp
 import queue
+import select
 import sys
 import tempfile
 import threading
@@ -246,6 +247,33 @@ class SupervisedRecoveryTests(unittest.TestCase):
                 return data
             time.sleep(0.005)
         self.fail(f"recovery deadline exceeded: {data['connection_status']}")
+
+    def test_direct_worker_notifies_across_reconnect_without_supervisor_hints(self):
+        runtime = self.runtime(direct_completion_notifications=True)
+        reader = runtime.notification_socket
+        with patch.object(runtime, "_notify"):
+            runtime.set_takeover_enabled(True)
+            runtime.drain_notifications()
+            runtime.submit(dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0), (10, 1), time.monotonic() + 0.5)
+            self.assertTrue(select.select([reader], [], [], 1)[0], "worker did not signal its published completion")
+            completed = runtime.get_data()
+            self.assertEqual(completed["applied"], (10, 1))
+            stamps = completed["command_timestamps"]
+            self.assertLessEqual(stamps["worker_completion_ready"], stamps["parent_snapshot_received"])
+            runtime.acknowledge()
+            runtime.drain_notifications()
+            old = runtime._process
+            old.kill()
+            old.join(1)
+            self.until(runtime, lambda state: state["connection_generation"] > 1 and state["enabled"])
+            self.assertIs(runtime.notification_socket, reader)
+            # An old hint cannot manufacture an application identity after restart.
+            runtime._notification_writer.send(b"old")
+            runtime.drain_notifications()
+            self.assertIsNone(runtime.get_data()["applied"])
+            runtime.submit(dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0), (10, 2), time.monotonic() + 0.5)
+            self.assertTrue(select.select([reader], [], [], 1)[0])
+            self.assertEqual(runtime.get_data()["applied"], (10, 2))
 
     def test_stale_stream_recovers_same_worker_and_preserves_requested_takeover(self):
         runtime = self.runtime()

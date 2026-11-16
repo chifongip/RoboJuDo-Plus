@@ -121,3 +121,18 @@ class x2_xrobotoolkit_omnihand_real_direct(x2_xrobotoolkit_omnihand_real):
     """Experimental final finger targets using unchanged device motor settings."""
 
     ctrl: XRHandControllers = _direct_hand_controllers()
+
+
+def _low_latency_direct_hand_controllers():
+    controllers = _direct_hand_controllers()
+    for controller in controllers:
+        if isinstance(controller, UpperBodyOmniHandZmqCtrlCfg):
+            controller.omnihand.direct_completion_notifications = True
+    return controllers
+
+
+@cfg_registry.register
+class x2_xrobotoolkit_omnihand_real_direct_low_latency(x2_xrobotoolkit_omnihand_real_direct):
+    """Opt-in worker completion notifications with unchanged combined-frame control."""
+
+    ctrl: XRHandControllers = _low_latency_direct_hand_controllers()

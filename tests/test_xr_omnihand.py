@@ -748,6 +748,7 @@ class CombinedFeedbackTests(unittest.TestCase):
         env.get_joint_feedback.assert_not_called()
         state = self.feedback.socket.frames[-1]
         self.assertEqual(state["applied_frame_id"], 1)
+        self.assertEqual(state["feedback_diagnostics"]["completion_observation_source"], "idle")
         self.assertEqual(state["applied_bridge_id"], "test")
         self.assertEqual(state["last_commanded_positions"], first["positions"])
         self.assertEqual(state["command_id"], 1)

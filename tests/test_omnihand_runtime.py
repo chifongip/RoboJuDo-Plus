@@ -26,6 +26,24 @@ from robojudo.controller.omnihand_runtime import (
 
 
 class TestOmniHandConfig(unittest.TestCase):
+    def test_low_latency_config_is_opt_in_and_only_changes_notifications(self):
+        from robojudo.config.x2 import (
+            x2_xrobotoolkit_omnihand_real_direct,
+            x2_xrobotoolkit_omnihand_real_direct_low_latency,
+        )
+
+        baseline = x2_xrobotoolkit_omnihand_real_direct().model_dump()
+        candidate = x2_xrobotoolkit_omnihand_real_direct_low_latency().model_dump()
+        self.assertFalse(OmniHandCfg().direct_completion_notifications)
+        changed = 0
+        for controller in candidate["ctrl"]:
+            if "omnihand" in controller:
+                self.assertTrue(controller["omnihand"]["direct_completion_notifications"])
+                controller["omnihand"]["direct_completion_notifications"] = False
+                changed += 1
+        self.assertEqual(changed, 1)
+        self.assertEqual(candidate, baseline)
+
     def test_timeouts_and_rates_must_be_finite(self):
         for field in ("command_timeout_s", "joint_state_fps", "joint_state_timeout_s", "startup_timeout_s"):
             with self.subTest(field=field), self.assertRaises(ValueError):
@@ -158,6 +176,21 @@ class TestOmniHandRuntime(unittest.TestCase):
         }
         self.runtime = runtime
         self.positions = dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0)
+
+    def test_parent_observation_is_latched_per_frame_and_cleared_on_revocation(self):
+        snapshot = copy.deepcopy(self.runtime._states)
+        for state in snapshot.values():
+            state.update(applied=(1, 2), generation=0, completion_ready_at=9.999)
+        self.runtime._state_slot.put_nowait(snapshot)
+        first = self.runtime.get_data()["command_timestamps"]
+        self.assertEqual(first["parent_snapshot_received"], 10.0)
+        self.assertEqual(first["worker_completion_ready"], 9.999)
+        self.clock.return_value = 10.01
+        self.runtime._state_slot.put_nowait(snapshot)
+        self.assertEqual(self.runtime.get_data()["command_timestamps"]["parent_snapshot_received"], 10.0)
+        self.runtime.set_takeover_enabled(False)
+        self.assertEqual(self.runtime.get_data()["command_timestamps"], {})
+        self.assertIsNone(self.runtime._completion_observation)
 
     def test_write_timestamps_require_matching_dual_hand_completion(self):
         for state in self.runtime._states.values():

@@ -327,7 +327,7 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         self.pending = (proposal, identity, deadline)
         self._clear_positions()
 
-    def finish_pending(self, state=None):
+    def finish_pending(self, state=None, *, observation_source="periodic"):
         self.synchronize_generation()
         if self.pending is None:
             return False
@@ -350,6 +350,7 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         stamps["acknowledged"] = time.monotonic()
         if applied:
             stamps.update(state.get("command_timestamps", {}))
+        proposal["_completion_observation_source"] = observation_source
         self.feedback.acknowledge(proposal)
         if self._hand_runtime is not None:
             self._hand_runtime.acknowledge()

@@ -214,6 +214,7 @@ class OmniHandCfg(Config):
     right_interface: str = "can1"
     hand_can_id: int | None = Field(default=None, ge=1, le=254)
     command_timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
+    direct_completion_notifications: bool = False
     joint_state_fps: float = Field(default=100.0, gt=0.0, allow_inf_nan=False)
     joint_state_timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
     startup_timeout_s: float = Field(default=15.0, gt=0.0, allow_inf_nan=False)

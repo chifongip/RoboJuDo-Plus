@@ -354,7 +354,9 @@ class UpperBodyZmqPipelineMixin:
                 timing["hand_snapshot"] = 1000 * (time.perf_counter() - started)
                 tracking = receiver.pending is not None and receiver.pending[0]["status"] == "tracking"
                 self._upper_body_stream_was_fresh = (
-                    receiver.finish_pending(hand_state) and tracking and self._upper_body_enabled
+                    receiver.finish_pending(hand_state, observation_source="idle" if idle else "periodic")
+                    and tracking
+                    and self._upper_body_enabled
                 )
             self._upper_body_pending = None
             started = time.perf_counter()

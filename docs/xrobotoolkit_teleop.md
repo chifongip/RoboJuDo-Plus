@@ -242,8 +242,12 @@ The additional `Completion p95 (ms)` line breaks down matched completions:
 - `submission_skew`: span between arm submission start and the two hand write starts. This measures matching-frame
   software submission skew, not physical synchronization.
 - `completion_observation`: last hand write completion to the robot observing both writes and acknowledging.
-- `robot_ack_wait`: acknowledgement to feedback construction.
-- `robot_total`: robot receipt/validation to feedback construction.
+- `worker_to_parent`: worker observation of matching dual-hand completion to the parent's first observation of it.
+- `parent_to_ack`: first parent observation of that frame's completion to pipeline acknowledgement.
+- `robot_ack_wait`: acknowledgement to the first successfully enqueued acknowledgement snapshot's construction.
+- `feedback_snapshot_lag`: construction-time gap between the first acknowledgement snapshot and the snapshot the
+  bridge actually processed. Present only when the robot supplies first-publication metadata.
+- `robot_total`: robot receipt/validation to first acknowledgement snapshot construction.
 - `transport_and_poll`: bridge round-trip latency minus `robot_total`, covering command/feedback transport, socket
   queues, feedback encoding/send, and polling at either end. It cannot distinguish network delay from polling waits.
 
@@ -251,7 +255,11 @@ Raw robot-host monotonic timestamps are included in `feedback_diagnostics.comman
 feedback's `applied_bridge_id` / `applied_frame_id`. They clear on generation reset. Robot workers share that clock;
 the bridge compares durations only, so robot and bridge hosts do not need synchronized clocks. Hand branches overlap,
 and each p95 is calculated independently, so adding the displayed percentiles does not reconstruct total p95.
-Older peers without these optional timestamps continue operating without a breakdown.
+`first_feedback_built` is frozen only after a successful local ZeroMQ send; a failed nonblocking send retries with
+another candidate timestamp. Successful enqueue does not guarantee subscriber delivery. With older robots,
+`robot_ack_wait` and `robot_total` fall back to the processed snapshot's `feedback_built` timestamp.
+`Completion observations: idle=..., periodic=...` reports where matching frames were acknowledged in the reporting
+window. Older peers without these optional timestamps continue operating without a breakdown.
 
 Hand commands now wake each SDK-owning thread instead of waiting for its next measurement tick. Reads stay at
 `joint_state_fps`, with missed deadlines skipped rather than replayed. An SDK read already in progress must finish
@@ -264,6 +272,36 @@ its existing 5 ms interval. Control-step completion checks remain a fallback for
 The bridge also receives feedback between publication deadlines, without running extra IK or publishing early.
 Arms and both hands retain one proposal identity and one combined frame in flight; partial completion cannot advance
 the baseline. Physical writes remain separate and cannot be rolled back if a later component fails.
+
+The next-phase worker notification path is opt-in. Use the existing verified hand identities and robot setup with:
+
+```bash
+python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_real_direct_low_latency
+```
+
+The bridge command is unchanged:
+
+```bash
+python -m xrobotoolkit_teleop.integrations.robojudo --robot x2_omnihand --ik-backend lerobot --xr-diagnostics
+```
+
+This configuration changes only `OmniHandCfg.direct_completion_notifications` to `True`; the ordinary
+`x2_xrobotoolkit_omnihand_real_direct` configuration keeps it `False`. Startup logs identify the selected mode.
+The worker signals the existing nonblocking readiness socket only after publishing matching dual-hand completion.
+If the snapshot slot is busy, the dispatcher retries publication without waiting for another SDK read. Hints never
+authorize a command or replace generation/freshness checks. The supervisor still owns health and reconnects;
+periodic completion checks and supervisor hints remain available. The pipeline's existing idle/post-step service
+points, control frequency, submission order, and combined-frame barrier are unchanged. No new native calls release
+the GIL, no additional thread issues hardware commands, and no SDK timeout or CPU/thread setting changes.
+Select the original direct configuration to roll back the notification optimization.
+
+For phase 2, compare three 60-second Jetson runs per mode using the same updated timing metadata and workload.
+Targets are completion-observation p95 below 8 ms and round-trip p95 below 35 ms, with hand-queue performance retained.
+Require zero mixed frames, duplicate acknowledgements, stale replay, or new watchdog/shutdown failures. Control-loop
+p99 and overrun rate must remain within baseline run-to-run variation. Keep the path opt-in if targets are unmet.
+Hardware measurements are separate from fake-SDK tests; an existing collision-enabled synthetic finger-motion
+threshold failure reproduces on the committed baseline and must not be bypassed by disabling collision checks in
+real deployment.
 
 For a hardware comparison, collect three 60-second `--xr-diagnostics` runs before and after with identical rates,
 collision settings, and workload. Compare hand queue, SDK reads, completion observation, submission skew, total

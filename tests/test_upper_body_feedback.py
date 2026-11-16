@@ -386,10 +386,34 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.feedback.acknowledge(proposal)
         frame = self.publish()
         stamps = frame["feedback_diagnostics"]["command_timestamps"]
-        self.assertEqual(stamps, {"received": 9.98, "acknowledged": 9.99, "feedback_built": 10.0})
+        self.assertEqual(
+            stamps, {"received": 9.98, "acknowledged": 9.99, "feedback_built": 10.0, "first_feedback_built": 10.0}
+        )
         self.assertEqual(frame["applied_frame_id"], proposal["frame_id"])
         self.feedback.reset()
         self.assertNotIn("command_timestamps", self.publish()["feedback_diagnostics"])
+
+    def test_first_feedback_timestamp_retries_failed_send_and_stays_fixed(self):
+        proposal = self.proposal(self.publish())
+        proposal["_command_timestamps"] = {"received": 9.98, "acknowledged": 9.99}
+        self.feedback.acknowledge(proposal)
+        with patch.object(self.feedback.socket, "send_json", side_effect=zmq.Again()):
+            self.publish()
+        self.assertIsNone(self.feedback._first_feedback_built)
+        self.clock.return_value = 10.02
+        first = self.publish()
+        self.clock.return_value = 10.04
+        later = self.publish()
+        self.assertEqual(first["feedback_diagnostics"]["command_timestamps"]["first_feedback_built"], 10.02)
+        stamps = later["feedback_diagnostics"]["command_timestamps"]
+        self.assertEqual(stamps["first_feedback_built"], 10.02)
+        self.assertEqual(stamps["feedback_built"], 10.04)
+        self.feedback.acknowledge(dict(proposal, frame_id=proposal["frame_id"] + 1))
+        self.assertIsNone(self.feedback._first_feedback_built)
+        self.clock.return_value = 10.06
+        self.assertEqual(self.publish()["feedback_diagnostics"]["command_timestamps"]["first_feedback_built"], 10.06)
+        self.feedback.reset()
+        self.assertIsNone(self.feedback._first_feedback_built)
 
     def test_ack_keeps_fresh_visualization_but_rejects_old_command_baseline(self):
         state = self.publish()
