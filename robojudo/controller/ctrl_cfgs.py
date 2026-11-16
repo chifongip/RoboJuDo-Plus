@@ -274,6 +274,7 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
     upper_body_default_pose: list[float] | None = None
     """Optional pose for explicit control disable, ordered like ``joint_names``."""
     timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
+    xr_target_filter: bool = False
     ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
     max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
     feedback_endpoint: str | None = None
@@ -315,7 +316,7 @@ class UpperBodyOmniHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
     ctrl_type: str = "UpperBodyOmniHandZmqCtrl"
     endpoint: str = "tcp://127.0.0.1:8560"
     schema_version: Literal[2] = 2
-    hand_command_mode: Literal["velocity_limited", "direct"] = "velocity_limited"
+    hand_command_mode: Literal["filtered", "velocity_limited", "direct"] = "filtered"
     hand_velocity_limit: float = Field(default=2.0, gt=0.0, allow_inf_nan=False)
     omnihand: OmniHandCfg = OmniHandCfg()
     serial_config: str | None = None

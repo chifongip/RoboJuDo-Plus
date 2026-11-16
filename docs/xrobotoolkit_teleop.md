@@ -614,3 +614,19 @@ and visible jitter. SDK read/write durations require additional instrumentation
 if not available in the local diagnostic setup. Do not run a separate SDK probe
 while the pipeline owns the adapters. Hardware observations are required to
 conclude whether jitter improves.
+
+### Shared XR target filtering
+
+Updated XR peers negotiate `robojudo_filter_v1`. The bridge sends desired targets
+and predicts the exact float32 targets produced by RoboJuDo's EMA/velocity filter.
+It collision-checks those issued targets; RoboJuDo reproduces them before admission.
+Update both peers together: proposals without the contract or with inconsistent
+predictions are rejected. XR presets keep `ema_alpha=0.0`; the general configuration
+default remains 0.95. `filtered` replaces the old finger ramp; `velocity_limited`
+is accepted as a legacy spelling. Direct fingers retain device-managed motion.
+
+Filtering advances from the acknowledged issued baseline, not from unsent bridge
+proposals. It never autonomously advances during missing proposals or pending hand
+writes. Existing completion timings and command counters remain available; proposals
+include `desired_positions` separately from issued `positions` for tracing. SDK I/O
+and motor settings are unchanged. Command delivery gaps can still cause pauses.

@@ -24,6 +24,7 @@ def _xr_controllers(base):
             controller.feedback_endpoint = "tcp://127.0.0.1:8571"
             controller.visualize_targets = base.env.is_sim
             controller.ema_alpha = 0.0
+            controller.xr_target_filter = True
             controller.max_joint_velocity_rad_s = 8.0
             controller.return_joint_velocity_rad_s = 1.0
         controllers.append(controller)

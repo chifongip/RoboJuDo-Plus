@@ -142,7 +142,9 @@ class UpperBodyFeedbackTests(unittest.TestCase):
             "command_id": state["command_id"],
             "intent": state["intent"],
             "status": "homing" if state["intent"] == "HOME" else "tracking",
-            "positions": targets,
+            "positions": {n: float(np.float32(v)) for n, v in targets.items()},
+            "desired_positions": targets.copy(),
+            "filter_contract": "robojudo_filter_v1",
         }
 
     def receive(self, proposal):
@@ -245,7 +247,7 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.feedback.cfg.max_joint_velocity_rad_s = 0.25
         state = self.publish()
         too_fast = self.proposal(state, delta=0.01)
-        with self.assertRaisesRegex(ValueError, "velocity"):
+        with self.assertRaisesRegex(ValueError, "velocity|prediction"):
             self.feedback.validate(too_fast, too_fast["positions"])
         allowed = self.proposal(state, delta=0.004)
         self.feedback.validate(allowed, allowed["positions"])

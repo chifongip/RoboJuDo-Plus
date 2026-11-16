@@ -567,7 +567,7 @@ class CombinedFeedbackTests(unittest.TestCase):
     def setUp(self):
         self.clock = self.enterContext(patch("time.monotonic", return_value=10.0))
         self.cfg = UpperBodyOmniHandZmqCtrlCfg(
-            joint_names=["arm"], ema_alpha=0, feedback_endpoint="tcp://127.0.0.1:8571"
+            joint_names=["arm"], ema_alpha=0, xr_target_filter=True, feedback_endpoint="tcp://127.0.0.1:8571"
         )
         self.feedback = UpperBodyFeedback(self.cfg, MemoryContext())
         self.addCleanup(self.feedback.close)
@@ -599,13 +599,15 @@ class CombinedFeedbackTests(unittest.TestCase):
             "intent": intent,
             "status": status,
             "positions": self.targets.copy(),
+            "desired_positions": self.targets.copy(),
+            "filter_contract": "robojudo_filter_v1",
         }
 
     def test_complete_fingers_required_and_speed_checked(self):
         proposal = self.proposal()
         self.feedback.validate(proposal, proposal["positions"])
         proposal["positions"]["L_index_mcp_joint"] = 0.1
-        with self.assertRaisesRegex(ValueError, "velocity"):
+        with self.assertRaisesRegex(ValueError, "velocity|prediction"):
             self.feedback.validate(proposal, proposal["positions"])
         del proposal["positions"]["L_index_mcp_joint"]
         with self.assertRaisesRegex(ValueError, "all configured"):
@@ -614,7 +616,7 @@ class CombinedFeedbackTests(unittest.TestCase):
     def test_invalid_numeric_encoding_does_not_refresh_command_lease(self):
         proposal = self.proposal()
         proposal["positions"]["L_index_mcp_joint"] = 0.01
-        with self.assertRaisesRegex(ValueError, "float32"):
+        with self.assertRaisesRegex(ValueError, "float32|prediction"):
             self.feedback.validate(proposal, proposal["positions"], receiving=True)
         self.assertIsNone(self.feedback.last_proposal_at)
         self.assertEqual(self.feedback._frame_id, -1)
@@ -623,7 +625,7 @@ class CombinedFeedbackTests(unittest.TestCase):
     def test_home_cannot_open_fingers(self):
         proposal = self.proposal("HOME", "homing")
         proposal["positions"]["L_index_mcp_joint"] = 0.01
-        with self.assertRaisesRegex(ValueError, "velocity"):
+        with self.assertRaisesRegex(ValueError, "velocity|prediction"):
             self.feedback.validate(proposal, proposal["positions"])
 
     def test_schema_and_measurement_deadlines(self):
@@ -693,6 +695,7 @@ class CombinedFeedbackTests(unittest.TestCase):
         self.feedback = receiver.feedback
         first = self.proposal()
         first["positions"]["arm"] = float(np.float32(0.01))
+        first["desired_positions"]["arm"] = float(np.float32(0.01))
         receiver.synchronize_generation()
         pipeline = X2LocomanipulationLocoMimicPipeline.__new__(X2LocomanipulationLocoMimicPipeline)
         pipeline.env, pipeline.dt = env, 0.02
@@ -747,6 +750,7 @@ class CombinedFeedbackTests(unittest.TestCase):
 
         fresh = dict(first, frame_id=4, state_id=state["state_id"], command_id=1)
         fresh["positions"] = dict(first["positions"], arm=float(np.float32(0.02)))
+        fresh["desired_positions"] = fresh["positions"].copy()
         receiver._socket.messages.append(fresh)
         target = select()
         pipeline._send_upper_body_target(target)

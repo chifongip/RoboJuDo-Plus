@@ -12,6 +12,8 @@ from collections import OrderedDict
 import numpy as np
 import zmq
 
+from robojudo.controller.xr_target_filter import filter_targets
+
 
 def _counter(value):
     if type(value) is not int or value < 0:
@@ -168,6 +170,10 @@ class UpperBodyFeedback:
         if self.schema_version == 2:
             frame["hand_command_mode"] = getattr(self.cfg, "hand_command_mode", "velocity_limited")
             frame["hand_velocity_limit"] = self.cfg.hand_velocity_limit
+        if self.cfg.xr_target_filter:
+            frame["filter_contract"] = "robojudo_filter_v1"
+            frame["ema_alpha"] = self.cfg.ema_alpha
+            frame["arm_joint_names"] = list(self.cfg.joint_names)
         deadline = min(sample_times.values(), default=float("-inf")) + self.cfg.feedback_timeout_s
         self._states[self.state_id] = (deadline, frame)
         while len(self._states) > 16:
@@ -234,8 +240,46 @@ class UpperBodyFeedback:
         if status not in {"tracking", "homing"} or (self.intent == "HOME" and status != "homing"):
             raise ValueError("proposal status is incompatible with its control intent")
         hand_mode = feedback.get("hand_command_mode", "velocity_limited")
-        if self.schema_version == 2 and message.get("hand_command_mode", "velocity_limited") != hand_mode:
+        proposed_mode = message.get("hand_command_mode", "velocity_limited")
+        if proposed_mode == "velocity_limited":
+            proposed_mode = "filtered"
+        if hand_mode == "velocity_limited":
+            hand_mode = "filtered"
+        if self.schema_version == 2 and proposed_mode != hand_mode:
             raise ValueError("finger command mode mismatch")
+        if self.cfg.xr_target_filter:
+            if message.get("filter_contract") != "robojudo_filter_v1":
+                raise ValueError("incompatible target filter contract")
+            desired = message.get("desired_positions")
+            if not isinstance(desired, dict) or set(desired) != set(positions):
+                raise ValueError("missing desired targets")
+            for name, value in desired.items():
+                low, high = feedback["position_limits"][name]
+                if not math.isfinite(value) or not low <= value <= high:
+                    raise ValueError("desired target exceeds position limits")
+            speeds = {}
+            for name in positions:
+                speeds[name] = (
+                    min(feedback["arm_velocity_limit"], feedback["return_velocity_limit"])
+                    if status == "homing"
+                    else feedback["arm_velocity_limit"]
+                )
+                if name not in self.cfg.joint_names:
+                    speeds[name] = 0.0 if status == "homing" else feedback["hand_velocity_limit"]
+            expected = filter_targets(
+                desired,
+                feedback["last_commanded_positions"],
+                feedback["position_limits"],
+                speeds,
+                feedback["control_dt"],
+                feedback["ema_alpha"],
+            )
+            if hand_mode == "direct" and status == "tracking":
+                for name in positions:
+                    if name not in self.cfg.joint_names:
+                        expected[name] = float(np.float32(desired[name]))
+            if expected != positions:
+                raise ValueError("filtered target prediction mismatch")
         speed = feedback["arm_velocity_limit"]
         if status == "homing":
             speed = min(speed, feedback["return_velocity_limit"])
