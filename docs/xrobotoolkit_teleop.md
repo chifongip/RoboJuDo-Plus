@@ -233,8 +233,14 @@ The additional `Completion p95 (ms)` line breaks down matched completions:
 
 - `robot_admission`: robot receipt/validation to hand submission, including waiting behind an in-flight command.
 - `left_hand_queue` / `right_hand_queue`: runtime enqueue to hardware write start, including IPC, worker scheduling,
-  an ongoing measurement read, and rate-limit sleep.
+  and an ongoing measurement read. Commands wake the workers independently of measurement deadlines.
 - `left_hand_write` / `right_hand_write`: duration of each SDK write call.
+- `left_hand_read` / `right_hand_read`: latest completed SDK measurement read captured with the frame's completion.
+  These describe read cost, not necessarily the particular read that delayed that command.
+- `left_receipt_to_write` / `right_receipt_to_write`: robot receipt/validation to that hand's SDK write completion.
+- `arm_submission`: duration of the environment's arm submission call, not physical motion completion.
+- `submission_skew`: span between arm submission start and the two hand write starts. This measures matching-frame
+  software submission skew, not physical synchronization.
 - `completion_observation`: last hand write completion to the robot observing both writes and acknowledging.
 - `robot_ack_wait`: acknowledgement to feedback construction.
 - `robot_total`: robot receipt/validation to feedback construction.
@@ -246,6 +252,24 @@ feedback's `applied_bridge_id` / `applied_frame_id`. They clear on generation re
 the bridge compares durations only, so robot and bridge hosts do not need synchronized clocks. Hand branches overlap,
 and each p95 is calculated independently, so adding the displayed percentiles does not reconstruct total p95.
 Older peers without these optional timestamps continue operating without a breakdown.
+
+Hand commands now wake each SDK-owning thread instead of waiting for its next measurement tick. Reads stay at
+`joint_state_fps`, with missed deadlines skipped rather than replayed. An SDK read already in progress must finish
+before the same handle can write. No SDK timeout, velocity limit, or measurement rate is changed.
+
+The standard `scripts/run_pipeline.py` runner services combined completion notifications during its post-step idle
+wait, on the same thread that owns control and feedback. It reuses body measurements with their original timestamps;
+it does not run policy inference, advance simulation, or issue another command. The supervisor checks completion at
+its existing 5 ms interval. Control-step completion checks remain a fallback for other runners and full-speed mode.
+The bridge also receives feedback between publication deadlines, without running extra IK or publishing early.
+Arms and both hands retain one proposal identity and one combined frame in flight; partial completion cannot advance
+the baseline. Physical writes remain separate and cannot be rolled back if a later component fails.
+
+For a hardware comparison, collect three 60-second `--xr-diagnostics` runs before and after with identical rates,
+collision settings, and workload. Compare hand queue, SDK reads, completion observation, submission skew, total
+latency, completions/s, stale-feedback faults, and control overruns. Evaluation targets are queue and observation
+p95 below 10 ms, completion p95 below 40 ms, and at least 25 completions/s under continuous publication. These are
+measurement targets, not hardware guarantees; blocking SDK reads may limit the improvement.
 
 Robot `received`, `superseded`, `rejected`, and `completed` counters are cumulative diagnostics for command selection.
 The former `ack_wait` diagnostic has been removed. Expired solver transactions are discarded separately from the

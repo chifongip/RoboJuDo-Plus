@@ -284,7 +284,11 @@ class UpperBodyZmqPipelineMixin:
                 self._upper_body_filtered = self._upper_body_previous.copy()
                 pd_target[self._upper_body_indices] = self._upper_body_filtered
         try:
+            if hands and proposal is not None:
+                proposal.setdefault("_command_timestamps", {})["arm_submission_started"] = time.monotonic()
             self.env.step(pd_target, hand_pose)
+            if hands and proposal is not None:
+                proposal.setdefault("_command_timestamps", {})["arm_submission_completed"] = time.monotonic()
         except Exception:
             if hands:
                 receiver.invalidate("arm submission failed")
@@ -301,7 +305,36 @@ class UpperBodyZmqPipelineMixin:
                 draw_targets(stream.get("target_poses", {}))
         self._publish_upper_body_feedback(env_data, pd_target)
 
-    def _publish_upper_body_feedback(self, env_data, pd_target):
+    def get_idle_notifications(self):
+        """Only the pipeline thread consumes completion notifications and sends feedback."""
+        receiver = self._feedback_receiver()
+        runtime = None if receiver is None else getattr(receiver, "_hand_runtime", None)
+        notification = getattr(runtime, "notification_socket", None)
+        return () if notification is None else (notification,)
+
+    def service_idle_notifications(self):
+        receiver = self._feedback_receiver()
+        runtime = None if receiver is None else getattr(receiver, "_hand_runtime", None)
+        if getattr(runtime, "notification_socket", None) is None:
+            return
+        runtime.drain_notifications()
+        if getattr(self, "_upper_body_feedback_body", None) is not None:
+            self._publish_upper_body_feedback(None, None, idle=True)
+
+    def _record_upper_body_submission(self, receiver, pd_target):
+        if not self._upper_body_command_submitted:
+            return
+        self._upper_body_filtered = np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices].copy()
+        if self._upper_body_pending is not None:
+            if receiver.feedback.schema_version == 2:
+                # Admission precedes env.step. An issued frame cannot be re-applied.
+                if receiver.pending is None:
+                    raise ValueError("combined command was not admitted before arm submission")
+            else:
+                receiver.acknowledge(self._upper_body_pending)
+        self._upper_body_pending = None
+
+    def _publish_upper_body_feedback(self, env_data, pd_target, *, idle=False):
         assembly_started = time.perf_counter()
         receiver = self._feedback_receiver()
         if receiver is None or not self._upper_body_indices.size:
@@ -311,16 +344,8 @@ class UpperBodyZmqPipelineMixin:
             if hands and receiver.synchronize_intent(self._feedback_intent()):
                 # Safety or ownership can change during environment submission.
                 self._upper_body_pending = None
-            if self._upper_body_command_submitted:
-                self._upper_body_filtered = np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices].copy()
-                if self._upper_body_pending is not None:
-                    if hands:
-                        # Admission happened before env.step; do not re-apply or
-                        # expire an already issued command after a blocking step.
-                        if receiver.pending is None:
-                            raise ValueError("combined command was not admitted before arm submission")
-                    else:
-                        receiver.acknowledge(self._upper_body_pending)
+            if not idle:
+                self._record_upper_body_submission(receiver, pd_target)
             hand_state = None
             timing = dict(getattr(self, "_upper_body_timing_ms", {}))
             if hands:
@@ -334,7 +359,9 @@ class UpperBodyZmqPipelineMixin:
             self._upper_body_pending = None
             started = time.perf_counter()
             get_feedback = getattr(self.env, "get_joint_feedback", None)
-            if get_feedback is not None:
+            if idle:
+                body = self._upper_body_feedback_body
+            elif get_feedback is not None:
                 body = get_feedback()
             else:
                 get_data = getattr(self.env, "get_data", None)
@@ -345,11 +372,14 @@ class UpperBodyZmqPipelineMixin:
                     "positions": dict(zip(self.env.joint_names, np.asarray(env_data.dof_pos).tolist(), strict=True)),
                     "sample_times": {} if stamps is None else dict(zip(self.env.joint_names, stamps, strict=True)),
                 }
+            if not idle:
+                # Idle feedback must never refresh measurement timestamps or run env I/O.
+                self._upper_body_feedback_body = {key: dict(values) for key, values in body.items()}
             timing["body_snapshot"] = 1000 * (time.perf_counter() - started)
             names = self._upper_body_cfg.joint_names
             source_groups = {"body": list(body["positions"])}
             payload = {
-                **body,
+                **{key: dict(values) for key, values in body.items()},
                 "targets": dict(zip(names, self._upper_body_filtered.tolist(), strict=True)),
                 "defaults": dict(zip(names, self._upper_body_default.tolist(), strict=True)),
                 "limits": {

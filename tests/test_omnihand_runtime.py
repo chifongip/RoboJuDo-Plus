@@ -3,6 +3,8 @@
 import copy
 import multiprocessing as mp
 import queue
+import select
+import socket
 import sys
 import threading
 import unittest
@@ -40,6 +42,29 @@ class TestOmniHandConfig(unittest.TestCase):
 
 
 class TestOmniHandRuntime(unittest.TestCase):
+    def test_completion_notification_requires_matching_hands_and_is_coalesced(self):
+        runtime = self.runtime
+        runtime._notification_reader, runtime._notification_writer = socket.socketpair()
+        for sock in (runtime._notification_reader, runtime._notification_writer):
+            sock.setblocking(False)
+            self.addCleanup(sock.close)
+        snapshot = copy.deepcopy(runtime._states)
+        snapshot["left"].update(applied=(1, 2), generation=0)
+        runtime._state_slot.put_nowait(snapshot)
+        runtime.get_data()
+        self.assertFalse(select.select([runtime.notification_socket], [], [], 0)[0])
+        snapshot["right"].update(applied=(1, 2), generation=0)
+        runtime._state_slot.put_nowait(snapshot)
+        runtime.get_data()
+        self.assertTrue(select.select([runtime.notification_socket], [], [], 0)[0])
+        runtime.drain_notifications()
+        # Subsequent measurements of the same application do not retrigger it.
+        runtime._state_slot.put_nowait(snapshot)
+        runtime.get_data()
+        self.assertFalse(select.select([runtime.notification_socket], [], [], 0)[0])
+        runtime._set_health(False)
+        self.assertTrue(select.select([runtime.notification_socket], [], [], 0)[0])
+
     def test_worker_spawn_does_not_hold_snapshot_reader_lock(self):
         runtime = self.runtime
         runtime._ctx = mp.get_context("spawn")

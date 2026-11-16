@@ -67,6 +67,12 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.assertIn("body_snapshot", frame["pipeline_timing_ms"])
         self.assertAlmostEqual(frame["feedback_diagnostics"]["source_age_ms"]["body"], 1)
 
+    def test_runtimes_without_notifications_keep_periodic_fallback(self):
+        self.receiver._hand_runtime = SimpleNamespace()
+        self.assertEqual(self.pipeline.get_idle_notifications(), ())
+        self.pipeline.service_idle_notifications()
+        self.assertEqual(self.feedback.socket.frames, [])
+
     def test_publication_diagnostics_label_previous_send_and_keep_original_deadline(self):
         first = self.publish()
         self.clock.return_value = 10.02

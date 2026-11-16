@@ -68,6 +68,69 @@ class MeasurementRecoveryTests(unittest.TestCase):
                 self.assertEqual(states[2]["consecutive_failures"], 0)
                 self.assertIsNone(states[2]["last_read_error"])
 
+    def test_command_wakes_worker_without_waiting_for_next_measurement(self):
+        self._exercise_command_wakeup(block_read=False)
+
+    def test_command_waits_for_ongoing_read_without_concurrent_sdk_access(self):
+        self._exercise_command_wakeup(block_read=True)
+
+    def _exercise_command_wakeup(self, *, block_read):
+        stop, wake = threading.Event(), threading.Event()
+        reading, release, written = threading.Event(), threading.Event(), threading.Event()
+        commands, published = queue.Queue(), queue.Queue()
+        gate = mp.get_context("spawn").Array("q", [1, 1, 0])
+        hand, fail = Mock(), Mock()
+        owners = []
+
+        def read():
+            owners.append(threading.get_ident())
+            reading.set()
+            if block_read:
+                release.wait(2)
+            return [0.0] * 19
+
+        def write(_):
+            owners.append(threading.get_ident())
+            written.set()
+
+        hand.get_all_joint_angles.side_effect = read
+        hand.set_all_active_joint_angles.side_effect = write
+        worker = threading.Thread(
+            target=_hand_loop,
+            args=(
+                OmniHandCfg(joint_state_fps=1),
+                "left",
+                hand,
+                commands,
+                stop,
+                gate,
+                lambda _, state: published.put(state),
+                fail,
+                None,
+                wake,
+            ),
+        )
+        worker.start()
+        try:
+            self.assertTrue(reading.wait(1))
+            if not block_read:
+                published.get(timeout=1)  # Initial measurement is complete.
+            commands.put((1, time.monotonic() + 2, (1, 2), [0.0] * 12, time.monotonic()))
+            wake.set()
+            if block_read:
+                self.assertFalse(written.wait(0.03))
+                release.set()
+            self.assertTrue(written.wait(0.3), "command waited for the 1-second measurement period")
+            self.assertEqual(hand.get_all_joint_angles.call_count, 1)
+            self.assertEqual(len(set(owners)), 1)
+            fail.assert_not_called()
+        finally:
+            stop.set()
+            release.set()
+            wake.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+
     def test_stale_other_hand_prevents_write_at_dispatch(self):
         stop = threading.Event()
         gate = mp.get_context("spawn").Array("q", [1, 1])

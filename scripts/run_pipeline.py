@@ -7,6 +7,7 @@ if platform.machine().startswith("aarch64"):
 
 import argparse
 import logging
+import select
 import time
 
 import robojudo.pipeline
@@ -15,6 +16,21 @@ from robojudo.pipeline.pipeline_cfgs import RlPipelineCfg
 from robojudo.pipeline.rl_pipeline import RlPipeline
 
 logger = logging.getLogger("robojudo")
+
+
+def wait_for_pipeline(pipeline, deadline):
+    """Service completion on the control thread without advancing its next tick."""
+    notifications = getattr(pipeline, "get_idle_notifications", lambda: ())()
+    while not getattr(pipeline, "should_exit", False):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        if not notifications:
+            time.sleep(remaining)
+            return
+        ready, _, _ = select.select(notifications, (), (), remaining)
+        if ready:
+            pipeline.service_idle_notifications()
 
 
 def parse_args():
@@ -99,16 +115,16 @@ def main():
             logger.warning("Sim mode — holding default pose, press R to start motion")
 
         while not getattr(pipeline, "should_exit", False):
-            time_start = time.time()
+            time_start = time.monotonic()
             pipeline.step()
-            time_end = time.time()
+            time_end = time.monotonic()
             time_diff = time_end - time_start
 
             # keep the pipeline running at the desired frequency
             if not cfg.run_fullspeed:
                 time_diff = pipeline.dt - time_diff
                 if time_diff > 0:
-                    time.sleep(time_diff)
+                    wait_for_pipeline(pipeline, time_start + pipeline.dt)
                 elif not cfg.env.is_sim:
                     logger.error(f"Warning: frame drop -> {time_diff}")
                     if time_diff < -0.2:

@@ -8,6 +8,7 @@ import logging
 import multiprocessing as mp
 import pickle
 import queue
+import socket
 import threading
 import time
 
@@ -315,7 +316,7 @@ def _publish_state(channel, value):
             pass
 
 
-def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurements=None):
+def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurements=None, wake=None):
     """Serialize calls on one handle, publishing writes before the next read."""
     state = {
         "positions": None,
@@ -325,6 +326,8 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurement
         "commanded_at": None,
         "write_started_at": None,
         "write_completed_at": None,
+        "read_started_at": None,
+        "read_completed_at": None,
         "generation": None,
         "consecutive_failures": 0,
         "last_read_error": None,
@@ -345,9 +348,14 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurement
             )
             return fresh and not stop.is_set() and gate[0] == generation and gate[1] == 1 and now <= deadline
 
+    period = 1.0 / cfg.joint_state_fps
+    next_measurement = time.monotonic()
     try:
         while not stop.is_set():
-            cycle_started = time.monotonic()
+            # Clear before reading the queue: a concurrent enqueue either becomes
+            # visible here or leaves a wakeup for the wait below.
+            if wake is not None:
+                wake.clear()
             try:
                 generation, deadline, identity, angles, submitted_at = commands.get_nowait()
             except queue.Empty:
@@ -369,8 +377,14 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurement
                     publish(side, state.copy())
             if stop.is_set():
                 return
+            now = time.monotonic()
+            if now < next_measurement:
+                delay = min(next_measurement - now, 0.005)
+                (stop if wake is None else wake).wait(delay)
+                continue
             stage = "read measurements"
             sampled_at = time.monotonic()
+            state["read_started_at"] = sampled_at
             try:
                 angles = np.asarray(hand.get_all_joint_angles(), dtype=float)
                 if angles.shape != (19,) or not np.isfinite(angles).all():
@@ -397,8 +411,11 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurement
                 if measurements is not None:
                     with gate.get_lock():
                         measurements[0 if side == "left" else 1] = sampled_at
+            state["read_completed_at"] = time.monotonic()
             publish(side, state.copy())
-            stop.wait(max(0.0, 1.0 / cfg.joint_state_fps - (time.monotonic() - cycle_started)))
+            now = time.monotonic()
+            next_measurement += max(1, int((now - next_measurement) / period) + 1) * period
+            (stop if wake is None else wake).wait(min(max(0.0, next_measurement - now), 0.005))
     except Exception as exc:
         fail(side, stage, exc)
 
@@ -407,6 +424,7 @@ def _worker(cfg, commands, states, stop, gate, errors, measurements=None):
     """Initialize sequentially, then give each handle its own I/O thread."""
     hands, snapshot, threads = {}, {}, []
     local_commands = {side: queue.Queue(1) for side in ("left", "right")}
+    command_wakes = {side: threading.Event() for side in ("left", "right")}
     snapshot_lock = threading.Lock()
     failure_lock = threading.Lock()
     failed = False
@@ -451,7 +469,18 @@ def _worker(cfg, commands, states, stop, gate, errors, measurements=None):
         for side in ("left", "right"):
             thread = threading.Thread(
                 target=_hand_loop,
-                args=(cfg, side, hands[side], local_commands[side], stop, gate, publish, fail, measurements),
+                args=(
+                    cfg,
+                    side,
+                    hands[side],
+                    local_commands[side],
+                    stop,
+                    gate,
+                    publish,
+                    fail,
+                    measurements,
+                    command_wakes[side],
+                ),
                 daemon=True,
                 name=f"omnihand-{side}",
             )
@@ -475,6 +504,7 @@ def _worker(cfg, commands, states, stop, gate, errors, measurements=None):
                 for index, side in enumerate(("left", "right")):
                     message = (generation, deadline, identity, angles[index * 12 : (index + 1) * 12], submitted_at)
                     _publish_state(local_commands[side], message)
+                    command_wakes[side].set()
             stop.wait(0.001)
     except Exception as exc:
         fail(side, "connect/start worker", exc)
@@ -519,6 +549,9 @@ class OmniHandRuntime:
         self._initial_targets = None
         self._attempt_ready = False
         self._seen_outages = 0
+        self._notification_reader, self._notification_writer = socket.socketpair()
+        self._notification_reader.setblocking(False)
+        self._notification_writer.setblocking(False)
         self._supervisor = threading.Thread(target=self._supervise, name="omnihand-supervisor", daemon=True)
         self._supervisor.start()
         try:
@@ -528,6 +561,28 @@ class OmniHandRuntime:
         except Exception:
             self.close()
             raise
+
+    @property
+    def notification_socket(self):
+        """Stable across reconnects; readiness is a hint to inspect authoritative state."""
+        return self._notification_reader
+
+    def _notify(self):
+        writer = getattr(self, "_notification_writer", None)
+        if writer is not None:
+            try:
+                writer.send(b"\x01")
+            except (BlockingIOError, OSError):
+                # A full socket already has a wakeup; shutdown may close it.
+                pass
+
+    def drain_notifications(self):
+        for _ in range(32):
+            try:
+                if not self._notification_reader.recv(4096):
+                    break
+            except BlockingIOError:
+                break
 
     def _start_worker(self):
         # A killed native process may leave IPC locks held. Each attempt gets
@@ -588,6 +643,7 @@ class OmniHandRuntime:
             self._stream_generation += 1
             self._pending = None
             self._healthy = healthy
+            self._notify()
             with self._gate.get_lock():
                 self._gate[0] += 1
                 self._gate[1] = 0
@@ -616,7 +672,17 @@ class OmniHandRuntime:
         if record is None:
             return None
         sequence, published_at, snapshot = record
+        previous = tuple(
+            (self._states.get(side, {}).get("applied"), self._states.get(side, {}).get("generation"))
+            for side in ("left", "right")
+        )
         self._merge_snapshot(snapshot)
+        current = tuple(
+            (self._states.get(side, {}).get("applied"), self._states.get(side, {}).get("generation"))
+            for side in ("left", "right")
+        )
+        if current != previous and current[0][0] is not None and current[0] == current[1]:
+            self._notify()
         self._snapshot_sequence = sequence
         self._snapshot_published_at = published_at
         self._snapshot_received_at = time.monotonic()
@@ -929,6 +995,8 @@ class OmniHandRuntime:
                     ("submitted", "commanded_at"),
                     ("write_started", "write_started_at"),
                     ("write_completed", "write_completed_at"),
+                    ("read_started", "read_started_at"),
+                    ("read_completed", "read_completed_at"),
                 )
                 if applied is not None and state.get(key) is not None
             },
@@ -965,3 +1033,5 @@ class OmniHandRuntime:
         self._supervisor.join(timeout=3)
         if self._supervisor.is_alive():
             raise RuntimeError("OmniHand supervisor did not stop")
+        self._notification_reader.close()
+        self._notification_writer.close()

@@ -737,14 +737,25 @@ class CombinedFeedbackTests(unittest.TestCase):
         runtime.submit.assert_called_once()
         self.assertGreaterEqual(self.feedback.command_counts["superseded"], 1)
 
+        # Completion can be observed between control ticks without environment I/O.
         snapshot["applied"] = pending[1]
-        pipeline._publish_upper_body_feedback(None, target)
+        self.clock.return_value = 10.01
+        env.step.reset_mock()
+        env.get_joint_feedback = Mock(side_effect=AssertionError("idle feedback must reuse body measurements"))
+        pipeline.service_idle_notifications()
+        runtime.drain_notifications.assert_called_once()
+        env.step.assert_not_called()
+        env.get_joint_feedback.assert_not_called()
         state = self.feedback.socket.frames[-1]
         self.assertEqual(state["applied_frame_id"], 1)
         self.assertEqual(state["applied_bridge_id"], "test")
         self.assertEqual(state["last_commanded_positions"], first["positions"])
         self.assertEqual(state["command_id"], 1)
         self.assertIsNone(receiver.pending)
+        pipeline.service_idle_notifications()
+        self.assertEqual(self.feedback.command_id, 1)
+        self.assertAlmostEqual(self.feedback.socket.frames[-1]["joint_age_s"]["arm"], 0.01)
+        self.assertEqual(set(pipeline._upper_body_feedback_body["positions"]), {"arm"})
         # The queued frame was checked against the previous completed baseline.
         select()
         self.assertIsNone(pipeline._upper_body_pending)
