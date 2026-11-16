@@ -373,6 +373,18 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.assertIn("Rejected upper-body ZMQ message", logs.output[0])
         self.assertIn("expired", logs.output[0])
 
+    def test_completion_timestamps_follow_acknowledged_proposal_and_reset(self):
+        state = self.publish()
+        proposal = self.proposal(state)
+        proposal["_command_timestamps"] = {"received": 9.98, "acknowledged": 9.99}
+        self.feedback.acknowledge(proposal)
+        frame = self.publish()
+        stamps = frame["feedback_diagnostics"]["command_timestamps"]
+        self.assertEqual(stamps, {"received": 9.98, "acknowledged": 9.99, "feedback_built": 10.0})
+        self.assertEqual(frame["applied_frame_id"], proposal["frame_id"])
+        self.feedback.reset()
+        self.assertNotIn("command_timestamps", self.publish()["feedback_diagnostics"])
+
     def test_ack_keeps_fresh_visualization_but_rejects_old_command_baseline(self):
         state = self.publish()
         proposal = self.proposal(state)

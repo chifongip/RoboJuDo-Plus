@@ -134,6 +134,17 @@ class TestOmniHandRuntime(unittest.TestCase):
         self.runtime = runtime
         self.positions = dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.0)
 
+    def test_write_timestamps_require_matching_dual_hand_completion(self):
+        for state in self.runtime._states.values():
+            state.update(
+                applied=(1, 2), generation=0, commanded_at=9.98, write_started_at=9.99, write_completed_at=10.0
+            )
+        snapshot = self.runtime.get_data()
+        self.assertEqual(snapshot["command_timestamps"]["left_write_started"], 9.99)
+        self.assertEqual(snapshot["command_timestamps"]["right_write_completed"], 10.0)
+        self.runtime._states["right"]["applied"] = (1, 3)
+        self.assertEqual(self.runtime.get_data()["command_timestamps"], {})
+
     def test_disabled_dex_frames_do_not_enqueue_hardware_work(self):
         self.runtime.set_joint_commands(np.zeros(12), np.zeros(12), 123, 1)
         with self.assertRaises(queue.Empty):

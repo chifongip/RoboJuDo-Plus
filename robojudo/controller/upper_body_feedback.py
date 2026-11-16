@@ -34,6 +34,7 @@ class UpperBodyFeedback:
         self.applied_bridge_id = None
         self.applied_frame_id = None
         self._completed_positions = None
+        self._command_timestamps = {}
         self.command_counts = dict.fromkeys(("received", "superseded", "rejected", "completed"), 0)
         self.state_id = 0
         self.intent = "HOLD"
@@ -73,6 +74,7 @@ class UpperBodyFeedback:
         self.applied_bridge_id = None
         self.applied_frame_id = None
         self._completed_positions = None
+        self._command_timestamps = {}
 
     def expire_tracking(self, now):
         if (
@@ -139,6 +141,9 @@ class UpperBodyFeedback:
             source: value if value is not None and math.isfinite(value) else None
             for source, value in feedback_diagnostics["source_age_ms"].items()
         }
+        if self._command_timestamps:
+            # All stamps use the robot host monotonic clock, including its workers.
+            feedback_diagnostics["command_timestamps"] = {**self._command_timestamps, "feedback_built": now}
         frame = {
             "schema_version": self.schema_version,
             "type": "upper_body_state",
@@ -311,9 +316,11 @@ class UpperBodyFeedback:
             self.applied_bridge_id = proposal["bridge_id"]
             self.applied_frame_id = proposal["frame_id"]
             self._completed_positions = dict(proposal["positions"])
+            self._command_timestamps = dict(proposal.get("_command_timestamps", {}))
         else:
             self.applied_bridge_id = self.applied_frame_id = None
             self._completed_positions = None
+            self._command_timestamps = {}
         # Command IDs invalidate old proposals. Keep the bounded snapshots until
         # their deadlines so acknowledgement does not discard valid overlays.
 

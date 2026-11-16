@@ -136,6 +136,7 @@ class UpperBodyZmqCtrl(Controller):
             decoded[name] = value
         if self.feedback is not None:
             self.feedback.validate(message, decoded, receiving=True)
+            message["_command_timestamps"] = {"received": time.monotonic()}
             self.feedback.command_counts["received"] += 1
             if self._proposal is not None:
                 self.feedback.command_counts["superseded"] += 1

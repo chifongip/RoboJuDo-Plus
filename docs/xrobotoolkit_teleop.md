@@ -229,6 +229,24 @@ uncompleted proposals remain bounded and cannot advance the solver's accepted hi
 
 With `--xr-diagnostics`, `XR` reports observed SDK timestamp updates, and `publish` reports sent command frames per
 second. `completion_latency` reports asynchronous send-to-observed-completion latency; it does not pace publishing.
+The additional `Completion p95 (ms)` line breaks down matched completions:
+
+- `robot_admission`: robot receipt/validation to hand submission, including waiting behind an in-flight command.
+- `left_hand_queue` / `right_hand_queue`: runtime enqueue to hardware write start, including IPC, worker scheduling,
+  an ongoing measurement read, and rate-limit sleep.
+- `left_hand_write` / `right_hand_write`: duration of each SDK write call.
+- `completion_observation`: last hand write completion to the robot observing both writes and acknowledging.
+- `robot_ack_wait`: acknowledgement to feedback construction.
+- `robot_total`: robot receipt/validation to feedback construction.
+- `transport_and_poll`: bridge round-trip latency minus `robot_total`, covering command/feedback transport, socket
+  queues, feedback encoding/send, and polling at either end. It cannot distinguish network delay from polling waits.
+
+Raw robot-host monotonic timestamps are included in `feedback_diagnostics.command_timestamps` and belong to the
+feedback's `applied_bridge_id` / `applied_frame_id`. They clear on generation reset. Robot workers share that clock;
+the bridge compares durations only, so robot and bridge hosts do not need synchronized clocks. Hand branches overlap,
+and each p95 is calculated independently, so adding the displayed percentiles does not reconstruct total p95.
+Older peers without these optional timestamps continue operating without a breakdown.
+
 Robot `received`, `superseded`, `rejected`, and `completed` counters are cumulative diagnostics for command selection.
 The former `ack_wait` diagnostic has been removed. Expired solver transactions are discarded separately from the
 bounded completion metadata, so a late confirmation still contributes to completion counts and latency without

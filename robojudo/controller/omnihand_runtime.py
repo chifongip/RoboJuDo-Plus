@@ -323,6 +323,8 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurement
         "applied": None,
         "targets": None,
         "commanded_at": None,
+        "write_started_at": None,
+        "write_completed_at": None,
         "generation": None,
         "consecutive_failures": 0,
         "last_read_error": None,
@@ -354,7 +356,9 @@ def _hand_loop(cfg, side, hand, commands, stop, gate, publish, fail, measurement
                 state["applied"], state["generation"] = None, None
                 if allowed(generation, deadline):
                     stage = "write"
+                    state["write_started_at"] = time.monotonic()
                     hand.set_all_active_joint_angles(angles)
+                    state["write_completed_at"] = time.monotonic()
                     # In-flight writes cannot be undone, even after revocation.
                     state["targets"], state["commanded_at"] = angles, submitted_at
                     if allowed(generation, deadline):
@@ -918,6 +922,16 @@ class OmniHandRuntime:
             "sample_times": stamps,
             "targets": commands,
             "applied": applied,
+            "command_timestamps": {
+                f"{side}_{label}": state[key]
+                for side, state in self._states.items()
+                for label, key in (
+                    ("submitted", "commanded_at"),
+                    ("write_started", "write_started_at"),
+                    ("write_completed", "write_completed_at"),
+                )
+                if applied is not None and state.get(key) is not None
+            },
             "joint_names": list(OMNIHAND_JOINT_NAMES),
             "joint_positions": np.array([measured.get(n, 0) for n in OMNIHAND_JOINT_NAMES], dtype=np.float32),
             "joint_position_commands": np.array([commands.get(n, 0) for n in OMNIHAND_JOINT_NAMES], dtype=np.float32),

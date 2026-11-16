@@ -316,6 +316,7 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
 
     def submit_hands(self, proposal):
         self.synchronize_generation()
+        proposal.setdefault("_command_timestamps", {})["hand_submitted"] = time.monotonic()
         deadline = self.feedback._states[proposal["state_id"]][0]
         identity = (proposal["generation"], proposal["frame_id"])
         if self._hand_runtime is None:
@@ -345,6 +346,10 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
             return False
         if self._hand_runtime is not None and state["applied"] != identity:
             return False
+        stamps = proposal.setdefault("_command_timestamps", {})
+        stamps["acknowledged"] = time.monotonic()
+        if applied:
+            stamps.update(state.get("command_timestamps", {}))
         self.feedback.acknowledge(proposal)
         if self._hand_runtime is not None:
             self._hand_runtime.acknowledge()

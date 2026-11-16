@@ -313,6 +313,8 @@ class OmniHandPro2025:
         state = states.get_nowait()
         self.assertTrue(errors.empty())
         self.assertEqual(state["targets"], [0.1] * 12)
+        self.assertEqual(state["write_started_at"], 10.0)
+        self.assertEqual(state["write_completed_at"], 10.2)
         self.assertIsNone(state["applied"])
         self.assertIsNone(state["generation"])
 
