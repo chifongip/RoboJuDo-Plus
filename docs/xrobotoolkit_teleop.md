@@ -600,7 +600,7 @@ with the updated XR bridge and the same local hand serial configuration used by
 trigger-proportional grasp target without the bridge's finger velocity ramp.
 The robot accepts those larger finger steps only when both sides explicitly
 agree on `hand_command_mode=direct`. Arm limits and collision checks remain active.
-The original preset retains `velocity_limited` behavior.
+The original preset uses `filtered` finger targets.
 
 The experiment preserves the device's existing control mode and motor speed
 settings. It does not establish a firmware speed cap. SDK read/write scheduling
@@ -622,8 +622,12 @@ and predicts the exact float32 targets produced by RoboJuDo's EMA/velocity filte
 It collision-checks those issued targets; RoboJuDo reproduces them before admission.
 Update both peers together: proposals without the contract or with inconsistent
 predictions are rejected. XR presets keep `ema_alpha=0.0`; the general configuration
-default remains 0.95. `filtered` replaces the old finger ramp; `velocity_limited`
-is accepted as a legacy spelling. Direct fingers retain device-managed motion.
+default remains 0.95. The supported finger command modes are `filtered` and `direct`.
+Filtered fingers use the shared EMA/velocity filter; direct fingers retain device-managed motion.
+
+Bridge settings and per-joint model velocity limits first bound desired targets; the
+robot-owned filter then applies its configured EMA and velocity cap. Direct finger
+targets bypass both velocity filters.
 
 Filtering advances from the acknowledged issued baseline, not from unsent bridge
 proposals. It never autonomously advances during missing proposals or pending hand

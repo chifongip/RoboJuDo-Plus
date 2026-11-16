@@ -168,7 +168,7 @@ class UpperBodyFeedback:
             "feedback_diagnostics": feedback_diagnostics,
         }
         if self.schema_version == 2:
-            frame["hand_command_mode"] = getattr(self.cfg, "hand_command_mode", "velocity_limited")
+            frame["hand_command_mode"] = getattr(self.cfg, "hand_command_mode", "filtered")
             frame["hand_velocity_limit"] = self.cfg.hand_velocity_limit
         if self.cfg.xr_target_filter:
             frame["filter_contract"] = "robojudo_filter_v1"
@@ -239,12 +239,8 @@ class UpperBodyFeedback:
         status = message.get("status")
         if status not in {"tracking", "homing"} or (self.intent == "HOME" and status != "homing"):
             raise ValueError("proposal status is incompatible with its control intent")
-        hand_mode = feedback.get("hand_command_mode", "velocity_limited")
-        proposed_mode = message.get("hand_command_mode", "velocity_limited")
-        if proposed_mode == "velocity_limited":
-            proposed_mode = "filtered"
-        if hand_mode == "velocity_limited":
-            hand_mode = "filtered"
+        hand_mode = feedback.get("hand_command_mode", "filtered")
+        proposed_mode = message.get("hand_command_mode", "filtered")
         if self.schema_version == 2 and proposed_mode != hand_mode:
             raise ValueError("finger command mode mismatch")
         if self.cfg.xr_target_filter:

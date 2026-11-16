@@ -23,3 +23,7 @@ class TargetFilterTests(unittest.TestCase):
         args = ({"joint": 1.0}, {"joint": 0.0}, {"joint": [-1, 1]}, {"joint": 100}, 0.02)
         self.assertEqual(filter_targets(*args, 0)["joint"], 1)
         self.assertAlmostEqual(filter_targets(*args, 0.95)["joint"], 0.05)
+
+    def test_incompatible_position_and_velocity_bounds_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "no float32 target"):
+            filter_targets({"joint": 1.0}, {"joint": 0.0}, {"joint": [0.5, 1]}, {"joint": 1}, 0.02, 0)
