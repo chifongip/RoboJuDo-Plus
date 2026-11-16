@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
+from robojudo.controller.ctrl_cfgs import UpperBodyOmniHandZmqCtrlCfg, UpperBodyZmqCtrlCfg
 from robojudo.recording import RecorderClient
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,11 @@ class UpperBodyZmqPipelineMixin:
         self._recording_review_pending = False
         super().__init__(cfg=cfg)
         self._configure_upper_body_override()
+        if (
+            isinstance(self._upper_body_cfg, UpperBodyOmniHandZmqCtrlCfg)
+            and self._upper_body_cfg.omnihand.direct_completion_notifications
+        ):
+            logger.info("Upper-body completion checkpoints enabled before and after policy inference")
         if cfg.record.enabled:
             if self._upper_body_cfg is None:
                 raise ValueError("recording requires an UpperBodyZmqCtrl configuration")
@@ -321,6 +326,58 @@ class UpperBodyZmqPipelineMixin:
         if getattr(self, "_upper_body_feedback_body", None) is not None:
             self._publish_upper_body_feedback(None, None, idle=True)
 
+    def _service_upper_body_completion_checkpoint(self, source, *, dry_run=False):
+        """Observe an already issued frame on the owner thread; never select a new one.
+
+        None means the checkpoint is disabled. False means no completion was
+        serviced. Keep recording on its existing path, without new bookkeeping.
+        """
+        cfg = getattr(self, "_upper_body_cfg", None)
+        if (
+            dry_run
+            or getattr(self, "_recording_active", False)
+            or not isinstance(cfg, UpperBodyOmniHandZmqCtrlCfg)
+            or not cfg.omnihand.direct_completion_notifications
+        ):
+            return None
+        receiver = self._feedback_receiver()
+        if (
+            receiver is None
+            or receiver.feedback.schema_version != 2
+            or getattr(receiver, "_hand_runtime", None) is None
+            or getattr(self, "_upper_body_feedback_body", None) is None
+            or self._upper_body_pending is not None
+            or receiver.pending is None
+            or not self._upper_body_control_available()
+        ):
+            return False
+        pending = receiver.pending
+        proposal, identity, _ = pending
+        intent = self._feedback_intent()
+        if (
+            intent not in {"TRACK", "HOME"}
+            or proposal["intent"] != intent
+            or receiver.feedback.intent != intent
+            or proposal["session_id"] != receiver.feedback.session_id
+            or proposal["generation"] != receiver.feedback.generation
+            or proposal.get("_command_timestamps", {}).get("arm_submission_completed") is None
+        ):
+            return False
+        try:
+            state = receiver.hand_snapshot()
+            if receiver.pending is not pending or not state["fresh"] or state["applied"] != identity:
+                return False
+            # Publication re-reads state and uses the same completion checks as
+            # idle/post-step servicing. It cannot re-submit a hardware command.
+            before = receiver.feedback.command_id
+            self._publish_upper_body_feedback(None, None, idle=True, observation_source=source)
+            return receiver.feedback.command_id != before
+        except (RuntimeError, ValueError, KeyError) as exc:
+            receiver.invalidate(str(exc), recoverable=isinstance(exc, ValueError | KeyError))
+            self._upper_body_pending = None
+            self._upper_body_stream_was_fresh = False
+            return False
+
     def _record_upper_body_submission(self, receiver, pd_target):
         if not self._upper_body_command_submitted:
             return
@@ -334,7 +391,7 @@ class UpperBodyZmqPipelineMixin:
                 receiver.acknowledge(self._upper_body_pending)
         self._upper_body_pending = None
 
-    def _publish_upper_body_feedback(self, env_data, pd_target, *, idle=False):
+    def _publish_upper_body_feedback(self, env_data, pd_target, *, idle=False, observation_source=None):
         assembly_started = time.perf_counter()
         receiver = self._feedback_receiver()
         if receiver is None or not self._upper_body_indices.size:
@@ -354,7 +411,9 @@ class UpperBodyZmqPipelineMixin:
                 timing["hand_snapshot"] = 1000 * (time.perf_counter() - started)
                 tracking = receiver.pending is not None and receiver.pending[0]["status"] == "tracking"
                 self._upper_body_stream_was_fresh = (
-                    receiver.finish_pending(hand_state, observation_source="idle" if idle else "periodic")
+                    receiver.finish_pending(
+                        hand_state, observation_source=observation_source or ("idle" if idle else "periodic")
+                    )
                     and tracking
                     and self._upper_body_enabled
                 )

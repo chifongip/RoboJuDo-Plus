@@ -323,7 +323,9 @@ class UpperBodyFeedback:
 
     def acknowledge(self, proposal=None):
         source = None if proposal is None else proposal.get("_completion_observation_source")
-        self._completion_observation_source = source if source in ("idle", "periodic") else None
+        self._completion_observation_source = (
+            source if source in ("idle", "periodic", "before_policy", "after_policy") else None
+        )
         self._first_feedback_built = None
         self.command_id += 1
         self.command_counts["completed"] += 1

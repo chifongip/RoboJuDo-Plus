@@ -350,6 +350,13 @@ class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
                 self.assertEqual(len({frame["frame_id"] for frame in frames}), len(frames))
                 self.assertIsNone(child.poll())
 
+    def test_delayed_hand_writes_with_policy_checkpoints(self):
+        self.pipeline._upper_body_cfg.omnihand.direct_completion_notifications = True
+        self.receiver.cfg_ctrl.omnihand.direct_completion_notifications = True
+        self.test_delayed_hand_writes_do_not_pace_bridge_publishing()
+        self.assertIn("checkpoint_before", self.pipeline._upper_body_timing_ms)
+        self.assertIn("checkpoint_after", self.pipeline._upper_body_timing_ms)
+
     def test_independent_triggers_and_home_holds_fingers(self):
         child = self.start_bridge()
         self.wait_until(lambda: self.receiver.feedback.command_id > 0)

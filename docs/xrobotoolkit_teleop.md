@@ -258,7 +258,7 @@ and each p95 is calculated independently, so adding the displayed percentiles do
 `first_feedback_built` is frozen only after a successful local ZeroMQ send; a failed nonblocking send retries with
 another candidate timestamp. Successful enqueue does not guarantee subscriber delivery. With older robots,
 `robot_ack_wait` and `robot_total` fall back to the processed snapshot's `feedback_built` timestamp.
-`Completion observations: idle=..., periodic=...` reports where matching frames were acknowledged in the reporting
+`Completion observations: idle=..., periodic=..., before_policy=..., after_policy=...` reports where matching frames were acknowledged in the reporting
 window. Older peers without these optional timestamps continue operating without a breakdown.
 
 Hand commands now wake each SDK-owning thread instead of waiting for its next measurement tick. Reads stay at
@@ -273,7 +273,8 @@ The bridge also receives feedback between publication deadlines, without running
 Arms and both hands retain one proposal identity and one combined frame in flight; partial completion cannot advance
 the baseline. Physical writes remain separate and cannot be rolled back if a later component fails.
 
-The next-phase worker notification path is opt-in. Use the existing verified hand identities and robot setup with:
+The existing low-latency configuration enables worker notifications and completion checkpoints. Use the same
+verified hand identities and robot setup with:
 
 ```bash
 python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_real_direct_low_latency
@@ -291,9 +292,23 @@ The worker signals the existing nonblocking readiness socket only after publishi
 If the snapshot slot is busy, the dispatcher retries publication without waiting for another SDK read. Hints never
 authorize a command or replace generation/freshness checks. The supervisor still owns health and reconnects;
 periodic completion checks and supervisor hints remain available. The pipeline's existing idle/post-step service
-points, control frequency, submission order, and combined-frame barrier are unchanged. No new native calls release
+points remain in place; this configuration also enables guarded checks before and after policy inference. Control
+frequency, submission order, and the combined-frame barrier are unchanged. No new native calls release
 the GIL, no additional thread issues hardware commands, and no SDK timeout or CPU/thread setting changes.
-Select the original direct configuration to roll back the notification optimization.
+No additional profile or opt-in flag is needed for these checkpoints: selecting
+`x2_xrobotoolkit_omnihand_real_direct_low_latency` enables them through the existing direct-notification setting.
+The first check runs after intent/safety handling and immediately before inference; the second runs after inference
+and before refreshing proposals/selecting the next command. Only a pending frame with successful arm submission,
+matching intent/session/generation, and fresh matching dual-hand completion can be acknowledged. Each checkpoint
+reuses the existing completion routine and cached body feedback, and publishes nothing when no completed frame is
+ready. No new acknowledgement states, hardware writer, or control step is introduced. Dry-run and active recording
+keep the existing completion path; recorder bookkeeping is unchanged.
+
+`Processing p95 (ms)` additionally reports `checkpoint_before` and `checkpoint_after`, including eligible no-op
+checks. These costs are excluded from `policy`. Acknowledgement source labels distinguish these checkpoints from
+idle and periodic post-step servicing. Optional fields remain compatible with older peers.
+
+Select the original direct configuration to roll back the notification and checkpoint optimizations.
 
 For phase 2, compare three 60-second Jetson runs per mode using the same updated timing metadata and workload.
 Targets are completion-observation p95 below 8 ms and round-trip p95 below 35 ms, with hand-queue performance retained.

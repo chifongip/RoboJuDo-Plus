@@ -133,6 +133,6 @@ def _low_latency_direct_hand_controllers():
 
 @cfg_registry.register
 class x2_xrobotoolkit_omnihand_real_direct_low_latency(x2_xrobotoolkit_omnihand_real_direct):
-    """Opt-in worker completion notifications with unchanged combined-frame control."""
+    """Direct worker notifications and policy-boundary checks with combined-frame control."""
 
     ctrl: XRHandControllers = _low_latency_direct_hand_controllers()

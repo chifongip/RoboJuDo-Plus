@@ -142,8 +142,17 @@ class LocomanipulationLocoMimicPipelineMixin:
             self._set_upper_body_enabled(False)
 
         started = time.perf_counter()
+        before_checkpoint = self._service_upper_body_completion_checkpoint("before_policy", dry_run=dry_run)
+        before_ms = 1000 * (time.perf_counter() - started)
+        started = time.perf_counter()
         pd_target, extras = self._get_policy_step(env_data, ctrl_data)
         self._upper_body_timing_ms = {"policy": 1000 * (time.perf_counter() - started)}
+        if before_checkpoint is not None:
+            self._upper_body_timing_ms["checkpoint_before"] = before_ms
+        started = time.perf_counter()
+        after_checkpoint = self._service_upper_body_completion_checkpoint("after_policy", dry_run=dry_run)
+        if after_checkpoint is not None:
+            self._upper_body_timing_ms["checkpoint_after"] = 1000 * (time.perf_counter() - started)
         self._refresh_upper_body_feedback(ctrl_data)
         upper_body_override_available = self._upper_body_control_available()
         if upper_body_override_available:
