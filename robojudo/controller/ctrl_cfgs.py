@@ -283,6 +283,10 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
     max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
     feedback_endpoint: str | None = None
     """Opt into versioned, externally collision-checked proposals and robot feedback."""
+    command_receive_hwm: int = Field(default=100, ge=1, le=100)
+    """Command SUB queue limit; XR presets use 8 while legacy presets retain 100."""
+    feedback_send_hwm: int = Field(default=1, ge=1, le=8)
+    """Feedback PUB queue limit; 8 is available for the measured acknowledgement-delivery experiment."""
     visualize_targets: bool = False
     """Request torso-relative hand target frames for optional simulation overlays."""
     feedback_timeout_s: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)

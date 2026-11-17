@@ -122,8 +122,8 @@ p95 from receipt to actual diagnostic processing in both paths. This is a report
 correction, not evidence of faster execution.
 
 The required 5 ms consistent response gain was not met. The traces also did not
-justify the conditional feedback-buffer experiment, so feedback PUB's queue
-limit remains one; no new buffer setting or transport was introduced.
+justify changing the default feedback PUB queue limit of one. The later Jetson
+experiment below can now be configured without editing source code.
 
 For Jetson validation, collect three paired 30-second runs in holding and slow
 combined arm/finger motion, alternating comparison order and keeping collision
@@ -135,3 +135,69 @@ the changed duration; never compare an overflowed trace as a complete run.
 If only diagnostic RTT improves, retain the execution path and stop this optimization.
 The local run cannot reproduce native HCAN workers, idle completion notifications,
 or the Jetson's reported 40 ms delay.
+
+
+## ZMQ queue settings after the Jetson experiment
+
+The supplied Jetson traces showed 685/821 first acknowledgements absent at send
+HWM=1 and 0/1009 absent at HWM=8. Mean acknowledgement RTT fell from 34.9 to
+21.7 ms. Sample-to-write p95 increased from 26.2 to 37.1 ms, however, and the
+HWM=8 run had one generation reset. This supports testing feedback delivery with
+8, but does not establish a response improvement or justify making 8 the default.
+
+Queue settings are now explicit and logged at startup:
+
+| Socket | Setting | Default | Allowed values |
+| --- | --- | --- | --- |
+| RoboJuDo command SUB | `command_receive_hwm` | 8 for XR presets; 100 for other presets | 1–100 |
+| RoboJuDo feedback PUB | `feedback_send_hwm` | 1 | 1–8 |
+| Bridge feedback SUB | `feedback_receive_hwm` | 8 | 1–16 |
+| Bridge command PUB | unchanged | 1 | fixed |
+
+XR command receive queues previously used 100. They now use 8 to limit the
+number of waiting commands held in the ZMQ pipe when servicing falls behind.
+This is a queueing change requiring Jetson verification, not a measured latency
+improvement. The 100-message robot drain budget, 32-message bridge receive budget,
+backlog rejection, freshness deadlines, newest-valid selection, and combined-frame
+barrier are unchanged. Other presets retain their previous command receive limit.
+HWM values are message-count settings, not strict bounds on end-to-end latency;
+transport buffering and socket drop/backpressure behavior still matter.
+
+Append these options to the existing RoboJuDo launch command to test feedback
+send HWM=8 while using the new XR command receive limit:
+
+```bash
+--upper-body-feedback-send-hwm 8 --upper-body-command-receive-hwm 8
+```
+
+For the baseline, change only `--upper-body-feedback-send-hwm` to `1`. To isolate
+the command receive limit from earlier runs, use `--upper-body-command-receive-hwm
+100` consistently for both feedback comparisons, then compare 100 versus 8
+separately. Do not change both queue sizes between members of a pair.
+
+The bridge receive option is `--feedback-receive-hwm 8`; it is already the default.
+Keep it fixed for the initial feedback send comparison. For example, a
+simulation-only queue configuration check uses:
+
+```bash
+python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand \
+  --upper-body-feedback-send-hwm 8 --upper-body-command-receive-hwm 8
+python -m xrobotoolkit_teleop.integrations.robojudo \
+  --robot x2_omnihand --ik-backend lerobot --feedback-receive-hwm 8
+```
+
+Retain the current hardware preset, matching executor flag and collision options
+when testing on the Jetson. Remove manual socket edits so these settings take
+effect from validated configuration. Restart both processes and retain their
+startup queue logs with each trace.
+
+The versioned XR sockets do not use conflation: it would discard intermediate
+acknowledgements and does not preserve multipart framing. This leaves the existing
+multipart rejection intact. `LINGER=0`, nonblocking publication, and packet-size
+limits remain unchanged. See the official [ZeroMQ socket options](https://libzmq.readthedocs.io/en/latest/zmq_setsockopt.html)
+and [PUB socket behavior](https://zeromq.org/socket-api/) for these semantics.
+
+Earlier local benchmark figures in this document predate the smaller XR command
+receive queue. The configuration and protocol tests do not establish its hardware
+latency benefit; use paired Jetson traces, including reset reasons and write
+completion latency, to decide whether to retain it.

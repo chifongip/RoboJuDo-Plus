@@ -63,13 +63,14 @@ class UpperBodyFeedback:
         self.socket = context.socket(zmq.PUB)
         try:
             self.socket.setsockopt(zmq.LINGER, 0)
-            self.socket.setsockopt(zmq.SNDHWM, 1)
+            self.socket.setsockopt(zmq.SNDHWM, cfg.feedback_send_hwm)
             self.socket.bind(cfg.feedback_endpoint)
         except Exception:
             self.socket.close(linger=0)
             if self.executor is not None:
                 self.executor.close()
             raise
+        logging.getLogger(__name__).info("Upper-body feedback configured SNDHWM=%d", cfg.feedback_send_hwm)
 
     @property
     def schema_version(self):

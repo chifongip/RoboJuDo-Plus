@@ -22,6 +22,7 @@ def _xr_controllers(base):
         controller = cfg.model_copy(deep=True)
         if isinstance(cfg, UpperBodyZmqCtrlCfg):
             controller.feedback_endpoint = "tcp://127.0.0.1:8571"
+            controller.command_receive_hwm = 8
             controller.visualize_targets = base.env.is_sim
             controller.ema_alpha = 0.0
             controller.xr_target_filter = True

@@ -74,8 +74,53 @@ def parse_args():
     parser.add_argument("--upper-body-latency-trace", default=None, help="Export bounded performance trace at shutdown")
     parser.add_argument("--latency-trace-duration-s", type=float, default=30.0)
     parser.add_argument("--latency-trace-delay-s", type=float, default=0.0)
+    parser.add_argument(
+        "--upper-body-feedback-send-hwm",
+        type=int,
+        choices=range(1, 9),
+        metavar="1..8",
+        default=None,
+        help="Override the upper-body feedback PUB queue limit",
+    )
+    parser.add_argument(
+        "--upper-body-command-receive-hwm",
+        type=int,
+        choices=range(1, 101),
+        metavar="1..100",
+        default=None,
+        help="Override the upper-body command SUB queue limit",
+    )
     args = parser.parse_args()
     return args
+
+
+def configure_upper_body_transport(cfg, args):
+    """Apply bounded diagnostic/queue overrides before any sockets are created."""
+    overrides = {}
+    if getattr(args, "upper_body_latency_trace", None) is not None:
+        overrides.update(
+            latency_trace_path=args.upper_body_latency_trace,
+            latency_trace_duration_s=args.latency_trace_duration_s,
+            latency_trace_delay_s=args.latency_trace_delay_s,
+        )
+    if getattr(args, "upper_body_feedback_send_hwm", None) is not None:
+        overrides["feedback_send_hwm"] = args.upper_body_feedback_send_hwm
+    if getattr(args, "upper_body_command_receive_hwm", None) is not None:
+        overrides["command_receive_hwm"] = args.upper_body_command_receive_hwm
+    if overrides:
+        from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
+
+        controllers = [c for c in cfg.ctrl if isinstance(c, UpperBodyZmqCtrlCfg) and c.feedback_endpoint is not None]
+        if len(controllers) != 1:
+            raise ValueError("upper-body transport overrides require exactly one feedback-enabled controller")
+        controller = controllers[0]
+        updated = type(controller).model_validate(
+            {
+                **controller.model_dump(),
+                **overrides,
+            }
+        )
+        cfg.ctrl = [updated if c is controller else c for c in cfg.ctrl]
 
 
 def main():
@@ -84,22 +129,7 @@ def main():
     config_manager = ConfigManager(config_name=args.config)
 
     cfg: RlPipelineCfg = config_manager.get_cfg()
-    if args.upper_body_latency_trace is not None:
-        from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
-
-        controllers = [c for c in cfg.ctrl if isinstance(c, UpperBodyZmqCtrlCfg) and c.feedback_endpoint is not None]
-        if len(controllers) != 1:
-            raise ValueError("latency tracing requires exactly one feedback-enabled upper-body controller")
-        controller = controllers[0]
-        updated = type(controller).model_validate(
-            {
-                **controller.model_dump(),
-                "latency_trace_path": args.upper_body_latency_trace,
-                "latency_trace_duration_s": args.latency_trace_duration_s,
-                "latency_trace_delay_s": args.latency_trace_delay_s,
-            }
-        )
-        cfg.ctrl = [updated if c is controller else c for c in cfg.ctrl]
+    configure_upper_body_transport(cfg, args)
     if args.record or args.record_endpoint is not None or args.record_task is not None:
         cfg.record = type(cfg.record)(
             **{

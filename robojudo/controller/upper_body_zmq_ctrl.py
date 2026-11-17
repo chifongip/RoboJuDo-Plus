@@ -48,7 +48,7 @@ class UpperBodyZmqCtrl(Controller):
         self._socket = self._context.socket(zmq.SUB)
         try:
             self._socket.setsockopt(zmq.LINGER, 0)
-            self._socket.setsockopt(zmq.RCVHWM, _MAX_MESSAGES_PER_POLL)
+            self._socket.setsockopt(zmq.RCVHWM, cfg_ctrl.command_receive_hwm)
             self._socket.setsockopt(zmq.MAXMSGSIZE, _MAX_MESSAGE_BYTES)
             self._socket.setsockopt(zmq.SUBSCRIBE, b"")
             if self._conflate_legacy_frames and cfg_ctrl.feedback_endpoint is None:
@@ -79,7 +79,12 @@ class UpperBodyZmqCtrl(Controller):
             except Exception:
                 self._socket.close(linger=0)
                 raise
-        logger.info("%s subscribed to %s", type(self).__name__, cfg_ctrl.endpoint)
+        logger.info(
+            "%s subscribed to %s (command RCVHWM=%d)",
+            type(self).__name__,
+            cfg_ctrl.endpoint,
+            cfg_ctrl.command_receive_hwm,
+        )
 
     @property
     def reset_generation(self):
