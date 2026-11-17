@@ -136,3 +136,18 @@ class x2_xrobotoolkit_omnihand_real_direct_low_latency(x2_xrobotoolkit_omnihand_
     """Direct worker notifications and policy-boundary checks with combined-frame control."""
 
     ctrl: XRHandControllers = _low_latency_direct_hand_controllers()
+
+
+def _executor_controllers():
+    controllers = _low_latency_direct_hand_controllers()
+    for controller in controllers:
+        if isinstance(controller, UpperBodyOmniHandZmqCtrlCfg):
+            controller.schema_version = 3
+    return controllers
+
+
+@cfg_registry.register
+class x2_xrobotoolkit_omnihand_real_direct_executor(x2_xrobotoolkit_omnihand_real_direct_low_latency):
+    """Robot-authoritative transitions from combined XR desired targets (opt in)."""
+
+    ctrl: XRHandControllers = _executor_controllers()

@@ -59,7 +59,7 @@ if os.environ.get("XROBOTOOLKIT_TEST_DIAGNOSTICS"):
 xr = SyntheticXR()
 settings = TeleopSettings(collision_checking=sys.argv[5] == "True")
 bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], settings=settings, xr_client=xr,
-                       ik_backend=sys.argv[3], robot=sys.argv[4])
+                       ik_backend=sys.argv[3], robot=sys.argv[4], authoritative_executor=sys.argv[6] == "True")
 try:
     deadline = time.monotonic()
     while True:
@@ -86,6 +86,7 @@ finally:
     os.environ.get("XROBOTOOLKIT_TEST_PYTHON"), "set XROBOTOOLKIT_TEST_PYTHON for two-process XR tests"
 )
 class XrobotoolkitIntegrationTests(unittest.TestCase):
+    authoritative_executor = False
     with_omnihand = False
     collision_checking = True
 
@@ -106,6 +107,10 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         upper = next(item for item in cfg.ctrl if isinstance(item, UpperBodyZmqCtrlCfg))
         upper.endpoint = self.command_endpoint
         upper.feedback_endpoint = "tcp://127.0.0.1:*"
+        if self.authoritative_executor:
+            upper.schema_version = 3
+            upper.hand_command_mode = "direct"
+            upper.executor_collision_checking = self.collision_checking
         cfg.ctrl = [upper]
         cfg.env.headless = True
         cfg.env.visualize_extras = False
@@ -159,6 +164,7 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
                 os.environ.get("XROBOTOOLKIT_TEST_BACKEND", "placo"),
                 "x2_omnihand" if self.with_omnihand else "x2",
                 str(self.collision_checking),
+                str(self.authoritative_executor),
             ],
             stdin=subprocess.PIPE,
             stdout=log,
@@ -340,7 +346,9 @@ class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
                 frames = []
                 while monitor.poll(0):
                     frame = monitor.recv_json()
-                    if frame["type"] == "upper_body_proposal":
+                    if frame["type"] == (
+                        "upper_body_desired" if self.authoritative_executor else "upper_body_proposal"
+                    ):
                         frames.append(frame)
                 rate = len(frames) / elapsed
                 print(f"Injected hand delay={delay * 1000:.0f} ms: bridge publish={rate:.1f} Hz")
@@ -390,6 +398,16 @@ class XrobotoolkitCollisionDisabledIntegrationTests(XrobotoolkitIntegrationTests
 
 class XrobotoolkitOmniHandCollisionDisabledIntegrationTests(XrobotoolkitOmniHandIntegrationTests):
     collision_checking = False
+
+
+class XrobotoolkitExecutorIntegrationTests(XrobotoolkitOmniHandCollisionDisabledIntegrationTests):
+    authoritative_executor = True
+
+
+class XrobotoolkitExecutorCollisionIntegrationTests(XrobotoolkitIntegrationTests):
+    authoritative_executor = True
+    with_omnihand = True
+    collision_checking = True
 
 
 if __name__ == "__main__":

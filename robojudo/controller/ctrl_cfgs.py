@@ -306,7 +306,7 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
                 raise ValueError("upper-body feedback supports UpperBodyZmqCtrl and UpperBodyOmniHandZmqCtrl")
             if not self.feedback_endpoint.startswith("tcp://") or not self.feedback_endpoint[6:].strip():
                 raise ValueError("upper-body feedback_endpoint must use tcp://")
-            if self.ema_alpha != 0.0:
+            if self.ema_alpha != 0.0 and getattr(self, "schema_version", 1) != 3:
                 raise ValueError("externally checked proposals require ema_alpha=0")
         return self
 
@@ -316,7 +316,10 @@ class UpperBodyOmniHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
 
     ctrl_type: str = "UpperBodyOmniHandZmqCtrl"
     endpoint: str = "tcp://127.0.0.1:8560"
-    schema_version: Literal[2] = 2
+    schema_version: Literal[2, 3] = 2
+    executor_collision_checking: bool = False
+    executor_collision_margin: float = Field(default=0.02, gt=0.0, allow_inf_nan=False)
+    executor_collision_trigger: float = Field(default=0.08, gt=0.0, allow_inf_nan=False)
     hand_command_mode: Literal["filtered", "direct"] = "filtered"
     hand_velocity_limit: float = Field(default=2.0, gt=0.0, allow_inf_nan=False)
     omnihand: OmniHandCfg = OmniHandCfg()
@@ -325,6 +328,11 @@ class UpperBodyOmniHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
 
     @model_validator(mode="after")
     def validate_hand_feedback(self):
+        if self.schema_version == 3:
+            if self.feedback_endpoint is None or not self.xr_target_filter or self.hand_command_mode != "direct":
+                raise ValueError("executor requires feedback, XR target filtering and direct fingers")
+            if self.executor_collision_trigger <= self.executor_collision_margin:
+                raise ValueError("executor collision trigger must exceed margin")
         if self.feedback_endpoint is not None and self.omnihand.transport != "hcan":
             raise ValueError("OmniHand feedback hardware uses HCAN")
         return self

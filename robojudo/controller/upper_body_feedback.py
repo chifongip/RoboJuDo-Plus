@@ -1,4 +1,4 @@
-"""Optional feedback/acknowledgement for externally checked arm proposals.
+"""Versioned command feedback and optional robot-authoritative target execution.
 
 All deadlines belong to this process. A publisher echoes feedback identifiers;
 its clock is never compared with the robot's monotonic clock.
@@ -46,6 +46,12 @@ class UpperBodyFeedback:
         self._frame_id = -1
         self._states = OrderedDict()
         self._last_publication_timing = None
+        self.executor = None
+        self.latest_measurements = None
+        if self.schema_version == 3:
+            from robojudo.controller.xr_target_executor import XRTargetExecutor
+
+            self.executor = XRTargetExecutor(cfg)
         self.socket = context.socket(zmq.PUB)
         try:
             self.socket.setsockopt(zmq.LINGER, 0)
@@ -53,6 +59,8 @@ class UpperBodyFeedback:
             self.socket.bind(cfg.feedback_endpoint)
         except Exception:
             self.socket.close(linger=0)
+            if self.executor is not None:
+                self.executor.close()
             raise
 
     @property
@@ -61,7 +69,7 @@ class UpperBodyFeedback:
 
     @property
     def command_names(self):
-        if self.schema_version == 2:
+        if self.schema_version in (2, 3):
             from robojudo.controller.omnihand_runtime import OMNIHAND_JOINT_NAMES
 
             return [*self.cfg.joint_names, *OMNIHAND_JOINT_NAMES]
@@ -72,6 +80,9 @@ class UpperBodyFeedback:
         self.generation += 1
         self._frame_id = -1
         self._states.clear()
+        if self.executor is not None:
+            self.executor.reset()
+        self.latest_measurements = None
         self.last_proposal_at = None
         self.applied_bridge_id = None
         self.applied_frame_id = None
@@ -92,6 +103,8 @@ class UpperBodyFeedback:
 
     def close(self):
         self.socket.close(linger=0)
+        if self.executor is not None:
+            self.executor.close()
 
     def publish(
         self,
@@ -129,6 +142,7 @@ class UpperBodyFeedback:
         # An invalid startup snapshot must not become a permanent baseline.
         if valid and self._completed_positions is None:
             self._completed_positions = dict(targets)
+        self.latest_measurements = dict(positions) if valid else None
         self.state_id += 1
         oldest = max(ages, key=ages.get, default=None)
         feedback_diagnostics = {
@@ -182,13 +196,16 @@ class UpperBodyFeedback:
             "pipeline_timing_ms": {} if timing_ms is None else dict(timing_ms),
             "feedback_diagnostics": feedback_diagnostics,
         }
-        if self.schema_version == 2:
+        if self.schema_version in (2, 3):
             frame["hand_command_mode"] = getattr(self.cfg, "hand_command_mode", "filtered")
             frame["hand_velocity_limit"] = self.cfg.hand_velocity_limit
         if self.cfg.xr_target_filter:
             frame["filter_contract"] = "robojudo_filter_v1"
             frame["ema_alpha"] = self.cfg.ema_alpha
             frame["arm_joint_names"] = list(self.cfg.joint_names)
+        if self.executor is not None:
+            frame["filter_contract"] = "robojudo_executor_v1"
+            frame["executor"] = dict(self.executor.contract)
         deadline = min(sample_times.values(), default=float("-inf")) + self.cfg.feedback_timeout_s
         self._states[self.state_id] = (deadline, frame)
         while len(self._states) > 16:
@@ -213,9 +230,10 @@ class UpperBodyFeedback:
         if (
             type(message.get("schema_version")) is not int
             or message["schema_version"] != self.schema_version
-            or message.get("type") != "upper_body_proposal"
+            or message.get("type") != ("upper_body_desired" if self.schema_version == 3 else "upper_body_proposal")
         ):
-            raise ValueError(f"expected upper_body_proposal schema version {self.schema_version}")
+            kind = "upper_body_desired" if self.schema_version == 3 else "upper_body_proposal"
+            raise ValueError(f"expected {kind} schema version {self.schema_version}")
         if message.get("session_id") != self.session_id or _counter(message.get("generation")) != self.generation:
             raise ValueError("obsolete upper-body session or generation")
         frame_id = _counter(message.get("frame_id"))
@@ -245,7 +263,7 @@ class UpperBodyFeedback:
                 f"age_at_publish={age_at_publish * 1000:.1f} ms, "
                 f"budget={self.cfg.feedback_timeout_s * 1000:.1f} ms)"
             )
-        if command_id != self.command_id or command_id != feedback["command_id"]:
+        if self.schema_version != 3 and (command_id != self.command_id or command_id != feedback["command_id"]):
             raise ValueError("superseded arm command baseline")
         if message.get("intent") != self.intent or self.intent not in {"TRACK", "HOME"}:
             raise ValueError("arm proposal is not authorized by the current intent")
@@ -258,8 +276,15 @@ class UpperBodyFeedback:
             raise ValueError("proposal status is incompatible with its control intent")
         hand_mode = feedback.get("hand_command_mode", "filtered")
         proposed_mode = message.get("hand_command_mode", "filtered")
-        if self.schema_version == 2 and proposed_mode != hand_mode:
+        if self.schema_version in (2, 3) and proposed_mode != hand_mode:
             raise ValueError("finger command mode mismatch")
+        if self.executor is not None:
+            self.executor.validate(self, message, positions)
+            if receiving:
+                self.bridge_id = bridge_id
+                self._frame_id = frame_id
+                self.last_proposal_at = time.monotonic()
+            return
         if self.cfg.xr_target_filter:
             if message.get("filter_contract") != "robojudo_filter_v1":
                 raise ValueError("incompatible target filter contract")

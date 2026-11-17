@@ -729,3 +729,98 @@ proposals. It never autonomously advances during missing proposals or pending ha
 writes. Existing completion timings and command counters remain available; proposals
 include `desired_positions` separately from issued `positions` for tracing. SDK I/O
 and motor settings are unchanged. Command delivery gaps can still cause pauses.
+
+### Robot-authoritative combined target executor (opt in)
+
+`x2_xrobotoolkit_omnihand_real_direct_executor` retains direct fingers and the
+low-latency completion notifications, but constructs executable targets in RoboJuDo.
+The existing presets and schemas 1/2 keep their previous behavior.
+
+Install numeric support **using the RoboJuDo environment's interpreter**:
+
+```bash
+python scripts/install_xr_executor.py
+# Equivalent submodule installer entry:
+python submodule_install.py xr_executor
+```
+
+The installer adds pip `pin==4.1.0` and `coal==3.0.3`, installs the shared XR
+package without pulling its SDK/IK dependencies into RoboJuDo, and loads the
+articulated model and queries its collision geometry. The same native pins are
+available through RoboJuDo's `xr-executor` extra; the shared XR package and its
+matching assets are also required. The bridge continues using its separate XR
+environment. No source build or native-library search-path override is introduced.
+
+Start the bridge with `--robot x2_omnihand --ik-backend lerobot
+--authoritative-executor`. For hardware, select the new executor preset and the
+existing local hand serial configuration. The bridge and RoboJuDo must both use
+the updated submodule and matching model assets.
+
+Collision checking remains explicit. The new preset defaults to disabled, matching
+the bridge CLI default. To enable it, set the OmniHand controller's
+`executor_collision_checking=True` and start the bridge with `--collision-checking`.
+The robot's `executor_collision_margin` and `executor_collision_trigger` must match
+the bridge settings (defaults 0.02 and 0.08 m). Enabled initialization/query failures
+block motion; they never fall back to disabled checks. Model identity and collision
+settings must match even when checking is disabled.
+
+Schema 3 uses `upper_body_state` feedback and `upper_body_desired` commands.
+Command `positions` contains the complete **desired** 14-arm/24-finger target;
+it is not an executable or collision-certified transition. Commands include:
+
+- Existing bridge/frame, robot session/generation, feedback state, command ID,
+  intent, status, and hand-mode fields. Command ID is diagnostic, rather than an
+  exact-baseline admission requirement.
+- `executor`: `contract=robojudo_executor_v1`, model fingerprint, collision enablement,
+  clearance margin, and trigger. The fingerprint covers portable URDF/mesh content,
+  collision pairs, joint ordering, limits, velocities, and passive coupling.
+- `velocity_limits`: positive `arm`, `return`, and `hand` bridge settings. RoboJuDo
+  intersects applicable caps with its own configuration and model limits.
+- `active_joint_names`: joints authorized to move by this sample. Inactive joints
+  hold the robot's local completed baseline, preventing delayed feedback from
+  moving an arm after clutch release. HOME always holds fingers.
+
+RoboJuDo keeps one newest waiting desired frame and one combined execution in
+flight. At a control opportunity it consumes the desired frame once, filters from
+the current completed baseline, constructs bounded float32 targets, and validates
+the actual transition. Arm velocity budgets use one configured control period;
+pauses do not accumulate extra movement allowance. Robot-side `ema_alpha` remains
+0.0 by default and can be configured for this locally validated schema. Direct tracking fingers bypass
+software velocity ramps and retain device-managed motion.
+
+Collision validation shares the bridge's transition implementation: measured and
+commanded starting configurations, nonlinear passive coupling, independent arm and
+hand application paths, recovery criteria, and sampling limits. Rejected candidates
+hold; this executor does not search shorter steps. Session, generation, ownership,
+intent, measurement freshness, and robot-owned deadlines still govern submission.
+An expired or consumed sample cannot authorize repeated steps.
+
+Completion still requires successful arm submission and both hand SDK writes.
+Only combined completion advances the coherent command baseline. Partial failures
+retain the existing generation invalidation and recovery behavior. A waiting desired
+frame can survive completion of its predecessor while its measurement lease remains
+valid. Feedback asynchronously reports actual issued positions and completion identity;
+it does not gate bridge target construction. LeRobot commits successful desired IK
+history independently; its internal filter is separate from final executable filtering.
+
+Validation commands (no physical hardware):
+
+```bash
+python -m unittest discover -s tests -p test_xr_target_executor.py
+XROBOTOOLKIT_TEST_PYTHON=/path/to/robojudo-xr/bin/python \
+  XROBOTOOLKIT_TEST_BACKEND=lerobot \
+  python -m unittest discover -s tests -p test_xrobotoolkit_integration.py -k Executor
+```
+
+For a Jetson A/B comparison retain identical collision settings, workload, SDK
+settings and freshness thresholds. Existing admission, worker, first-acknowledgement
+and completion timings remain available; `executor_validation` reports the added
+numeric validation duration. Compare completion rate, command intervals, queue age,
+and feedback turnaround. The executor removes completion-baseline invalidation;
+control servicing and collision cost can still limit throughput. Simulation tests
+do not establish a hardware latency improvement or 50 completed frames/s. Recording
+behavior is outside this executor experiment's validation scope.
+
+A [local A/B benchmark](xr_executor_local_latency.md) found higher completion
+throughput and steadier intervals, but no lower per-frame latency. It includes
+measured results, limitations, and a reproducible simulation-only benchmark command.

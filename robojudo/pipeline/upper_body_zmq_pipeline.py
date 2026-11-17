@@ -220,10 +220,10 @@ class UpperBodyZmqPipelineMixin:
 
     def _apply_feedback_proposal(self, pd_target, ctrl_data, receiver):
         # An outage never sends the arms home. Only HOME intent authorizes the
-        # external solver's checked return, including while teleop is disabled.
+        # validated return, including while teleop is disabled.
         self._upper_body_pending = None
         self._upper_body_stream_was_fresh = False
-        hands = receiver.feedback.schema_version == 2
+        hands = receiver.feedback.schema_version in (2, 3)
         if hands:
             receiver.synchronize_intent(self._feedback_intent())
         if not self._upper_body_control_available():
@@ -239,11 +239,18 @@ class UpperBodyZmqPipelineMixin:
         ):
             positions = stream.get("joint_positions", {})
             try:
+                if receiver.feedback.schema_version == 3:
+                    measured = receiver.feedback.latest_measurements
+                    if measured is None:
+                        raise ValueError("executor measurements unavailable")
+                    measured = {**measured, **receiver.hand_snapshot()["positions"]}
+                    proposal = receiver.feedback.executor.prepare(receiver.feedback, proposal, measured)
+                    positions = proposal["positions"]
                 receiver.feedback.validate(proposal, positions)
                 if hands and not receiver.hand_snapshot()["fresh"]:
                     raise ValueError("finger measurements are stale")
                 candidate = np.asarray([positions[name] for name in self._upper_body_cfg.joint_names], dtype=np.float32)
-                # The bridge checks float32 targets. Do not reshape a checked path.
+                # Preserve the validator's exact float32 targets through submission.
                 checked = dict(positions)
                 checked.update(zip(self._upper_body_cfg.joint_names, candidate.tolist(), strict=True))
                 receiver.feedback.validate(proposal, checked)
@@ -268,11 +275,11 @@ class UpperBodyZmqPipelineMixin:
     def _send_upper_body_target(self, pd_target, hand_pose=None):
         """Admit hands before issuing the corresponding arm target.
 
-        Physical writes remain asynchronous; the bridge checks independent
+        Physical writes remain asynchronous; the validator checks independent
         application paths. Failure revokes further writes, never rolls hardware back.
         """
         receiver = self._feedback_receiver()
-        hands = receiver is not None and receiver.feedback.schema_version == 2
+        hands = receiver is not None and receiver.feedback.schema_version in (2, 3)
         proposal = getattr(self, "_upper_body_pending", None)
         if hands and proposal is not None:
             try:
@@ -343,7 +350,7 @@ class UpperBodyZmqPipelineMixin:
         receiver = self._feedback_receiver()
         if (
             receiver is None
-            or receiver.feedback.schema_version != 2
+            or receiver.feedback.schema_version not in (2, 3)
             or getattr(receiver, "_hand_runtime", None) is None
             or getattr(self, "_upper_body_feedback_body", None) is None
             or self._upper_body_pending is not None
@@ -383,7 +390,7 @@ class UpperBodyZmqPipelineMixin:
             return
         self._upper_body_filtered = np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices].copy()
         if self._upper_body_pending is not None:
-            if receiver.feedback.schema_version == 2:
+            if receiver.feedback.schema_version in (2, 3):
                 # Admission precedes env.step. An issued frame cannot be re-applied.
                 if receiver.pending is None:
                     raise ValueError("combined command was not admitted before arm submission")
@@ -396,7 +403,7 @@ class UpperBodyZmqPipelineMixin:
         receiver = self._feedback_receiver()
         if receiver is None or not self._upper_body_indices.size:
             return
-        hands = receiver.feedback.schema_version == 2
+        hands = receiver.feedback.schema_version in (2, 3)
         try:
             if hands and receiver.synchronize_intent(self._feedback_intent()):
                 # Safety or ownership can change during environment submission.
@@ -535,7 +542,7 @@ class UpperBodyZmqPipelineMixin:
 
     def _upper_body_record_hand_data(self):
         receiver = self._feedback_receiver()
-        if receiver is not None and receiver.feedback.schema_version == 2:
+        if receiver is not None and receiver.feedback.schema_version in (2, 3):
             try:
                 return receiver.record_hand_data()
             except RuntimeError as exc:
