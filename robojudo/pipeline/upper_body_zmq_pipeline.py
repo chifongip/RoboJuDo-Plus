@@ -317,6 +317,32 @@ class UpperBodyZmqPipelineMixin:
                 draw_targets(stream.get("target_poses", {}))
         self._publish_upper_body_feedback(env_data, pd_target)
 
+    def report_xr_metrics(self):
+        """Called once after each completed pipeline step, never by idle servicing."""
+        receiver = self._feedback_receiver()
+        if receiver is None:
+            return
+        now = time.monotonic()
+        counts = receiver.feedback.command_counts
+        received, completed = counts["received"], counts["completed"]
+        previous = getattr(self, "_xr_metrics", None)
+        if previous is None or received < previous[2] or completed < previous[3]:
+            self._xr_metrics = (now, 0, received, completed)
+            return
+        started, frames, received_before, completed_before = previous
+        frames += 1
+        elapsed = now - started
+        if elapsed >= 1.0:
+            logger.info(
+                "RoboJuDo: receive=%.1f Hz | control=%.1f Hz | complete=%.1f Hz",
+                (received - received_before) / elapsed,
+                frames / elapsed,
+                (completed - completed_before) / elapsed,
+            )
+            self._xr_metrics = (now, 0, received, completed)
+        else:
+            self._xr_metrics = (started, frames, received_before, completed_before)
+
     def get_idle_notifications(self):
         """Only the pipeline thread consumes completion notifications and sends feedback."""
         receiver = self._feedback_receiver()

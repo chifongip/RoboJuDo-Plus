@@ -106,6 +106,7 @@ def main():
     logger.info(f"Using pipeline: {pipeline_type} -> {pipeline_class}")
 
     pipeline = pipeline_class(cfg=cfg)
+    report_xr_metrics = getattr(pipeline, "report_xr_metrics", None)
 
     try:
         if not cfg.env.is_sim:
@@ -117,6 +118,8 @@ def main():
         while not getattr(pipeline, "should_exit", False):
             time_start = time.monotonic()
             pipeline.step()
+            if report_xr_metrics is not None:
+                report_xr_metrics()
             time_end = time.monotonic()
             time_diff = time_end - time_start
 
