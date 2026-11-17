@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from robojudo.config import Config
+from robojudo.config.observer_cfg import JointObserverCfg
 from robojudo.tools.tool_cfgs import DoFConfig, ForwardKinematicCfg, ZedOdometryCfg
 
 
@@ -50,6 +51,22 @@ class MujocoEnvCfg(EnvCfg):
     sim_duration: float = 60.0
     sim_dt: float = 0.001
     sim_decimation: int = 20
+    headless: bool = False
+    feedforward_effort_limits: dict[str, float] = Field(default_factory=dict)
+    """Simulation-only, per-joint feedforward bounds in Nm; omitted joints have zero bounds."""
+
+    @property
+    def feedforward_joint_names(self) -> list[str]:
+        return self.dof.joint_names
+
+    @model_validator(mode="after")
+    def check_feedforward_limits(self):
+        for name, limit in self.feedforward_effort_limits.items():
+            if name not in self.dof.joint_names:
+                raise ValueError(f"Unknown feedforward joint: {name}")
+            if not math.isfinite(limit) or limit < 0:
+                raise ValueError("Feedforward limits must be finite and non-negative")
+        return self
 
     visualize_extras: bool = True  # TODO: remove
 
@@ -58,6 +75,17 @@ class MujocoEnvCfg(EnvCfg):
 
     elastic_band: ElasticBandCfg | None = None
     """Optional simulation-only suspension band."""
+
+
+class ObserverMujocoEnvCfg(MujocoEnvCfg):
+    env_type: str = "ObserverMujocoEnv"
+    observer: JointObserverCfg
+
+    @model_validator(mode="after")
+    def check_observer_joints(self):
+        if set(self.observer.joint_names) - set(self.feedforward_joint_names):
+            raise ValueError("Observer joints must be allowed feedforward joints")
+        return self
 
 
 class RobotEnvCfg(EnvCfg):
@@ -147,6 +175,17 @@ class AgiBotEnvCfg(RobotEnvCfg):
     """
     Configuration for AgiBot/AimDK ROS 2 robot environments.
     """
+
+    observer: JointObserverCfg | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_observer_key(cls, values):
+        if isinstance(values, dict) and "arm_observer" in values:
+            raise ValueError(
+                "arm_observer was removed; use observer=JointObserverCfg(...) with an explicit algorithm/model"
+            )
+        return values
 
     class AimdkCfg(Config):
         """AimDK ROS 2 topic and timing configuration."""

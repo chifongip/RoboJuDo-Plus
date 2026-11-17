@@ -488,7 +488,11 @@ class TestG1Locomanipulation(unittest.TestCase):
 
         cfg = g1_23_locomanipulation_stiff()
         pipeline = G1LocomanipulationPipeline.__new__(G1LocomanipulationPipeline)
-        pipeline._upper_body_cfg = cfg.ctrl[-1].model_copy(update={"ema_alpha": 0.0})
+        # Isolate joint mapping; speed limiting has its own tests.
+        pipeline.dt = 1.0 / cfg.policy.freq
+        pipeline._upper_body_cfg = cfg.ctrl[-1].model_copy(
+            update={"ema_alpha": 0.0, "max_joint_velocity_rad_s": 1000.0}
+        )
         pipeline._upper_body_enabled = True
         pipeline._upper_body_stream_was_fresh = False
         pipeline._upper_body_indices = np.asarray(

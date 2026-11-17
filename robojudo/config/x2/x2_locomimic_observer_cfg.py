@@ -1,0 +1,65 @@
+"""Separate simulation and deployment presets for the X2 arm observer."""
+
+from robojudo.config import cfg_registry
+from robojudo.config.observer_cfg import JointObserverCfg
+from robojudo.config.x2.observer_parameters import JOINT_NAMES, selected_observer_parameters
+
+from .env.x2_mujuco_env_cfg import X2ObserverMujocoEnvCfg
+from .env.x2_real_env_cfg import X2AimdkCfg, X2RealEnvCfg
+from .policy.x2_locomanipulation_policy_cfg import X2LocomanipulationEnvDoF
+from .x2_cfg import x2_locomimic, x2_locomimic_real
+
+_DOF = X2LocomanipulationEnvDoF()
+_ACTUATOR_LIMITS_BY_NAME = dict(zip(_DOF.joint_names, _DOF.torque_limits, strict=True))
+_OBSERVER_PARAMETERS = selected_observer_parameters()
+_OBSERVER_PARAMETERS.pop("method")
+
+
+@cfg_registry.register
+class x2_locomimic_observer(x2_locomimic):
+    """X2 locomotion with arm compensation, Sim2Sim."""
+
+    env: X2ObserverMujocoEnvCfg = X2ObserverMujocoEnvCfg(
+        dof=X2LocomanipulationEnvDoF(),
+        sim_dt=0.005,
+        sim_decimation=4,
+        # The observer applies its own fraction/cap within these actuator bounds.
+        feedforward_effort_limits={name: _ACTUATOR_LIMITS_BY_NAME[name] for name in JOINT_NAMES},
+        observer=JointObserverCfg(
+            algorithm="nonlinear",
+            mode="ACTIVE",
+            joint_names=list(JOINT_NAMES),
+            **_OBSERVER_PARAMETERS,
+            actuator_limits_nm=[_ACTUATOR_LIMITS_BY_NAME[name] for name in JOINT_NAMES],
+            correction_limit_fraction=0.8,
+            correction_limit_nm=0.0,
+            slew_nm_s=2.0,
+            release_slew_nm_s=16.0,
+        ),
+    )
+
+
+@cfg_registry.register
+class x2_locomimic_real_observer(x2_locomimic_real):
+    """X2 position control with optional arm observer, Sim2Real."""
+
+    env: X2RealEnvCfg = X2RealEnvCfg(
+        dof=X2LocomanipulationEnvDoF(),
+        odometry_type="NONE",
+        aimdk=X2AimdkCfg(startup_state_timeout=10.0, publish_dt=0.02),
+        observer=JointObserverCfg(
+            algorithm="nonlinear",
+            joint_names=list(JOINT_NAMES),
+            **_OBSERVER_PARAMETERS,
+            mode="OFF",
+            # Configured bounds do not establish continuous hardware ratings or firmware clipping limits.
+            actuator_limits_nm=[_ACTUATOR_LIMITS_BY_NAME[name] for name in JOINT_NAMES],
+            # Simulation settings for optional SHADOW evaluation; not hardware-qualified ACTIVE limits.
+            correction_limit_fraction=0.8,
+            correction_limit_nm=0.0,
+            slew_nm_s=2.0,
+            # Abrupt-unloading simulation selection; mode remains OFF.
+            # Release toward zero only; opposite torque still grows at 2 Nm/s.
+            release_slew_nm_s=16.0,
+        ),
+    )

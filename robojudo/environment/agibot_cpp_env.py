@@ -44,9 +44,24 @@ def format_state_freshness_report(report) -> str:
 class AgiBotCppEnv(Environment):
     cfg_env: AgiBotEnvCfg
 
+    @property
+    def enabled(self):
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, enabled):
+        self._enabled = bool(enabled)
+        if not self._enabled:
+            self.reset_observer()
+
     def __init__(self, cfg_env: AgiBotEnvCfg, device="cpu"):
         self.enabled: bool = cfg_env.act
         self.aimdk = None
+        self._observer = None
+        self._observer_eligible = False
+        self._observer_reset_generation = None
+        self._observer_feedback_time = None
+        self._observer_sample_times = None
         self._control_joint_names: set[str] = set()
         self._last_clamp_log_time = 0.0
         self._last_safety_state: str | None = None
@@ -60,6 +75,8 @@ class AgiBotCppEnv(Environment):
         self._filtered_base_lin_vel = np.zeros(3, dtype=np.float32)
         self._last_odometry_receipt_time: float | None = None
 
+        self._build_observer()
+
         try:
             from aimdk_cpp import AimdkController
         except ImportError as e:
@@ -70,6 +87,9 @@ class AgiBotCppEnv(Environment):
             ) from e
 
         cfg = cfg_env.aimdk.to_dict()
+        if self._observer is not None:
+            cfg["arm_effort_enabled"] = self._observer.mode == "ACTIVE"
+            cfg["arm_effort_limits"] = self._observer.observer.limits[self._observer_to_native].tolist()
         cfg.update(
             {
                 "act": self.enabled,
@@ -85,6 +105,8 @@ class AgiBotCppEnv(Environment):
         )
         self.aimdk = AimdkController(cfg)
         required_safety_methods = ("get_state_freshness_report", "get_safety_status", "arm_position_control")
+        if self._observer is not None:
+            required_safety_methods += ("clear_arm_effort",)
         missing_safety_methods = [name for name in required_safety_methods if not hasattr(self.aimdk, name)]
         if missing_safety_methods:
             self.aimdk.shutdown()
@@ -92,6 +114,12 @@ class AgiBotCppEnv(Environment):
                 "The installed aimdk_cpp binding is missing X2 safety state-machine APIs "
                 f"{missing_safety_methods}; rebuild it with `python submodule_install.py aimdk`"
             )
+        if self._observer is not None and not hasattr(self.aimdk.get_safety_status(), "reset_generation"):
+            self.aimdk.shutdown()
+            raise RuntimeError("Rebuild aimdk_cpp for observer command receipts and reset generations")
+        if self._observer is not None and not hasattr(self.aimdk.get_robot_state(), "joint_received_time_sec"):
+            self.aimdk.shutdown()
+            raise RuntimeError("Rebuild aimdk_cpp for timestamped observer joint snapshots")
         self._odometry_type = cfg_env.odometry_type
         self.self_check()
 
@@ -113,6 +141,7 @@ class AgiBotCppEnv(Environment):
         raise RuntimeError(f"AgiBotCppEnv did not receive fresh AimDK {required_streams} state: {detail}.")
 
     def reset(self):
+        self.reset_observer()
         if self.born_place_align:
             self.born_place_align = False
             self.update()
@@ -140,6 +169,7 @@ class AgiBotCppEnv(Environment):
             )
             report = self.aimdk.get_state_freshness_report(state_damping_timeout, odometry_damping_timeout)
             if not report.required_streams_fresh:
+                self.reset_observer()
                 detail = format_state_freshness_report(report)
                 raise RuntimeError(f"AgiBotCppEnv state exceeded its hard timeout ({detail}); damping is latched.")
 
@@ -147,6 +177,8 @@ class AgiBotCppEnv(Environment):
             if get_safety_status is not None:
                 safety_status = get_safety_status()
                 safety_state = safety_status.state
+                if getattr(self, "_observer", None) is not None:
+                    self._check_observer_safety(safety_status)
                 if safety_state != getattr(self, "_last_safety_state", None):
                     if safety_state == "HOLD":
                         logger.warning("AimDK safety hold entered: %s", safety_status.fault)
@@ -159,9 +191,26 @@ class AgiBotCppEnv(Environment):
                         f"({safety_status.fault}); re-arm position control before sending targets."
                     )
 
+        snapshot_request_time = time.monotonic()
         state = self.aimdk.get_robot_state()
         self._dof_pos = np.asarray(state.motor_state.q, dtype=np.float32)
         self._dof_vel = np.asarray(state.motor_state.dq, dtype=np.float32)
+        observer = getattr(self, "_observer", None)
+        if observer is not None:
+            ages = np.asarray(state.joint_age_sec, dtype=float)
+            self._observer_sample_times = np.asarray(state.joint_received_time_sec, dtype=float)
+            self._observer_feedback_time = None
+            if ages.shape == (self.num_dofs,):
+                arm_ages = ages[observer.indices]
+                if np.isfinite(arm_ages).all() and np.all(arm_ages >= 0):
+                    # Start before the native call, so callback/copy latency cannot
+                    # make a cached sample look newer than it actually is.
+                    self._observer_feedback_time = snapshot_request_time - float(np.max(arm_ages))
+            if (
+                self._observer_feedback_time is None
+                or snapshot_request_time - self._observer_feedback_time > observer.max_dt
+            ):
+                self.reset_observer()
 
         quat = np.asarray(state.imu_state.quaternion, dtype=np.float32)
         if self.born_place_align:
@@ -258,9 +307,7 @@ class AgiBotCppEnv(Environment):
             self.cfg_env.aimdk.torso_to_odometry_sensor_position,
             dtype=np.float64,
         )
-        torso_to_sensor_rot = Rotation.from_quat(
-            self.cfg_env.aimdk.torso_to_odometry_sensor_quaternion
-        )
+        torso_to_sensor_rot = Rotation.from_quat(self.cfg_env.aimdk.torso_to_odometry_sensor_quaternion)
         world_to_sensor_rot = Rotation.from_quat(sensor_quat)
         world_to_torso_rot = world_to_sensor_rot * torso_to_sensor_rot.inv()
         world_to_torso_pos = sensor_pos - world_to_torso_rot.apply(torso_to_sensor_pos)
@@ -276,12 +323,139 @@ class AgiBotCppEnv(Environment):
         world_to_pelvis_pos = world_to_torso_pos - world_to_pelvis_rot.apply(pelvis_to_torso_pos)
         return world_to_pelvis_pos, world_to_pelvis_rot.as_quat()
 
+    def _configure_observer_order(self, native_joint_names):
+        """Keep native arm ordering/restrictions at the hardware boundary."""
+        names = self._observer.joint_names
+        if len(set(native_joint_names)) != len(native_joint_names) or set(names) != set(native_joint_names):
+            raise ValueError("AimDK observer must cover exactly its configured arm joints")
+        self._observer_to_native = np.array([names.index(name) for name in native_joint_names])
+        self._observer_from_native = np.argsort(self._observer_to_native)
+
+    def _build_observer(self):
+        from robojudo.config.observer_cfg import JointObserverCfg
+        from robojudo.utils.observers import JointObserver
+
+        cfg = self.cfg_env.observer
+        if cfg is None:
+            self._observer = None
+            return
+        cfg = JointObserverCfg.model_validate(cfg.model_dump())
+        cfg.validate_hardware()
+        if cfg.mode == "OFF":
+            self._observer = None
+            return
+        if set(cfg.joint_names) != set(self.cfg_env.arm_joint_names):
+            raise ValueError("AimDK observer must cover exactly its configured arm joints")
+        self._observer = JointObserver(
+            cfg,
+            self.joint_names,
+            self.stiffness,
+            self.damping,
+            actuator_limits=self.torque_limits,
+            max_dt=min(self.cfg_env.aimdk.command_timeout, self.cfg_env.aimdk.state_timeout),
+        )
+        self._configure_observer_order(self.cfg_env.arm_joint_names)
+        logger.warning("Observer %s: nominal model is simulation-derived and not hardware-qualified", cfg.mode)
+
+    def get_observer_status(self):
+        """Command diagnostics only; issued effort is not measured actuator torque."""
+        observer = getattr(self, "_observer", None)
+        if observer is None:
+            return {"mode": "OFF", "eligible": False}
+        return {
+            **observer.get_status(),
+            "eligible": self._observer_eligible,
+            "reset_generation": self._observer_reset_generation,
+            "model_qualification": "simulation_only",
+        }
+
+    def reset_observer(self):
+        observer = getattr(self, "_observer", None)
+        if observer is not None:
+            observer.reset()
+            if self.aimdk is not None:
+                self.aimdk.clear_arm_effort()
+                self._observer_reset_generation = self.aimdk.get_safety_status().reset_generation
+
+    def set_observer_eligible(self, eligible):
+        eligible = bool(eligible)
+        if eligible != getattr(self, "_observer_eligible", False):
+            self.reset_observer()
+            self._observer_eligible = eligible
+
+    def _check_observer_safety(self, status):
+        if status.state != "ACTIVE" or status.reset_generation != self._observer_reset_generation:
+            self._observer.reset()
+        self._observer_reset_generation = status.reset_generation
+
+    def _step_with_observer(self, target, now):
+        observer = self._observer
+        status = self.aimdk.get_safety_status()
+        self._check_observer_safety(status)
+        report = self.aimdk.get_state_freshness_report(
+            self.cfg_env.aimdk.state_timeout, self.cfg_env.aimdk.odometry_timeout
+        )
+        sample_time = self._observer_feedback_time
+        if (
+            not self._observer_eligible
+            or observer.mode == "OFF"
+            or status.state != "ACTIVE"
+            or not report.required_streams_fresh
+            or getattr(self, "_observer_sample_times", None) is None
+            or sample_time is None
+            or not np.isfinite(sample_time)
+            or not 0 <= now - sample_time <= observer.max_dt
+        ):
+            self.reset_observer()
+            self.aimdk.step(target.tolist())
+            return
+        try:
+            effort = observer.propose(
+                target, self._dof_pos, self._dof_vel, now, sample_times=self._observer_sample_times
+            )
+            receipt = self.aimdk.step(
+                target.tolist(), effort[self._observer_to_native].tolist(), self._observer_reset_generation
+            )
+            if receipt.reset_generation != self._observer_reset_generation:
+                self.reset_observer()
+                return
+            issued = np.asarray(receipt.arm_efforts, dtype=float)
+            if issued.shape != (len(self._observer_from_native),):
+                raise ValueError("AimDK command receipt must match native arm joints")
+            observer.acknowledge(issued[self._observer_from_native], command_time=receipt.command_time_sec)
+            if now - getattr(self, "_last_observer_log_time", float("-inf")) >= 1.0 and logger.isEnabledFor(
+                logging.INFO
+            ):
+                self._last_observer_log_time = now
+                at_bound = np.isclose(
+                    np.abs(observer.observer.estimated_disturbance_nm), observer.observer.limits, rtol=0, atol=1e-3
+                )
+                limited = observer.observer.antiwindup | ~np.isclose(
+                    observer.proposed_nm, observer.issued_nm, rtol=0, atol=1e-6
+                )
+                logger.info(
+                    "Observer %s Nm: est=[%s] issued=[%s] bound=%d limited=%d",
+                    observer.mode,
+                    ",".join(f"{value:.1f}" for value in observer.observer.estimated_disturbance_nm),
+                    ",".join(f"{value:.1f}" for value in observer.issued_nm),
+                    np.count_nonzero(at_bound),
+                    np.count_nonzero(limited),
+                )
+        except (TypeError, ValueError, RuntimeError, FloatingPointError):
+            self.reset_observer()
+            raise
+
     def step(self, pd_target, hand_pose=None):
-        assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"
         if hand_pose is not None:
             logger.debug("AgiBotCppEnv ignores hand_pose until AimDK hand control is wired.")
         if self.enabled and self.aimdk is not None:
-            pd_target = np.asarray(pd_target, dtype=np.float64)
+            try:
+                pd_target = np.asarray(pd_target, dtype=np.float64)
+                if pd_target.shape != (self.num_dofs,):
+                    raise ValueError(f"PD target must have shape ({self.num_dofs},)")
+            except (TypeError, ValueError):
+                self.command_damping(self.cfg_env.aimdk.shutdown_damping)
+                raise ValueError("AgiBotCppEnv received a malformed PD target; damping commands were sent") from None
             if not np.isfinite(pd_target).all():
                 self.command_damping(self.cfg_env.aimdk.shutdown_damping)
                 raise FloatingPointError("AgiBotCppEnv received a non-finite PD target; damping commands were sent.")
@@ -298,34 +472,48 @@ class AgiBotCppEnv(Environment):
                 if details:
                     logger.warning("Clamped X2 PD targets: %s", ", ".join(details))
                     self._last_clamp_log_time = now
-            self.aimdk.step(clipped_target.tolist())
+            if getattr(self, "_observer", None) is not None:
+                self._step_with_observer(clipped_target, now)
+            else:
+                self.aimdk.step(clipped_target.tolist())
 
     def command_passive(self):
+        self.reset_observer()
         if self.enabled and self.aimdk is not None:
             self.aimdk.set_passive()
 
     def command_damping(self, damping=5.0):
         if not np.isfinite(damping) or damping < 0.0:
             raise ValueError("Damping must be finite and non-negative")
+        self.reset_observer()
         if self.enabled and self.aimdk is not None:
             self.aimdk.set_damping(float(damping))
 
     def arm_position_control(self):
+        self.reset_observer()
         if self.enabled and self.aimdk is not None:
             self.aimdk.arm_position_control()
 
     def set_control_joint_names(self, joint_names):
-        self._control_joint_names = set(joint_names)
+        self.reset_observer()
+        joint_names = list(joint_names)
         if self.aimdk is not None:
-            self.aimdk.set_control_joint_names(list(joint_names))
+            self.aimdk.set_control_joint_names(joint_names)
+        self._control_joint_names = set(joint_names)
 
     def shutdown(self):
+        self.reset_observer()
         self.enabled = False
         if self.aimdk is not None:
             self.aimdk.shutdown()
 
     def set_gains(self, stiffness, damping):
         self.stiffness, self.damping = self._validate_gains(stiffness, damping)
+        self.reset_observer()
+        observer = getattr(self, "_observer", None)
+        if observer is not None:
+            observer.observer.kp = self.stiffness[observer.indices].copy()
+            observer.observer.kd = self.damping[observer.indices].copy()
         if self.aimdk is not None and self.enabled:
             self.aimdk.set_gains(self.stiffness.tolist(), self.damping.tolist())
 

@@ -24,6 +24,7 @@ def __getattr__(name: str) -> type[Environment]:
 
 # ===== Declare all your custom environments here =====
 env_registry.add("MujocoEnv", ".mujoco_env")
+env_registry.add("ObserverMujocoEnv", ".observer_mujoco_env")
 env_registry.add("DummyEnv", ".dummy_env")
 
 # env_registry.add("GrxEnv", ".fourier_env")
