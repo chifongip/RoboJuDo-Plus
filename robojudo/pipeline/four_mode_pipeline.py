@@ -1,4 +1,5 @@
 import logging
+import time
 from enum import Enum
 
 import numpy as np
@@ -141,6 +142,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             previous.value,
             requested.value,
         )
+        self._reset_upper_body_feedback()
         return True
 
     def _on_enter_rl(self):
@@ -241,6 +243,7 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         alpha = self._joint_default_step / self._joint_default_steps
         target = (1.0 - alpha) * self._joint_default_start + alpha * self._joint_default_target
         self.env.step(target)
+        self._upper_body_command_submitted = True
         if self._joint_default_step == self._joint_default_steps and not self._joint_default_complete:
             self._joint_default_complete = True
             logger.warning("JOINT_DEFAULT interpolation complete; RL_DEFAULT is now enabled")
@@ -270,17 +273,23 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
 
     def _send_policy_target(self, pd_target, hand_pose=None):
         self._sync_observer_eligibility()
-        self.env.step(pd_target, hand_pose)
+        self._send_upper_body_target(pd_target, hand_pose)
 
     def _step_rl_policy(self, env_data, ctrl_data, dry_run: bool):
+        started = time.perf_counter()
         obs, extras = self.policy.get_observation(env_data, ctrl_data)
         pd_target = self.policy.get_pd_target(obs)
+        self._upper_body_timing_ms = {"policy": 1000 * (time.perf_counter() - started)}
+        self._refresh_upper_body_feedback(ctrl_data)
         pd_target = self._apply_pd_target_override(pd_target, ctrl_data)
         if not dry_run:
+            started = time.perf_counter()
             self._send_policy_target(pd_target, extras.get("hand_pose"))
+            self._upper_body_timing_ms["env_step"] = 1000 * (time.perf_counter() - started)
         return pd_target, extras
 
     def _post_mode_step(self, env_data, ctrl_data, extras, pd_target, rl_active: bool):
+        self._update_upper_body_feedback(env_data, ctrl_data, pd_target)
         commands = ctrl_data.get("COMMANDS", [])
         self.timestep += 1
         self.ctrl_manager.post_step_callback(ctrl_data)
@@ -298,6 +307,8 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             )
 
     def step(self, dry_run=False):
+        self._upper_body_command_submitted = False
+        self._upper_body_timing_ms = {}
         try:
             self.env.update()
         except RuntimeError as exc:

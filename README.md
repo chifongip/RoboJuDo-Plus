@@ -124,6 +124,9 @@ python submodule_install.py ros2_joy_cpp
 # XR/dexterous-hand teleoperation support.
 python submodule_install.py dex_teleop
 
+# XRoboToolkit X2 arm teleoperation and XR SDK (optional; Python 3.11+ on Linux).
+python submodule_install.py xrobotoolkit_teleop
+
 # OmniHand Python SDK; selects the active CPython ABI and x86_64/aarch64 wheel.
 python submodule_install.py omnihand_sdk
 
@@ -133,6 +136,20 @@ python submodule_install.py casiahand_sdk
 # PHC motion controller support.
 python submodule_install.py phc
 ```
+
+XRoboToolkit setup creates a separate, teleop-only **`robojudo-xr`** Conda environment with Python 3.11,
+Placo, and LeRobot, including compilation and permanent registration of the native symbolic bindings.
+It requires Linux x86_64/aarch64, Conda, and `g++`. It does not install RoboJuDo, other robot SDKs, or Torch.
+
+```bash
+python scripts/install_xrobotoolkit_teleop.py
+conda activate robojudo-xr
+```
+
+An existing target is preserved unless `--reuse` is supplied; use `--name NAME` for another environment name.
+The `x2_xrobotoolkit` and `x2_xrobotoolkit_real` presets run in the existing RoboJuDo environment and communicate
+with the XR bridge over ZMQ. Both IK methods run in the same XR environment. OmniHand integration is deferred.
+See the [XRoboToolkit setup guide](docs/xrobotoolkit_teleop.md) for verification and launch commands.
 
 The optional installers may require an active Conda environment and external SDKs. See:
 
@@ -441,14 +458,27 @@ positions in radians over `tcp://127.0.0.1:8559`:
 {
   "positions": {
     "left_shoulder_pitch_joint": 0.35,
-    "right_elbow_joint": -0.87
+    "left_shoulder_roll_joint": 0.1,
+    "left_shoulder_yaw_joint": 0.0,
+    "left_elbow_joint": -0.87,
+    "left_wrist_yaw_joint": 0.0,
+    "left_wrist_pitch_joint": 0.0,
+    "left_wrist_roll_joint": 0.0,
+    "right_shoulder_pitch_joint": 0.35,
+    "right_shoulder_roll_joint": -0.1,
+    "right_shoulder_yaw_joint": 0.0,
+    "right_elbow_joint": -0.87,
+    "right_wrist_yaw_joint": 0.0,
+    "right_wrist_pitch_joint": 0.0,
+    "right_wrist_roll_joint": 0.0
   }
 }
 ```
 
-Messages may contain any non-empty subset of configured joints. Partial updates are merged, invalid messages are
-rejected, targets are clamped and EMA-filtered, and stale streams return smoothly to the configured defaults after
-`0.25` seconds. Control starts disabled and is available only when the active policy does not own those joints.
+Each message must contain every configured joint. Invalid or incomplete frames are rejected without refreshing the
+shared `0.25` second lease. Targets are clamped and EMA-filtered; on timeout the entire group holds its last emitted
+targets. Explicitly disabling control returns the group smoothly to its configured defaults. Control starts disabled
+and is available only when the active policy does not own those joints.
 
 In locomanipulation loco-mimic simulation presets, toggle it with joystick `L` or keyboard `T`; other bindings depend on
 the selected robot configuration. Test the interface with:
@@ -577,6 +607,15 @@ External projects used by RoboJuDo-Plus:
 - [ros2_joy_cpp](https://github.com/chifongip/ros2_joy_cpp)
 - [ZED Proxy](https://github.com/HansZ8/ZED-Proxy)
 - [DEX Teleop](https://github.com/wrfbreeze/dex_teleop)
+- [XRoboToolkit teleoperation sample](https://github.com/XR-Robotics/XRoboToolkit-Teleop-Sample-Python) and the
+  [X2-enabled fork](https://github.com/chifongip/XRoboToolkit-Teleop-Sample-Python) — optional X2 arm teleoperation
+  with an `x2` installation extra and measured-state bridge; see the [setup guide](docs/xrobotoolkit_teleop.md).
+- [XRoboToolkit PC Service](https://github.com/XR-Robotics/XRoboToolkit-PC-Service) and
+  [Python SDK binding](https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind) — XR tracking input for the sample.
+- [MuJoCo](https://github.com/google-deepmind/mujoco) and [Placo](https://github.com/rhoban/placo) — simulation and
+  inverse kinematics used by the XRoboToolkit X2 sample.
+- [AGILINK OmniHand SDK](https://github.com/AgibotTech/agillink_omnihand_sdk) — optional physical OmniHand control.
+- [CASIA Hand-M SDK](https://github.com/Breezewrf/casiahand_sdk) — optional physical CASIA hand control.
 - [MuJoCo Python Viewer](https://github.com/rohanpsingh/mujoco-python-viewer)
 - [PHC](https://github.com/ZhengyiLuo/PHC)
 - [ProtoMotions](https://github.com/NVlabs/ProtoMotions)
@@ -587,8 +626,16 @@ Bundled packages and third-party components:
 - [`packages/ros2_joy_cpp`](packages/ros2_joy_cpp) — native ROS 2 Joy subscriber package.
 - [`packages/unitree_cpp`](packages/unitree_cpp) — Unitree G1 native binding; see its [package README](packages/unitree_cpp/README.md).
 - [`packages/zed_proxy`](packages/zed_proxy) — optional ZED camera odometry submodule.
+- [`packages/robojudo_recorder`](packages/robojudo_recorder) — recording service for LeRobot v3 datasets; see its
+  [README](packages/robojudo_recorder/README.md).
 - [`third_party/aimdk`](third_party/aimdk) — pinned AimDK SDK used by X2 deployment.
 - [`third_party/dex_teleop`](third_party/dex_teleop) — optional XR arm and dexterous-hand teleoperation module; see its [README](third_party/dex_teleop/README.md).
+- [`third_party/xrobotoolkit_teleop`](third_party/xrobotoolkit_teleop) — XRoboToolkit X2 arm and OmniHand integration;
+  see the [deployment guide](docs/xrobotoolkit_teleop.md).
+- [`third_party/omnihand_sdk`](third_party/omnihand_sdk) — optional OmniHand SDK; see its
+  [README](third_party/omnihand_sdk/README.md).
+- [`third_party/casiahand_sdk`](third_party/casiahand_sdk) — optional CASIA Hand-M SDK; see its
+  [README](third_party/casiahand_sdk/README.md).
 - [`third_party/mujoco_viewer`](third_party/mujoco_viewer) — optional MuJoCo visualization module; see its [README](third_party/mujoco_viewer/README.md).
 - [`third_party/phc`](third_party/phc) — optional PHC motion controller submodule.
 - [`third_party/patches`](third_party/patches) — RoboJuDo patches and robot-specific add-ons for optional dependencies.

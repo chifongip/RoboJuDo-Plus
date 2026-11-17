@@ -31,7 +31,8 @@ The verification commands below use this same CPU mask; adjust it for other host
   connection or failed attempt, allowing present hands to qualify before camera
   startup. Missing hardware still falls back to background retries.
 - When dual-hand feedback is older than `joint_state_timeout_s` (default 0.25 s),
-  GR00T actions become unavailable immediately. In X/RL mode, the arms return to
+  GR00T actions become unavailable immediately. In X/RL mode, all arm targets hold
+  their last emitted positions. Explicit takeover disable returns them to
   `upper_body_default_pose` using the existing joint velocity limit. The pipeline
   publishes takeover disabled and restores its existing manual locomotion path.
 - After `reconnect_timeout_s` (default 1 s) without successful dual-hand feedback,
@@ -92,8 +93,9 @@ ctest --test-dir /tmp/casia-native-tests --output-on-failure
 
 On a supported, supervised robot setup, verify power-only loss, USB-only loss,
 and simultaneous loss while X and Start takeover are active. Check that the arms
-return to the configured default pose, the process remains running, and replugging
-restores fresh feedback with a new generation/session before new actions run.
+hold their last targets and explicit disable returns them to the configured default pose.
+Check that the process remains running and replugging restores fresh feedback with a new generation/session before
+new actions run.
 Repeat with B or Start disabled during the outage, and with shutdown while waiting
 for hardware. Observe recovery time and verify tty renumbering on the same USB port.
 These hardware scenarios are not covered by the fake-device tests.

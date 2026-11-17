@@ -6,7 +6,7 @@ from robojudo.config.x2.observer_parameters import JOINT_NAMES, selected_observe
 
 from .env.x2_mujuco_env_cfg import X2ObserverMujocoEnvCfg
 from .env.x2_real_env_cfg import X2AimdkCfg, X2RealEnvCfg
-from .policy.x2_locomanipulation_policy_cfg import X2LocomanipulationEnvDoF
+from .policy.x2_locomanipulation_policy_cfg import X2LocomanipulationEnvDoF, X2LocomanipulationPolicyCfg
 from .x2_cfg import x2_locomimic, x2_locomimic_real
 
 _DOF = X2LocomanipulationEnvDoF()
@@ -19,6 +19,9 @@ _OBSERVER_PARAMETERS.pop("method")
 class x2_locomimic_observer(x2_locomimic):
     """X2 locomotion with arm compensation, Sim2Sim."""
 
+    loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg(
+        policy_name="policy_observer_fine_tune", max_height_command_rate_m_s=0.1
+    )
     env: X2ObserverMujocoEnvCfg = X2ObserverMujocoEnvCfg(
         dof=X2LocomanipulationEnvDoF(),
         sim_dt=0.005,
@@ -43,6 +46,9 @@ class x2_locomimic_observer(x2_locomimic):
 class x2_locomimic_real_observer(x2_locomimic_real):
     """X2 position control with optional arm observer, Sim2Real."""
 
+    loco_policy: X2LocomanipulationPolicyCfg = X2LocomanipulationPolicyCfg(
+        policy_name="policy_observer_fine_tune", max_height_command_rate_m_s=0.1
+    )
     env: X2RealEnvCfg = X2RealEnvCfg(
         dof=X2LocomanipulationEnvDoF(),
         odometry_type="NONE",

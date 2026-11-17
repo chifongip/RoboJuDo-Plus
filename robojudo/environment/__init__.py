@@ -31,3 +31,5 @@ env_registry.add("DummyEnv", ".dummy_env")
 env_registry.add("UnitreeEnv", ".unitree_env")
 env_registry.add("UnitreeCppEnv", ".unitree_cpp_env")
 env_registry.add("AgiBotCppEnv", ".agibot_cpp_env")
+
+env_registry.add("X2OmniHandMujocoEnv", ".x2_omnihand_mujoco_env")

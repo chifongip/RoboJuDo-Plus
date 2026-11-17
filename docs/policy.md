@@ -371,17 +371,14 @@ python scripts/test_locomanipulation_posture_zmq.py --robot x2
 
 Select `JOINT_DEFAULT`, wait for the interpolation, then select `RL_DEFAULT` before commanding posture.
 
-The upper-body controller subscribes to `tcp://127.0.0.1:8559` by default and accepts partial named-joint updates:
-
-```json
-{"positions": {"left_shoulder_pitch_joint": 0.8}}
-```
-
-Unknown joints and non-finite values are rejected. Targets are clamped to joint limits, smoothed, and returned toward
-the default pose if messages become stale. The stream starts disabled and affects only joints outside the policy action
-set.
+The upper-body controller subscribes to `tcp://127.0.0.1:8559` by default. Each JSON `positions` object must contain
+all configured upper-body joints; see the complete X2 example in [the README](../README.md#upper-body-control).
+Unknown joints, incomplete frames and non-finite values are rejected without refreshing the group lease. Targets are
+clamped to joint limits and smoothed. After `0.25 s` without a valid complete frame, the entire group holds its last
+emitted targets. Explicit disable returns the group toward its default pose. The stream starts disabled and affects
+only joints outside the policy action set.
 `UpperBodyZmqCtrlCfg.max_joint_velocity_rad_s` defaults to `1.0 rad/s` per joint and must be finite and positive.
-The limit applies after smoothing to live targets and returns to default on timeout or disable, including reconnection.
+The limit applies after smoothing to live targets, reconnection and returns to default on explicit disable.
 At 50 Hz, commanded positions change by at most `0.02 rad` per cycle; this does not bound measured speed or torque.
 GR00T uses the same `1.0 rad/s` default.
 

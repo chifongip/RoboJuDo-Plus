@@ -7,39 +7,32 @@ from numbers import Integral, Real
 import numpy as np
 import zmq
 
-from robojudo.controller import Controller
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
+from robojudo.controller.upper_body_zmq_ctrl import UpperBodyZmqCtrl
 
 logger = logging.getLogger(__name__)
 
 
-class UpperBodyHandZmqCtrlBase(Controller):
-    """Validate an atomic arm/hands frame and delegate hand I/O to a runtime.
+class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
+    """Share arm/hand transport and lifecycle across streaming and feedback modes.
 
     Concrete hand controllers provide only their wire ``hand_type``, physical
-    joint schema, output key, and runtime factory. ZMQ flow control, frame
-    validation, freshness, takeover, and lifecycle behavior stay identical.
+    joint schema, output key, and runtime factory. Feedback mode stages checked
+    desired targets until environment submission; streaming mode accepts synchronized frames.
     """
 
+    has_hands = True
     hand_type: str
     hand_data_key: str
     hand_display_name: str
     left_hand_joint_names: tuple[str, ...]
     right_hand_joint_names: tuple[str, ...]
     cfg_ctrl: UpperBodyZmqCtrlCfg
+    _conflate_legacy_frames = True
 
     def __init__(self, cfg_ctrl: UpperBodyZmqCtrlCfg, env=None, device="cpu"):
         super().__init__(cfg_ctrl=cfg_ctrl, env=env, device=device)
         self._arm_joint_names = tuple(cfg_ctrl.joint_names)
-        self._context = zmq.Context.instance()
-        self._socket = self._context.socket(zmq.SUB)
-        self._socket.setsockopt(zmq.LINGER, 0)
-        # Keep the control path latest-only so scheduling delays cannot replay
-        # an accumulated burst of stale teleoperation commands.
-        self._socket.setsockopt(zmq.RCVHWM, 1)
-        self._socket.setsockopt(zmq.CONFLATE, 1)
-        self._socket.setsockopt(zmq.SUBSCRIBE, b"")
-        self._socket.connect(cfg_ctrl.endpoint)
         self._latest_arm_joint_positions: dict[str, float] = {}
         self._latest_hand_joint_commands: np.ndarray | None = None
         self._latest_sync_frame_id: int | None = None
@@ -47,42 +40,44 @@ class UpperBodyHandZmqCtrlBase(Controller):
         self._last_received_at: float | None = None
         self._last_invalid_log_at = float("-inf")
         self._hand_runtime = None
-        logger.info("%s subscribed to %s", type(self).__name__, cfg_ctrl.endpoint)
+        self._hand_stream_generation = None
+        self.pending = None
+        if self.feedback is not None:
+            self._joint_names.update((*self.left_hand_joint_names, *self.right_hand_joint_names))
+        self._hand_generation = None if self.feedback is None else self.feedback.generation
         try:
-            self._hand_runtime = self._create_hand_runtime(cfg_ctrl)
+            simulated_feedback = self.feedback is not None and env is not None and env.cfg_env.is_sim
+            if not simulated_feedback:
+                self._hand_runtime = self._create_hand_runtime(cfg_ctrl)
         except Exception:
-            self._socket.close(linger=0)
+            self.close()
             raise
 
     def _create_hand_runtime(self, cfg_ctrl: UpperBodyZmqCtrlCfg):
         raise NotImplementedError
 
     def reset(self):
-        """Clear accepted stream state and discard frames already in the socket."""
-
+        super().reset()
         self._latest_arm_joint_positions.clear()
         self._latest_hand_joint_commands = None
         self._latest_sync_frame_id = None
         self._latest_source_timestamp_ns = None
-        self._last_received_at = None
-        self._hand_runtime.reset()
-        while True:
-            try:
-                self._socket.recv(flags=zmq.NOBLOCK)
-            except zmq.Again:
-                break
+        self.pending = None
+        if self._hand_runtime is not None:
+            self._hand_runtime.reset()
+        self._hand_generation = None if self.feedback is None else self.feedback.generation
 
     def close(self):
-        hand_runtime = getattr(self, "_hand_runtime", None)
-        if hand_runtime is not None:
-            hand_runtime.close()
+        super().close()
+        if self._hand_runtime is not None:
+            self._hand_runtime.close()
             self._hand_runtime = None
-        self._socket.close(linger=0)
 
     def set_takeover_enabled(self, enabled: bool):
         """Forward the pipeline hardware takeover gate to the hand runtime."""
 
-        self._hand_runtime.set_takeover_enabled(enabled)
+        if self._hand_runtime is not None:
+            self._hand_runtime.set_takeover_enabled(enabled)
 
     @staticmethod
     def _validate_joint_payload(payload, expected_names: tuple[str, ...], label: str) -> np.ndarray:
@@ -99,7 +94,10 @@ class UpperBodyHandZmqCtrlBase(Controller):
             raise ValueError(f"{label} qpos must contain exactly {len(expected_names)} values")
         if any(isinstance(value, bool) or not isinstance(value, Real) for value in joint_positions):
             raise ValueError(f"{label} qpos values must be numeric")
-        values = np.asarray(joint_positions, dtype=np.float64)
+        try:
+            values = np.asarray(joint_positions, dtype=np.float64)
+        except OverflowError as exc:
+            raise ValueError(f"{label} qpos values must fit float64") from exc
         if not np.isfinite(values).all():
             raise ValueError(f"{label} qpos values must be finite")
         return values
@@ -141,7 +139,7 @@ class UpperBodyHandZmqCtrlBase(Controller):
 
     def _log_invalid_message(self, exc: Exception, now: float):
         if now - self._last_invalid_log_at >= 1.0:
-            logger.warning("Rejected synchronized %s upper-body ZMQ frame: %s", self.hand_display_name, exc)
+            logger.warning("Rejected %s upper-body ZMQ frame: %s", self.hand_display_name, exc)
             self._last_invalid_log_at = now
 
     def _receive_latest(self, now: float):
@@ -173,9 +171,10 @@ class UpperBodyHandZmqCtrlBase(Controller):
                 and self._latest_sync_frame_id is not None
                 and synchronized_frame_id <= self._latest_sync_frame_id
             ):
-                raise ValueError(
-                    f"frame_id {synchronized_frame_id} is not newer than {self._latest_sync_frame_id}"
-                )
+                raise ValueError(f"frame_id {synchronized_frame_id} is not newer than {self._latest_sync_frame_id}")
+            snapshot = self._hand_runtime.get_data()
+            if self._synchronize_hand_stream(snapshot) or not snapshot.get("joint_state_fresh", False):
+                return
             combined_hand_joint_commands = self._hand_runtime.set_joint_commands(
                 left_hand_joint_commands,
                 right_hand_joint_commands,
@@ -197,12 +196,21 @@ class UpperBodyHandZmqCtrlBase(Controller):
     def get_data(self):
         """Return arm commands plus measured hand positions and freshness."""
 
+        if self._hand_runtime is not None:
+            self._synchronize_hand_stream(self._hand_runtime.get_data())
+        if getattr(self, "feedback", None) is not None:
+            return super().get_data()
         now = time.monotonic()
-        self._receive_latest(now)
+        if getattr(self, "_discard_backlog", False):
+            # Reset/toggle must discard queued frames in both protocol modes.
+            self._receive_available(now)
+        if not getattr(self, "_discard_backlog", False):
+            self._receive_latest(now)
+        hand_data = self._hand_runtime.get_data()
+        self._synchronize_hand_stream(hand_data)
         has_received = self._last_received_at is not None
         age_s = None if self._last_received_at is None else now - self._last_received_at
-        stream_is_fresh = age_s is not None and age_s <= self.cfg_ctrl.timeout_s
-        hand_data = self._hand_runtime.get_data()
+        stream_is_fresh = age_s is not None and 0 <= age_s <= self.cfg_ctrl.timeout_s
         if self._latest_hand_joint_commands is not None:
             # Recorder action belongs to the same source frame as the arm
             # command; measured state remains independently sampled hardware data.
@@ -218,15 +226,137 @@ class UpperBodyHandZmqCtrlBase(Controller):
         return {
             "joint_positions": self._latest_arm_joint_positions.copy(),
             "has_received": has_received,
-            "fresh": stream_is_fresh,
+            "fresh": bool(stream_is_fresh and hand_data.get("joint_state_fresh", False)),
             "age_s": age_s,
             "frame_id": self._latest_sync_frame_id,
             "source_timestamp_ns": self._latest_source_timestamp_ns,
             self.hand_data_key: hand_data,
         }
 
+    def _synchronize_hand_stream(self, snapshot):
+        generation = snapshot.get("stream_generation")
+        if generation is None:
+            return False
+        previous = getattr(self, "_hand_stream_generation", None)
+        self._hand_stream_generation = generation
+        if previous is not None and previous != generation:
+            # Clear queued transport frames and checked desired targets on both sides
+            # of a hold. Preserve operator intent through this hardware outage.
+            if self.feedback is not None:
+                self.invalidate("hand feedback stream changed", recoverable=True)
+            else:
+                super().reset()
+                self.pending = None
+                self._latest_sync_frame_id = None
+                self._latest_hand_joint_commands = None
+                self._latest_source_timestamp_ns = None
+                self._last_received_at = None
+            log = logger.info if snapshot.get("joint_state_fresh", False) else logger.warning
+            log(
+                "%s hardware feedback %s; pending desired targets cleared",
+                self.hand_display_name,
+                snapshot.get("connection_status", "changed"),
+            )
+            return True
+        return False
+
     def process_triggers(self, ctrl_data):
         return ctrl_data, []
+
+    def _decode_message(self, message):
+        return super()._decode_message(message)
+
+    def hand_snapshot(self):
+        if self._hand_runtime is None:
+            return self.env.hand_snapshot()
+        snapshot = self._hand_runtime.get_data()
+        self._synchronize_hand_stream(snapshot)
+        # Robot feedback requires fresh measurements even before any command is admitted.
+        snapshot["fresh"] = snapshot["joint_state_fresh"]
+        return snapshot
+
+    def record_hand_data(self):
+        snapshot = self.hand_snapshot()
+        names = [*self.left_hand_joint_names, *self.right_hand_joint_names]
+        return {
+            "fresh": snapshot["fresh"],
+            "joint_names": names,
+            "joint_positions": [snapshot["positions"][name] for name in names],
+            "joint_position_commands": [snapshot["targets"][name] for name in names],
+        }
+
+    def invalidate(self, reason, *, recoverable=False):
+        runtime = self._hand_runtime
+        requested = getattr(runtime, "takeover_requested", False)
+        self.reset()
+        if recoverable and requested:
+            runtime.set_takeover_enabled(True)
+        # The bridge preserves clutch engagement across transient command outages.
+        self.feedback.reset_reason = "tracking command timeout" if recoverable else reason
+        if reason != "hand feedback stream changed":
+            self._log_invalid_message(ValueError(reason), time.monotonic())
+
+    def synchronize_generation(self):
+        if self._hand_generation != self.feedback.generation:
+            self.pending = None
+            if self._hand_runtime is not None:
+                invalidate = getattr(self._hand_runtime, "invalidate_commands", None)
+                if invalidate is not None:
+                    invalidate()
+                else:
+                    self._hand_runtime.reset()
+            self._hand_generation = self.feedback.generation
+
+    def synchronize_intent(self, intent):
+        changed = self.feedback.intent != intent
+        if changed:
+            self.invalidate("control intent changed")
+            self.feedback.intent = intent
+        self.synchronize_generation()
+        return changed
+
+    def submit_hands(self, desired):
+        self.synchronize_generation()
+        desired.setdefault("_command_timestamps", {})["hand_submitted"] = time.monotonic()
+        deadline = self.feedback._states[desired["state_id"]][0]
+        identity = (desired["generation"], desired["frame_id"])
+        if self._hand_runtime is None:
+            self.env.submit_hand_targets(desired["positions"])
+        else:
+            self._hand_runtime.set_takeover_enabled(True)
+            self._hand_runtime.submit(desired["positions"], identity, deadline)
+        self.pending = (desired, identity, deadline)
+        self._clear_positions()
+
+    def finish_pending(self, state=None, *, observation_source="periodic"):
+        self.synchronize_generation()
+        if self.pending is None:
+            return False
+        pending = self.pending
+        desired, identity, deadline = pending
+        generation = self.feedback.generation
+        if state is None:
+            state = self.hand_snapshot()
+        if self.feedback.generation != generation or self.pending is not pending:
+            return False
+        # A matching hardware identity is only published after both writes
+        # completed before their deadline. Observing it later is not a failure.
+        applied = self._hand_runtime is not None and state["applied"] == identity
+        if not state["fresh"] or (not applied and time.monotonic() > deadline):
+            self.invalidate("finger application expired or measurements stale", recoverable=True)
+            return False
+        if self._hand_runtime is not None and state["applied"] != identity:
+            return False
+        stamps = desired.setdefault("_command_timestamps", {})
+        stamps["acknowledged"] = time.monotonic()
+        if applied:
+            stamps.update(state.get("command_timestamps", {}))
+        desired["_completion_observation_source"] = observation_source
+        self.feedback.acknowledge(desired)
+        if self._hand_runtime is not None:
+            self._hand_runtime.acknowledge()
+        self.pending = None
+        return True
 
 
 __all__ = ["UpperBodyHandZmqCtrlBase"]

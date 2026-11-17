@@ -1,4 +1,5 @@
-from typing import Literal
+import math
+from typing import ClassVar, Literal
 
 from pydantic import Field, model_validator
 
@@ -202,21 +203,38 @@ class OmniHandCfg(Config):
     transport: Literal["hcan", "zlgcan", "socketcan"] = "hcan"
     left_adapter_index: int = Field(default=1, ge=0)
     right_adapter_index: int = Field(default=0, ge=0)
+    left_hcan_serial: str | None = None
+    right_hcan_serial: str | None = None
+    left_hand_serial: str | None = None
+    right_hand_serial: str | None = None
+    frame_recv_timeout_ms: int = Field(default=200, ge=10, le=1000)
     zlgcan_left_channel_id: int | None = Field(default=None, ge=0)
     zlgcan_right_channel_id: int | None = Field(default=None, ge=0)
     left_interface: str = "can0"
     right_interface: str = "can1"
     hand_can_id: int | None = Field(default=None, ge=1, le=254)
-    command_timeout_s: float = Field(default=0.25, gt=0.0)
-    joint_state_fps: float = Field(default=100.0, gt=0.0)
-    joint_state_timeout_s: float = Field(default=0.25, gt=0.0)
-    startup_timeout_s: float = Field(default=5.0, gt=0.0)
+    command_timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
+    joint_state_fps: float = Field(default=100.0, gt=0.0, allow_inf_nan=False)
+    joint_state_timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
+    startup_timeout_s: float = Field(default=15.0, gt=0.0, allow_inf_nan=False)
+
+    auto_reconnect: bool = True
+    reconnect_timeout_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    reconnect_interval_s: float = Field(default=1.0, gt=0.0, le=5.0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_omnihand(self):
-        if self.transport == "socketcan" and (
-            not self.left_interface.strip() or not self.right_interface.strip()
-        ):
+        if self.reconnect_timeout_s < self.joint_state_timeout_s:
+            raise ValueError("reconnect_timeout_s must be at least joint_state_timeout_s")
+        serials = (self.left_hcan_serial, self.right_hcan_serial, self.left_hand_serial, self.right_hand_serial)
+        if any(value is not None for value in serials):
+            if self.transport != "hcan":
+                raise ValueError("serial selection requires HCAN transport")
+            if not all(isinstance(value, str) and value.strip() == value and value for value in serials):
+                raise ValueError("serial selection requires both HCAN serials and both exact hand serials")
+            if self.left_hcan_serial == self.right_hcan_serial or self.left_hand_serial == self.right_hand_serial:
+                raise ValueError("left and right adapter/hand serials must differ")
+        if self.transport == "socketcan" and (not self.left_interface.strip() or not self.right_interface.strip()):
             raise ValueError("OmniHand SocketCAN interfaces must not be empty")
         return self
 
@@ -231,7 +249,7 @@ class CasiaHandCfg(Config):
     command_timeout_s: float = Field(default=0.25, gt=0.0)
     joint_state_fps: float = Field(default=100.0, gt=0.0)
     joint_state_timeout_s: float = Field(default=0.25, gt=0.0)
-    startup_timeout_s: float = Field(default=5.0, gt=0.0)
+    startup_timeout_s: float = Field(default=15.0, gt=0.0)
     auto_reconnect: bool = False
     reconnect_timeout_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
     reconnect_interval_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
@@ -254,10 +272,25 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
     endpoint: str = "tcp://127.0.0.1:8559"
     joint_names: list[str] = []
     upper_body_default_pose: list[float] | None = None
-    """Optional controller-specific fallback pose, ordered like ``joint_names``."""
+    """Optional pose for explicit control disable, ordered like ``joint_names``."""
     timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
+    xr_profile: ClassVar[str] = "x2"
+    executor_collision_checking: bool = False
+    executor_collision_margin: ClassVar[float] = 0.02
+    executor_collision_trigger: ClassVar[float] = 0.08
     ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
     max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    feedback_endpoint: str | None = None
+    """Opt into robot-authoritative XR execution and measured feedback."""
+    command_receive_hwm: int = Field(default=100, ge=1, le=100)
+    """Command SUB queue limit; XR presets use 8 while streaming controllers retain 100."""
+    feedback_send_hwm: int = Field(default=1, ge=1, le=8)
+    """Bounded feedback PUB queue limit."""
+    visualize_targets: bool = False
+    """Request torso-relative hand target frames for optional simulation overlays."""
+    feedback_timeout_s: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
+    return_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    """Return cap advertised in feedback; streaming filtering uses max_joint_velocity_rad_s."""
 
     @model_validator(mode="after")
     def validate_upper_body_zmq(self):
@@ -272,15 +305,33 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
                 "Upper-body ZMQ upper_body_default_pose length "
                 f"{len(self.upper_body_default_pose)} must match joint_names length {len(self.joint_names)}"
             )
+        if self.upper_body_default_pose is not None and not all(map(math.isfinite, self.upper_body_default_pose)):
+            raise ValueError("Upper-body ZMQ upper_body_default_pose must contain only finite values")
+        if self.feedback_endpoint is not None:
+            if self.ctrl_type not in {"UpperBodyZmqCtrl", "UpperBodyOmniHandZmqCtrl"}:
+                raise ValueError("upper-body feedback supports UpperBodyZmqCtrl and UpperBodyOmniHandZmqCtrl")
+            if not self.feedback_endpoint.startswith("tcp://") or not self.feedback_endpoint[6:].strip():
+                raise ValueError("upper-body feedback_endpoint must use tcp://")
         return self
 
 
 class UpperBodyOmniHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
-    """Atomic arm and dual-OmniHand targets received from synchronized teleoperation."""
+    """Arm/OmniHand targets; feedback_endpoint selects robot-authoritative XR execution."""
 
     ctrl_type: str = "UpperBodyOmniHandZmqCtrl"
     endpoint: str = "tcp://127.0.0.1:8560"
+    xr_profile: ClassVar[str] = "x2_omnihand"
+    hand_command_mode: Literal["filtered", "direct"] = "direct"
+    hand_velocity_limit: float = Field(default=2.0, gt=0.0, allow_inf_nan=False, strict=True)
     omnihand: OmniHandCfg = OmniHandCfg()
+    serial_config: str | None = None
+    """Robot-local JSON file with the four HCAN/hand serial fields."""
+
+    @model_validator(mode="after")
+    def validate_hand_feedback(self):
+        if self.feedback_endpoint is not None and self.omnihand.transport != "hcan":
+            raise ValueError("OmniHand feedback hardware uses HCAN")
+        return self
 
 
 class UpperBodyCasiaHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):

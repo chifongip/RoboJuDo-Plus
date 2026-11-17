@@ -147,9 +147,10 @@ class UpperBodyTransmissionTests(unittest.TestCase):
         # Emulate data ageing during policy inference without changing the socket.
         for name in data.UpperBodyZmqCtrl.joint_received_at:
             data.UpperBodyZmqCtrl.joint_received_at[name] -= 1.0
+        held = self.pipeline._upper_body_filtered.copy()
         self.apply(data)
         self.assertFalse(self.pipeline._upper_body_stream_was_fresh)
-        np.testing.assert_array_equal(self.pipeline._upper_body_filtered, self.pipeline._upper_body_default)
+        np.testing.assert_array_equal(self.pipeline._upper_body_filtered, held)
         old_data = self.receive({name: 0.3 for name in self.arms})
         self.pipeline._set_upper_body_enabled(False)
         self.pipeline._set_upper_body_enabled(True)

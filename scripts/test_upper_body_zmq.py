@@ -210,7 +210,7 @@ def print_controls(profile: TestProfile):
         if pose_name in profile.poses:
             print(f"  {key} - {pose_name}")
     print("  q - stop publishing and quit")
-    print("\nThe robot returns toward its default arm pose after publishing stops.\n")
+    print("\nThe arms hold their last targets after publishing stops; disable control to return to the default pose.\n")
 
 
 def main():

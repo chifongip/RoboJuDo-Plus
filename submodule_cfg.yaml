@@ -42,6 +42,21 @@ dex_teleop:
   installer: scripts/install_dex_teleop.py
 
 
+# XRoboToolkit X2 simulation and external-state arm teleoperation bridge.
+# Creates robojudo-xr (Python 3.11) with the [x2] extra, SDK, Placo and LeRobot bindings.
+xrobotoolkit_teleop:
+  install: false
+  path: third_party/xrobotoolkit_teleop
+  installer: scripts/install_xrobotoolkit_teleop.py
+
+
+# Numeric transition executor in the active RoboJuDo environment (no XR SDK/IK install).
+xr_executor:
+  install: false
+  path: third_party/xrobotoolkit_teleop
+  installer: scripts/install_xr_executor.py
+
+
 # AGILINK OmniHand Python SDK. The installer selects the bundled wheel for
 # the active CPython ABI and Linux architecture without modifying /usr/local.
 omnihand_sdk:

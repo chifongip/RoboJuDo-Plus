@@ -93,7 +93,8 @@ class TestPostureTransitions(unittest.TestCase):
         cfg.max_joint_velocity_rad_s = 0.05  # Exercise a cap below the requested trajectory speed.
         defaults = evaluation.default_posture()
         env = SimpleNamespace(position_limits=np.asarray([[-4, 4]] * 14))
-        pipeline = SimpleNamespace(
+        pipeline = UpperBodyZmqPipelineMixin.__new__(UpperBodyZmqPipelineMixin)
+        pipeline.__dict__.update(
             _upper_body_cfg=cfg,
             _upper_body_default=defaults,
             _upper_body_filtered=defaults.copy(),
@@ -104,7 +105,7 @@ class TestPostureTransitions(unittest.TestCase):
             dt=0.02,
         )
         data = Box({"UpperBodyZmqCtrl": {"fresh": True, "joint_positions": evaluation.POSTURE}})
-        result = UpperBodyZmqPipelineMixin._apply_upper_body_override(pipeline, defaults, data)
+        result = pipeline._apply_upper_body_override(defaults, data)
         self.assertLessEqual(np.max(np.abs(result - defaults)), 0.05 * 0.02 + 1e-7)
 
     def test_moving_reference_not_counted_as_sag(self):

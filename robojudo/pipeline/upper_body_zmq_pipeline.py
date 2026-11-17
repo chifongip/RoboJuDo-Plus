@@ -20,6 +20,9 @@ class UpperBodyZmqPipelineMixin:
         self._upper_body_enabled = False
         self._upper_body_stream_was_fresh = False
         self._upper_body_generation = None
+        self._upper_body_pending = None
+        self._upper_body_command_submitted = False
+        self._upper_body_recording_completion = None
         self._upper_body_indices = np.asarray([], dtype=np.int32)
         self._upper_body_default = np.asarray([], dtype=np.float32)
         self._upper_body_filtered = np.asarray([], dtype=np.float32)
@@ -29,6 +32,9 @@ class UpperBodyZmqPipelineMixin:
         self._recording_review_pending = False
         super().__init__(cfg=cfg)
         self._configure_upper_body_override()
+        receiver = self._feedback_receiver()
+        if receiver is not None and receiver.has_hands:
+            logger.info("Upper-body completion checkpoints enabled before and after policy inference")
         if cfg.record.enabled:
             if self._upper_body_cfg is None:
                 raise ValueError("recording requires an UpperBodyZmqCtrl configuration")
@@ -40,8 +46,11 @@ class UpperBodyZmqPipelineMixin:
             recorder_client.finish_episode(save=True)
         self._recording_active = False
         self._recording_paused = False
+        self._upper_body_recording_completion = None
         self._upper_body_enabled = False
         self._upper_body_stream_was_fresh = False
+        self._upper_body_pending = None
+        self._upper_body_command_submitted = False
         super().reset()
         if self._upper_body_indices.size:
             self._upper_body_filtered = self.env.dof_pos[self._upper_body_indices].astype(np.float32)
@@ -88,13 +97,21 @@ class UpperBodyZmqPipelineMixin:
             return
         self._upper_body_enabled = enabled
         self._upper_body_stream_was_fresh = False
+        self._upper_body_pending = None
         manager = getattr(self, "ctrl_manager", None)
-        entry = getattr(manager, "controllers", {}).get("UpperBodyZmqCtrl")
+        controller_type = self._upper_body_controller_type()
+        entry = getattr(manager, "controllers", {}).get(controller_type)
         if entry is not None:
-            receiver = entry["inst"]
-            receiver.reset()
-            self._upper_body_generation = receiver.reset_generation
+            receiver = entry["inst"] if isinstance(entry, dict) else entry.inst
+            if controller_type == "UpperBodyZmqCtrl" or getattr(self._upper_body_cfg, "feedback_endpoint", None):
+                receiver.reset()
+                self._upper_body_generation = receiver.reset_generation
+            else:
+                receiver.set_takeover_enabled(enabled)
         logger.warning("Upper-body ZMQ control %s", "enabled" if enabled else "disabled")
+
+    def _upper_body_controller_type(self):
+        return getattr(self._upper_body_cfg, "ctrl_type", getattr(self, "hand_controller_type", "UpperBodyZmqCtrl"))
 
     def _toggle_upper_body(self):
         if self._upper_body_cfg is None:
@@ -112,9 +129,12 @@ class UpperBodyZmqPipelineMixin:
     def _apply_upper_body_override(self, pd_target: np.ndarray, ctrl_data) -> np.ndarray:
         if self._upper_body_cfg is None:
             return pd_target
+        receiver = self._feedback_receiver()
+        if receiver is not None:
+            return self._apply_feedback_desired(pd_target, ctrl_data, receiver)
 
         desired = self._upper_body_default.copy()
-        stream_data = ctrl_data.get("UpperBodyZmqCtrl", {})
+        stream_data = ctrl_data.get(self._upper_body_controller_type(), {})
         stream_is_fresh = bool(stream_data.get("fresh", False))
         generation = getattr(self, "_upper_body_generation", None)
         if generation is not None:
@@ -123,17 +143,25 @@ class UpperBodyZmqPipelineMixin:
             if isinstance(stream_generation, int) and stream_generation >= generation:
                 self._upper_body_generation = stream_generation
         positions = stream_data.get("joint_positions", {})
+        stream_is_fresh = (
+            stream_is_fresh and isinstance(positions, dict) and set(positions) == set(self._upper_body_cfg.joint_names)
+        )
         received_at = stream_data.get("joint_received_at")
         if received_at is not None:
             now = time.monotonic()
             # Inference occurs after CtrlManager samples the receiver. Recheck
             # leases at application time, rather than trusting an earlier bool.
-            positions = {
-                name: value
-                for name, value in positions.items()
-                if name in received_at and 0 <= now - received_at[name] <= self._upper_body_cfg.timeout_s
-            }
-            stream_is_fresh = stream_is_fresh and bool(positions)
+            stream_is_fresh = stream_is_fresh and all(
+                name in received_at and 0 <= now - received_at[name] <= self._upper_body_cfg.timeout_s
+                for name in self._upper_body_cfg.joint_names
+            )
+        if self._upper_body_enabled and not stream_is_fresh:
+            if self._upper_body_stream_was_fresh:
+                logger.warning("Upper-body ZMQ stream timed out or became incomplete; holding joint targets")
+            self._upper_body_stream_was_fresh = False
+            target = np.asarray(pd_target, dtype=np.float32).copy()
+            target[self._upper_body_indices] = self._upper_body_filtered
+            return target
         if self._upper_body_enabled and stream_is_fresh:
             for local_index, name in enumerate(self._upper_body_cfg.joint_names):
                 if name in positions:
@@ -143,8 +171,6 @@ class UpperBodyZmqPipelineMixin:
                     desired[local_index] = np.clip(positions[name], -numeric_limit, numeric_limit)
             if not self._upper_body_stream_was_fresh:
                 logger.info("Upper-body ZMQ stream active")
-        elif self._upper_body_enabled and self._upper_body_stream_was_fresh:
-            logger.warning("Upper-body ZMQ stream timed out; returning to defaults")
 
         limits = self.env.position_limits[self._upper_body_indices]
         desired = np.clip(desired, limits[:, 0], limits[:, 1])
@@ -162,6 +188,339 @@ class UpperBodyZmqPipelineMixin:
         target[self._upper_body_indices] = self._upper_body_filtered
         return target
 
+    def _feedback_receiver(self):
+        cfg = getattr(self, "_upper_body_cfg", None)
+        if cfg is None or getattr(cfg, "feedback_endpoint", None) is None:
+            return None
+        return self.ctrl_manager.controllers[cfg.ctrl_type]["inst"]
+
+    def _feedback_intent(self):
+        mode = getattr(getattr(self, "mode", None), "value", None)
+        if (
+            mode != "RL_DEFAULT"
+            or not self._upper_body_control_available()
+            or getattr(self.env, "_last_safety_state", None) == "HOLD"
+        ):
+            return "HOLD"
+        return "TRACK" if self._upper_body_enabled else "HOME"
+
+    def _reset_upper_body_feedback(self):
+        receiver = self._feedback_receiver()
+        if receiver is not None:
+            receiver.reset()
+            self._upper_body_pending = None
+            self._upper_body_stream_was_fresh = False
+
+    def _refresh_upper_body_feedback(self, ctrl_data):
+        receiver = self._feedback_receiver()
+        if receiver is not None:
+            # Proposals may arrive while policy inference is running. Sample
+            # them at application time rather than adding another control cycle.
+            ctrl_data[self._upper_body_cfg.ctrl_type] = receiver.get_data()
+
+    def _apply_feedback_desired(self, pd_target, ctrl_data, receiver):
+        # An outage never sends the arms home. Only HOME intent authorizes the
+        # validated return, including while teleop is disabled.
+        self._upper_body_pending = None
+        self._upper_body_stream_was_fresh = False
+        hands = receiver.has_hands
+        receiver.synchronize_intent(self._feedback_intent())
+        if not self._upper_body_control_available():
+            return pd_target
+        stream = ctrl_data.get(self._upper_body_cfg.ctrl_type, {})
+        desired = stream.get("desired")
+        busy = hands and receiver.pending is not None
+        if (
+            not busy
+            and stream.get("fresh")
+            and desired is not None
+            and desired.get("intent") == self._feedback_intent()
+        ):
+            positions = stream.get("joint_positions", {})
+            try:
+                measured = receiver.feedback.latest_measurements
+                if measured is None:
+                    raise ValueError("executor measurements unavailable")
+                if hands:
+                    measured = {**measured, **receiver.hand_snapshot()["positions"]}
+                desired = receiver.feedback.executor.prepare(receiver.feedback, desired, measured)
+                positions = desired["positions"]
+                receiver.feedback.validate(desired, positions)
+                if hands and not receiver.hand_snapshot()["fresh"]:
+                    raise ValueError("finger measurements are stale")
+                candidate = np.asarray([positions[name] for name in self._upper_body_cfg.joint_names], dtype=np.float32)
+                # Preserve the validator's exact float32 targets through submission.
+                checked = dict(positions)
+                checked.update(zip(self._upper_body_cfg.joint_names, candidate.tolist(), strict=True))
+                receiver.feedback.validate(desired, checked)
+            except (ValueError, KeyError, OverflowError, RuntimeError) as exc:
+                receiver.feedback.command_counts["rejected"] += 1
+                if hands and isinstance(exc, RuntimeError):
+                    receiver.invalidate(str(exc))
+                else:
+                    receiver._log_invalid_message(exc, time.monotonic())
+                    if hands:
+                        receiver._clear_positions()
+                        receiver.synchronize_generation()
+            else:
+                self._upper_body_previous = self._upper_body_filtered.copy()
+                self._upper_body_filtered = candidate
+                self._upper_body_pending = desired
+                self._upper_body_stream_was_fresh = self._upper_body_enabled and desired.get("status") == "tracking"
+        target = np.asarray(pd_target, dtype=np.float32).copy()
+        target[self._upper_body_indices] = self._upper_body_filtered
+        return target
+
+    def _send_upper_body_target(self, pd_target, hand_pose=None):
+        """Admit hands before issuing the corresponding arm target.
+
+        Physical writes remain asynchronous; the validator checks independent
+        application paths. Failure revokes further writes, never rolls hardware back.
+        """
+        receiver = self._feedback_receiver()
+        hands = receiver is not None and receiver.has_hands
+        desired = getattr(self, "_upper_body_pending", None)
+        if receiver is not None and desired is not None:
+            try:
+                if receiver.synchronize_intent(self._feedback_intent()):
+                    raise ValueError("control intent changed before submission")
+                receiver.feedback.validate(desired, desired["positions"])
+                if hands:
+                    if not receiver.hand_snapshot()["fresh"]:
+                        raise ValueError("finger measurements are stale before submission")
+                    receiver.submit_hands(desired)
+            except (ValueError, KeyError, RuntimeError) as exc:
+                receiver.invalidate(str(exc), recoverable=isinstance(exc, ValueError | KeyError))
+                self._upper_body_pending = None
+                self._upper_body_stream_was_fresh = False
+                self._upper_body_filtered = self._upper_body_previous.copy()
+                pd_target[self._upper_body_indices] = self._upper_body_filtered
+        try:
+            if hands and desired is not None:
+                desired.setdefault("_command_timestamps", {})["arm_submission_started"] = time.monotonic()
+            self.env.step(pd_target, hand_pose)
+            if hands and desired is not None:
+                desired.setdefault("_command_timestamps", {})["arm_submission_completed"] = time.monotonic()
+        except Exception:
+            if receiver is not None:
+                receiver.invalidate("arm submission failed")
+                self._upper_body_pending = None
+            raise
+        self._upper_body_command_submitted = True
+
+    def _update_upper_body_feedback(self, env_data, ctrl_data, pd_target):
+        cfg = getattr(self, "_upper_body_cfg", None)
+        if getattr(cfg, "visualize_targets", False):
+            draw_targets = getattr(self.env, "draw_teleop_targets", None)
+            if draw_targets is not None:
+                stream = ctrl_data.get(cfg.ctrl_type, {})
+                draw_targets(stream.get("target_poses", {}))
+        self._publish_upper_body_feedback(env_data, pd_target)
+
+    def report_xr_metrics(self):
+        """Called once after each completed pipeline step, never by idle servicing."""
+        receiver = self._feedback_receiver()
+        if receiver is None:
+            return
+        now = time.monotonic()
+        counts = receiver.feedback.command_counts
+        received, completed = counts["received"], counts["completed"]
+        previous = getattr(self, "_xr_metrics", None)
+        if previous is None or received < previous[2] or completed < previous[3]:
+            self._xr_metrics = (now, 0, received, completed)
+            return
+        started, frames, received_before, completed_before = previous
+        frames += 1
+        elapsed = now - started
+        if elapsed >= 1.0:
+            logger.info(
+                "RoboJuDo: receive=%.1f Hz | control=%.1f Hz | complete=%.1f Hz",
+                (received - received_before) / elapsed,
+                frames / elapsed,
+                (completed - completed_before) / elapsed,
+            )
+            self._xr_metrics = (now, 0, received, completed)
+        else:
+            self._xr_metrics = (started, frames, received_before, completed_before)
+
+    def get_idle_notifications(self):
+        """Only the pipeline thread consumes completion notifications and sends feedback."""
+        receiver = self._feedback_receiver()
+        runtime = None if receiver is None else getattr(receiver, "_hand_runtime", None)
+        notification = getattr(runtime, "notification_socket", None)
+        return () if notification is None else (notification,)
+
+    def service_idle_notifications(self):
+        receiver = self._feedback_receiver()
+        runtime = None if receiver is None else getattr(receiver, "_hand_runtime", None)
+        if getattr(runtime, "notification_socket", None) is None:
+            return
+        runtime.drain_notifications()
+        if getattr(self, "_upper_body_feedback_body", None) is not None:
+            self._publish_upper_body_feedback(None, None, idle=True)
+
+    def _service_upper_body_completion_checkpoint(self, source, *, dry_run=False):
+        """Observe an already issued frame on the owner thread; never select a new one.
+
+        None means the checkpoint is disabled. False means no completion was serviced.
+        """
+        receiver = self._feedback_receiver()
+        if dry_run or receiver is None or not receiver.has_hands:
+            return None
+        if (
+            getattr(receiver, "_hand_runtime", None) is None
+            or getattr(self, "_upper_body_feedback_body", None) is None
+            or self._upper_body_pending is not None
+            or receiver.pending is None
+            or not self._upper_body_control_available()
+        ):
+            return False
+        pending = receiver.pending
+        desired, identity, _ = pending
+        intent = self._feedback_intent()
+        if (
+            intent not in {"TRACK", "HOME"}
+            or desired["intent"] != intent
+            or receiver.feedback.intent != intent
+            or desired["session_id"] != receiver.feedback.session_id
+            or desired["generation"] != receiver.feedback.generation
+            or desired.get("_command_timestamps", {}).get("arm_submission_completed") is None
+        ):
+            return False
+        try:
+            state = receiver.hand_snapshot()
+            if receiver.pending is not pending or not state["fresh"] or state["applied"] != identity:
+                return False
+            # Publication re-reads state and uses the same completion checks as
+            # idle/post-step servicing. It cannot re-submit a hardware command.
+            before = receiver.feedback.command_id
+            self._publish_upper_body_feedback(None, None, idle=True, observation_source=source)
+            return receiver.feedback.command_id != before
+        except (RuntimeError, ValueError, KeyError) as exc:
+            receiver.invalidate(str(exc), recoverable=isinstance(exc, ValueError | KeyError))
+            self._upper_body_pending = None
+            self._upper_body_stream_was_fresh = False
+            return False
+
+    def _retain_recording_completion(self, receiver, command):
+        if getattr(self, "_recording_active", False) and self._upper_body_enabled and command["status"] == "tracking":
+            self._upper_body_recording_completion = (
+                receiver.feedback.generation,
+                time.monotonic(),
+                dict(receiver.feedback._completed_positions),
+            )
+
+    def _record_upper_body_submission(self, receiver, pd_target):
+        if not self._upper_body_command_submitted:
+            return
+        self._upper_body_filtered = np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices].copy()
+        if self._upper_body_pending is not None:
+            if receiver.has_hands:
+                # Admission precedes env.step. An issued frame cannot be re-applied.
+                if receiver.pending is None:
+                    raise ValueError("combined command was not admitted before arm submission")
+            else:
+                completed = self._upper_body_pending
+                receiver.acknowledge(completed)
+                self._retain_recording_completion(receiver, completed)
+        self._upper_body_pending = None
+
+    def _publish_upper_body_feedback(self, env_data, pd_target, *, idle=False, observation_source=None):
+        assembly_started = time.perf_counter()
+        receiver = self._feedback_receiver()
+        if receiver is None or not self._upper_body_indices.size:
+            return
+        hands = receiver.has_hands
+        try:
+            if receiver.synchronize_intent(self._feedback_intent()):
+                # Safety or ownership can change during environment submission.
+                self._upper_body_pending = None
+            if not idle:
+                self._record_upper_body_submission(receiver, pd_target)
+            hand_state = None
+            timing = dict(getattr(self, "_upper_body_timing_ms", {}))
+            if hands:
+                started = time.perf_counter()
+                hand_state = receiver.hand_snapshot()
+                timing["hand_snapshot"] = 1000 * (time.perf_counter() - started)
+                tracking = receiver.pending is not None and receiver.pending[0]["status"] == "tracking"
+                self._upper_body_stream_was_fresh = (
+                    receiver.finish_pending(
+                        hand_state, observation_source=observation_source or ("idle" if idle else "periodic")
+                    )
+                    and tracking
+                    and self._upper_body_enabled
+                )
+                if self._upper_body_stream_was_fresh:
+                    self._retain_recording_completion(receiver, {"status": "tracking"})
+            self._upper_body_pending = None
+            started = time.perf_counter()
+            get_feedback = getattr(self.env, "get_joint_feedback", None)
+            if idle:
+                body = self._upper_body_feedback_body
+            elif get_feedback is not None:
+                body = get_feedback()
+            else:
+                get_data = getattr(self.env, "get_data", None)
+                if self._upper_body_command_submitted and get_data is not None:
+                    env_data = get_data()
+                stamps = env_data.get("joint_sample_times")
+                body = {
+                    "positions": dict(zip(self.env.joint_names, np.asarray(env_data.dof_pos).tolist(), strict=True)),
+                    "sample_times": {} if stamps is None else dict(zip(self.env.joint_names, stamps, strict=True)),
+                }
+            if not idle:
+                # Idle feedback must never refresh measurement timestamps or run env I/O.
+                self._upper_body_feedback_body = {key: dict(values) for key, values in body.items()}
+            timing["body_snapshot"] = 1000 * (time.perf_counter() - started)
+            names = self._upper_body_cfg.joint_names
+            source_groups = {"body": list(body["positions"])}
+            payload = {
+                **{key: dict(values) for key, values in body.items()},
+                "targets": dict(zip(names, self._upper_body_filtered.tolist(), strict=True)),
+                "defaults": dict(zip(names, self._upper_body_default.tolist(), strict=True)),
+                "limits": {
+                    name: self.env.position_limits[index].tolist()
+                    for name, index in zip(names, self._upper_body_indices, strict=True)
+                },
+            }
+            diagnostics = {}
+            if hands:
+                hand_payload = receiver.hand_feedback_payload(hand_state)
+                for side, prefix in (("left_hand", "L_"), ("right_hand", "R_")):
+                    source_groups[side] = [name for name in hand_payload["positions"] if name.startswith(prefix)]
+                for key, values in hand_payload.items():
+                    payload[key].update(values)
+                diagnostics = {
+                    key: hand_state[key]
+                    for key in (
+                        "snapshot_sequence",
+                        "snapshot_connection_generation",
+                        "handoff_delay_ms",
+                        "snapshot_cache_age_ms",
+                    )
+                    if key in hand_state
+                }
+            timing["feedback_assembly"] = 1000 * (time.perf_counter() - assembly_started)
+            receiver.feedback.publish(
+                **payload,
+                intent=self._feedback_intent(),
+                mode=self.mode.value,
+                control_dt=self.dt,
+                timing_ms=timing,
+                source_groups=source_groups,
+                diagnostics=diagnostics,
+                measurements_available=hand_state["fresh"] if hands else True,
+            )
+            if hands:
+                receiver.synchronize_generation()
+        except (RuntimeError, ValueError, KeyError) as exc:
+            if not hands:
+                raise
+            receiver.invalidate(str(exc), recoverable=isinstance(exc, ValueError | KeyError))
+            self._upper_body_pending = None
+            self._upper_body_stream_was_fresh = False
+
     # Recording methods
     def _record_upper_body_sample(self, env_data, extras, pd_target, *, rl_active: bool):
         recorder_client = getattr(self, "_recorder_client", None)
@@ -175,20 +534,67 @@ class UpperBodyZmqPipelineMixin:
         if not can_record:
             self._finish_recording_episode()
             return
-        if self._recording_paused or not self._upper_body_stream_was_fresh:
+        receiver = self._feedback_receiver()
+        xr = receiver is not None
+        completion = getattr(self, "_upper_body_recording_completion", None)
+        self._upper_body_recording_completion = None
+        if self._recording_paused:
+            return
+        if xr:
+            if (
+                completion is None
+                or completion[0] != receiver.feedback.generation
+                or time.monotonic() - completion[1] > self._upper_body_cfg.feedback_timeout_s
+                or receiver.feedback.intent != "TRACK"
+            ):
+                return
+        elif not self._upper_body_stream_was_fresh:
             return
 
         locomotion_command = extras.get("locomotion_command")
         if locomotion_command is None or len(locomotion_command) < 4:
             logger.warning("Skipped recording frame without a velocity/height command")
             return
+        names = list(self._upper_body_cfg.joint_names)
+        positions = np.asarray(env_data.dof_pos, dtype=np.float32)[self._upper_body_indices]
+        commands = np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices]
+        hand_data = self._upper_body_record_hand_data()
+        if hand_data is not None:
+            if not hand_data.get("fresh", False):
+                return
+            hand_names = list(hand_data.get("joint_names", []))
+            hand_positions = np.asarray(hand_data.get("joint_positions"), dtype=np.float32)
+            hand_commands = np.asarray(hand_data.get("joint_position_commands"), dtype=np.float32)
+            if (
+                not hand_names
+                or hand_positions.shape != (len(hand_names),)
+                or hand_commands.shape != (len(hand_names),)
+            ):
+                logger.warning("Skipped recording frame with an invalid hand snapshot")
+                return
+            names.extend(hand_names)
+            positions = np.concatenate((positions, hand_positions))
+            commands = np.concatenate((commands, hand_commands))
+        if xr:
+            commands = np.asarray([completion[2][name] for name in names], dtype=np.float32)
         recorder_client.submit(
-            joint_names=list(self._upper_body_cfg.joint_names),
-            joint_positions=np.asarray(env_data.dof_pos, dtype=np.float32)[self._upper_body_indices],
-            joint_position_commands=np.asarray(pd_target, dtype=np.float32)[self._upper_body_indices],
+            joint_names=names,
+            joint_positions=positions,
+            joint_position_commands=commands,
             velocity_height_command=np.asarray(locomotion_command, dtype=np.float32)[:4],
             timestamp_ns=time.monotonic_ns(),
         )
+
+    def _upper_body_record_hand_data(self):
+        receiver = self._feedback_receiver()
+        if receiver is not None and receiver.has_hands:
+            try:
+                return receiver.record_hand_data()
+            except RuntimeError as exc:
+                receiver.invalidate(str(exc))
+                self._upper_body_stream_was_fresh = False
+                return {"fresh": False}
+        return None
 
     def _toggle_recording_episode(self):
         if getattr(self, "_recorder_client", None) is None:
@@ -205,6 +611,7 @@ class UpperBodyZmqPipelineMixin:
             return
         if not self._upper_body_enable_available():
             return
+        self._upper_body_recording_completion = None
         self._recording_active = True
         self._recording_paused = False
         logger.warning("Recording started; waiting for a fresh upper-body sample")

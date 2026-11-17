@@ -96,7 +96,7 @@ class TestCasiaReconnect(unittest.TestCase):
         pipeline.dt = 0.02
         return pipeline
 
-    def test_outage_invalidates_actions_and_arms_return_to_default(self):
+    def test_outage_invalidates_actions_and_arms_hold_until_explicit_disable(self):
         self.socket.messages.append(self.message())
         self.assertTrue(self.controller.get_data()["fresh"])
         self.controller._observation_snapshot = (1, np.ones(22))
@@ -116,7 +116,11 @@ class TestCasiaReconnect(unittest.TestCase):
         self.assertFalse(data["takeover_enabled"])
         self.assertTrue(pipeline._upper_body_enabled)
         target = pipeline._apply_upper_body_override(np.zeros(2), ctrl_data)
-        np.testing.assert_allclose(target, [0.78, -0.78])
+        np.testing.assert_allclose(target, [0.8, -0.8])
+        for _ in range(50):
+            target = pipeline._apply_upper_body_override(np.zeros(2), ctrl_data)
+        np.testing.assert_allclose(target, [0.8, -0.8])
+        pipeline._set_upper_body_enabled(False)
         for _ in range(50):
             target = pipeline._apply_upper_body_override(np.zeros(2), ctrl_data)
         np.testing.assert_allclose(target, [0.1, -0.1])

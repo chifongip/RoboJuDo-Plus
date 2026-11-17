@@ -109,6 +109,7 @@ class TestX2Locomanipulation(unittest.TestCase):
             "UpperBodyZmqCtrl": {
                 "fresh": True,
                 "joint_positions": {
+                    **dict(zip(pipeline._upper_body_cfg.joint_names, pipeline._upper_body_default, strict=True)),
                     "left_shoulder_pitch_joint": 0.8,
                     "right_elbow_joint": -0.5,
                 },
@@ -123,7 +124,7 @@ class TestX2Locomanipulation(unittest.TestCase):
         np.testing.assert_array_equal(result[:15], policy_target[:15])
         np.testing.assert_array_equal(result[-2:], policy_target[-2:])
 
-        command["UpperBodyZmqCtrl"]["joint_positions"] = {"right_shoulder_roll_joint": 100.0}
+        command["UpperBodyZmqCtrl"]["joint_positions"]["right_shoulder_roll_joint"] = 100.0
         clamped = pipeline._apply_pd_target_override(policy_target, command)
         right_shoulder_roll = cfg.env.dof.joint_names.index("right_shoulder_roll_joint")
         self.assertAlmostEqual(clamped[right_shoulder_roll], 0.061)
@@ -131,10 +132,8 @@ class TestX2Locomanipulation(unittest.TestCase):
         pipeline._upper_body_cfg = cfg.ctrl[-1]
         pipeline._upper_body_stream_was_fresh = True
         before_timeout = pipeline._upper_body_filtered.copy()
-        returned = pipeline._apply_pd_target_override(policy_target, {"UpperBodyZmqCtrl": {"fresh": False}})
-        expected = 0.95 * before_timeout + 0.05 * pipeline._upper_body_default
-        expected = np.clip(expected, before_timeout - 0.02, before_timeout + 0.02)
-        np.testing.assert_allclose(returned[pipeline._upper_body_indices], expected, rtol=1e-6)
+        held = pipeline._apply_pd_target_override(policy_target, {"UpperBodyZmqCtrl": {"fresh": False}})
+        np.testing.assert_array_equal(held[pipeline._upper_body_indices], before_timeout)
 
     def test_upper_body_toggle_requires_rl_mode(self):
         from robojudo.config.x2 import x2_locomanipulation
@@ -249,14 +248,18 @@ class TestX2Locomanipulation(unittest.TestCase):
         from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import X2LocomanipulationPolicyCfg
         from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
 
-        cfg = X2LocomanipulationPolicyCfg()
-        policy = X2LocomanipulationPolicy(cfg, "cpu")
-        action = policy.get_action(np.zeros(cfg.num_obs, dtype=np.float32))
+        for name in ("policy", "policy_observer_fine_tune"):
+            with self.subTest(policy=name):
+                cfg = X2LocomanipulationPolicyCfg(policy_name=name)
+                policy = X2LocomanipulationPolicy(cfg, "cpu")
+                action = policy.get_action(np.zeros(cfg.num_obs, dtype=np.float32))
 
-        self.assertEqual({value.name: value.shape for value in policy.session.get_inputs()}, {"obs": [1, 430]})
-        self.assertEqual({value.name: value.shape for value in policy.session.get_outputs()}, {"actions": [1, 15]})
-        self.assertEqual(action.shape, (15,))
-        self.assertTrue(np.isfinite(action).all())
+                self.assertEqual({value.name: value.shape for value in policy.session.get_inputs()}, {"obs": [1, 430]})
+                self.assertEqual(
+                    {value.name: value.shape for value in policy.session.get_outputs()}, {"actions": [1, 15]}
+                )
+                self.assertEqual(action.shape, (15,))
+                self.assertTrue(np.isfinite(action).all())
 
 
 if __name__ == "__main__":
