@@ -28,6 +28,7 @@ python scripts/install_xr_executor.py
 
 This installs the numeric Pinocchio/Coal dependencies and the shared XR model package without installing XR SDK/IK
 packages into RoboJuDo. The installer verifies both profiles. Simulation and hardware use the same executor and model identity checks.
+Rerun the executor installer after updating the submodule to clear older SDK/IK dependency errors in `pip check`.
 
 Install and start XRoboToolkit PC Service separately, connect the headset/controllers, and enable headset pose streaming.
 
@@ -177,6 +178,7 @@ completion observed between control ticks.
 Run focused controller/executor and bridge tests, then the two-process simulation suite:
 
 ```bash
+python -m unittest discover -s tests -p test_install_xr_executor.py
 python -m unittest discover -s tests -p 'test_xr*.py'
 XROBOTOOLKIT_TEST_PYTHON=/path/to/robojudo-xr/bin/python \
   python -m unittest discover -s tests -p test_xrobotoolkit_integration.py

@@ -12,9 +12,8 @@ SOURCE = ROOT / "third_party/xrobotoolkit_teleop"
 def main():
     if not (SOURCE / "xrobotoolkit_teleop/common/executor_model.py").is_file():
         raise RuntimeError("Initialize/update the xrobotoolkit_teleop submodule first")
-    subprocess.run([sys.executable, "-m", "pip", "install", "pin==4.1.0", "coal==3.0.3"], check=True)
-    # Runtime only imports numeric modules; do not install SDK, Placo or IK dependencies here.
-    subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "-e", str(SOURCE)], check=True)
+    # Resolve the numeric-only extra normally so installed metadata remains consistent.
+    subprocess.run([sys.executable, "-m", "pip", "install", "-e", f"{SOURCE}[executor]"], check=True)
     subprocess.run(
         [
             sys.executable,
