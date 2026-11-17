@@ -824,3 +824,8 @@ behavior is outside this executor experiment's validation scope.
 A [local A/B benchmark](xr_executor_local_latency.md) found higher completion
 throughput and steadier intervals, but no lower per-frame latency. It includes
 measured results, limitations, and a reproducible simulation-only benchmark command.
+
+For the remaining acknowledgement turnaround, see the
+[bounded feedback-latency trace](xr_feedback_latency_trace.md). It separates
+first-packet receipt, diagnostic observation and actual hand-write completion,
+and documents the local stopping result and Jetson capture procedure.

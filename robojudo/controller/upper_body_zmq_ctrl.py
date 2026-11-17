@@ -9,6 +9,7 @@ import zmq
 from robojudo.controller import Controller, ctrl_registry
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
 from robojudo.controller.upper_body_feedback import StaleVisualization, UpperBodyFeedback
+from robojudo.utils.latency_trace import identity
 
 logger = logging.getLogger(__name__)
 _MAX_MESSAGE_BYTES = 16_384
@@ -137,6 +138,13 @@ class UpperBodyZmqCtrl(Controller):
         if self.feedback is not None:
             self.feedback.validate(message, decoded, receiving=True)
             message["_command_timestamps"] = {"received": time.monotonic()}
+            if self.feedback.trace.enabled:
+                self.feedback.trace.record(
+                    "command_received",
+                    at=getattr(self, "_trace_packet_received_at", None),
+                    **identity(message),
+                    accepted_at=message["_command_timestamps"]["received"],
+                )
             self.feedback.command_counts["received"] += 1
             if self._proposal is not None:
                 self.feedback.command_counts["superseded"] += 1
@@ -180,6 +188,8 @@ class UpperBodyZmqCtrl(Controller):
                 # Count frames against the budget, including rejected multipart
                 # messages, so a large multipart envelope cannot monopolize a tick.
                 payload = self._socket.recv(flags=zmq.NOBLOCK)
+                if self.feedback is not None and self.feedback.trace.enabled:
+                    self._trace_packet_received_at = time.monotonic()
                 more = bool(self._socket.getsockopt(zmq.RCVMORE))
             except zmq.Again:
                 self._discard_backlog = False

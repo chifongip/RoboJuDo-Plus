@@ -393,6 +393,28 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.feedback.reset()
         self.assertNotIn("command_timestamps", self.publish()["feedback_diagnostics"])
 
+    def test_first_ack_state_id_tracks_accepted_send_attempt_not_delivery(self):
+        state = self.publish()
+        proposal = self.proposal(state)
+        self.feedback.acknowledge(proposal)
+        first = self.publish()
+        next_state = self.publish()
+        self.assertEqual(first["feedback_diagnostics"]["first_ack_state_id"], first["state_id"])
+        self.assertEqual(next_state["feedback_diagnostics"]["first_ack_state_id"], first["state_id"])
+        # A successful memory PUB send is not evidence of subscriber delivery.
+        self.feedback.reset()
+        self.assertIsNone(self.feedback._first_ack_state_id)
+
+    def test_silent_pub_drop_preserves_first_attempt_marker_in_later_snapshot(self):
+        state = self.publish()
+        self.feedback.acknowledge(self.proposal(state))
+        with patch.object(self.feedback.socket, "send_json", return_value=None):
+            self.publish()
+        missing_state_id = self.feedback.state_id
+        later = self.publish()
+        self.assertEqual(later["feedback_diagnostics"]["first_ack_state_id"], missing_state_id)
+        self.assertNotIn(missing_state_id, [f["state_id"] for f in self.feedback.socket.frames])
+
     def test_first_feedback_timestamp_retries_failed_send_and_stays_fixed(self):
         proposal = self.proposal(self.publish())
         proposal["_command_timestamps"] = {"received": 9.98, "acknowledged": 9.99}

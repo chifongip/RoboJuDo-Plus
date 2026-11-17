@@ -275,6 +275,9 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
     upper_body_default_pose: list[float] | None = None
     """Optional pose for explicit control disable, ordered like ``joint_names``."""
     timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
+    latency_trace_path: str | None = None
+    latency_trace_delay_s: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+    latency_trace_duration_s: float = Field(default=30.0, gt=0.0, allow_inf_nan=False)
     xr_target_filter: bool = False
     ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
     max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)

@@ -4,6 +4,7 @@ All deadlines belong to this process. A publisher echoes feedback identifiers;
 its clock is never compared with the robot's monotonic clock.
 """
 
+import logging
 import math
 import time
 import uuid
@@ -13,6 +14,7 @@ import numpy as np
 import zmq
 
 from robojudo.controller.xr_target_filter import filter_targets
+from robojudo.utils.latency_trace import LatencyTrace, command_stamps, identity
 
 
 def _counter(value):
@@ -28,6 +30,11 @@ class StaleVisualization(ValueError):
 class UpperBodyFeedback:
     def __init__(self, cfg, context):
         self.cfg = cfg
+        self.trace = LatencyTrace(
+            getattr(cfg, "latency_trace_path", None),
+            getattr(cfg, "latency_trace_duration_s", 30.0),
+            getattr(cfg, "latency_trace_delay_s", 0.0),
+        )
         self.session_id = uuid.uuid4().hex
         self.generation = 0
         self.command_id = 0
@@ -35,6 +42,7 @@ class UpperBodyFeedback:
         self.applied_frame_id = None
         self._completed_positions = None
         self._first_feedback_built = None
+        self._first_ack_state_id = None
         self._completion_observation_source = None
         self._command_timestamps = {}
         self.command_counts = dict.fromkeys(("received", "superseded", "rejected", "completed"), 0)
@@ -88,6 +96,7 @@ class UpperBodyFeedback:
         self.applied_frame_id = None
         self._completed_positions = None
         self._first_feedback_built = None
+        self._first_ack_state_id = None
         self._completion_observation_source = None
         self._command_timestamps = {}
 
@@ -105,6 +114,10 @@ class UpperBodyFeedback:
         self.socket.close(linger=0)
         if self.executor is not None:
             self.executor.close()
+        try:
+            self.trace.export()
+        except OSError:
+            logging.getLogger(__name__).exception("Could not export latency trace")
 
     def publish(
         self,
@@ -161,6 +174,10 @@ class UpperBodyFeedback:
         }
         if self._completion_observation_source is not None:
             feedback_diagnostics["completion_observation_source"] = self._completion_observation_source
+        if self.applied_frame_id is not None:
+            feedback_diagnostics["first_ack_state_id"] = (
+                self.state_id if self._first_ack_state_id is None else self._first_ack_state_id
+            )
         if self._command_timestamps:
             # All stamps use the robot host monotonic clock, including its workers.
             feedback_diagnostics["command_timestamps"] = {
@@ -212,10 +229,21 @@ class UpperBodyFeedback:
             self._states.popitem(last=False)
         built = time.perf_counter()
         sent = True
+        send_started = time.monotonic() if self.trace.enabled else None
         try:
             self.socket.send_json(frame, flags=zmq.NOBLOCK, allow_nan=False)
         except zmq.Again:
             sent = False
+        if self.trace.enabled:
+            self.trace.record(
+                "feedback_send",
+                at=send_started,
+                **identity(frame, applied=True),
+                accepted=sent,
+                first_ack_state_id=feedback_diagnostics.get("first_ack_state_id"),
+            )
+        if sent and self.applied_frame_id is not None and self._first_ack_state_id is None:
+            self._first_ack_state_id = self.state_id
         if sent and self._command_timestamps and self._first_feedback_built is None:
             self._first_feedback_built = now
         self._last_publication_timing = {
@@ -352,6 +380,7 @@ class UpperBodyFeedback:
             source if source in ("idle", "periodic", "before_policy", "after_policy") else None
         )
         self._first_feedback_built = None
+        self._first_ack_state_id = None
         self.command_id += 1
         self.command_counts["completed"] += 1
         if proposal is not None:
@@ -359,6 +388,10 @@ class UpperBodyFeedback:
             self.applied_frame_id = proposal["frame_id"]
             self._completed_positions = dict(proposal["positions"])
             self._command_timestamps = dict(proposal.get("_command_timestamps", {}))
+            if self.trace.enabled:
+                self.trace.record(
+                    "robot_acknowledged", **identity(proposal), stamps=command_stamps(self._command_timestamps)
+                )
         else:
             self.applied_bridge_id = self.applied_frame_id = None
             self._completed_positions = None
