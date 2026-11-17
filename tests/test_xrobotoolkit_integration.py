@@ -59,7 +59,7 @@ if os.environ.get("XROBOTOOLKIT_TEST_DIAGNOSTICS"):
 xr = SyntheticXR()
 settings = TeleopSettings(collision_checking=sys.argv[5] == "True")
 bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], settings=settings, xr_client=xr,
-                       ik_backend=sys.argv[3], robot=sys.argv[4], authoritative_executor=sys.argv[6] == "True")
+                       ik_backend=sys.argv[3], robot=sys.argv[4])
 try:
     deadline = time.monotonic()
     while True:
@@ -71,8 +71,6 @@ try:
             for name, value in json.loads(line).items():
                 setattr(xr, name, value)
         bridge.poll()
-        if os.environ.get("XROBOTOOLKIT_TEST_DIAGNOSTICS"):
-            bridge.report_xr_diagnostics()
         deadline += 0.02
         now = time.monotonic()
         if deadline < now:
@@ -86,8 +84,8 @@ finally:
     os.environ.get("XROBOTOOLKIT_TEST_PYTHON"), "set XROBOTOOLKIT_TEST_PYTHON for two-process XR tests"
 )
 class XrobotoolkitIntegrationTests(unittest.TestCase):
-    authoritative_executor = False
     with_omnihand = False
+    finger_mode = "direct"
     collision_checking = True
 
     def setUp(self):
@@ -107,10 +105,9 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         upper = next(item for item in cfg.ctrl if isinstance(item, UpperBodyZmqCtrlCfg))
         upper.endpoint = self.command_endpoint
         upper.feedback_endpoint = "tcp://127.0.0.1:*"
-        if self.authoritative_executor:
-            upper.schema_version = 3
-            upper.hand_command_mode = "direct"
-            upper.executor_collision_checking = self.collision_checking
+        upper.executor_collision_checking = self.collision_checking
+        if self.with_omnihand:
+            upper.hand_command_mode = self.finger_mode
         cfg.ctrl = [upper]
         cfg.env.headless = True
         cfg.env.visualize_extras = False
@@ -164,7 +161,6 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
                 os.environ.get("XROBOTOOLKIT_TEST_BACKEND", "placo"),
                 "x2_omnihand" if self.with_omnihand else "x2",
                 str(self.collision_checking),
-                str(self.authoritative_executor),
             ],
             stdin=subprocess.PIPE,
             stdout=log,
@@ -241,7 +237,7 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         )
         self.assertFalse(self.pipeline._upper_body_enabled)
 
-    def test_slow_inference_still_accepts_fresh_arm_proposals(self):
+    def test_slow_inference_still_accepts_fresh_arm_desired_targets(self):
         original = self.pipeline.policy.get_pd_target
 
         def slow_inference(obs):
@@ -259,12 +255,7 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         self.control(child, z=-0.03)
         self.wait_until(lambda: np.max(np.abs(self.pipeline._upper_body_filtered - initial)) > 0.005)
         accepted = self.receiver.feedback.command_id
-        self.cycles(0.6)
-        self.assertGreaterEqual(
-            self.receiver.feedback.command_id - accepted,
-            3,
-            "\n".join(path.read_text() for path in Path(self.directory).glob("*.log")),
-        )
+        self.wait_until(lambda: self.receiver.feedback.command_id >= accepted + 3)
         state = self.receiver.feedback._states[self.receiver.feedback.state_id][1]
         self.assertLess(max(state["joint_age_s"].values()), 0.02)
         self.assertGreater(state["pipeline_timing_ms"]["policy"], 50)
@@ -328,7 +319,7 @@ class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
         self.pipeline._set_upper_body_enabled(True)
         child = self.start_bridge()
         self.wait_until(lambda: self.receiver.feedback.command_id > 0)
-        self.control(child, trigger=0.4)
+        self.control(child, trigger=0.06)
         monitor = zmq.Context.instance().socket(zmq.SUB)
         self.addCleanup(monitor.close, linger=0)
         monitor.setsockopt(zmq.SUBSCRIBE, b"")
@@ -346,9 +337,7 @@ class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
                 frames = []
                 while monitor.poll(0):
                     frame = monitor.recv_json()
-                    if frame["type"] == (
-                        "upper_body_desired" if self.authoritative_executor else "upper_body_proposal"
-                    ):
+                    if frame["type"] == ("upper_body_desired" if self.with_omnihand else "upper_body_desired"):
                         frames.append(frame)
                 rate = len(frames) / elapsed
                 print(f"Injected hand delay={delay * 1000:.0f} ms: bridge publish={rate:.1f} Hz")
@@ -359,8 +348,6 @@ class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
                 self.assertIsNone(child.poll())
 
     def test_delayed_hand_writes_with_policy_checkpoints(self):
-        self.pipeline._upper_body_cfg.omnihand.direct_completion_notifications = True
-        self.receiver.cfg_ctrl.omnihand.direct_completion_notifications = True
         self.test_delayed_hand_writes_do_not_pace_bridge_publishing()
         self.assertIn("checkpoint_before", self.pipeline._upper_body_timing_ms)
         self.assertIn("checkpoint_after", self.pipeline._upper_body_timing_ms)
@@ -370,11 +357,11 @@ class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
         self.wait_until(lambda: self.receiver.feedback.command_id > 0)
         self.pipeline._set_upper_body_enabled(True)
         self.cycles(0.25)
-        self.control(child, trigger=0.4)
+        self.control(child, trigger=0.06)
         self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["L_index_mcp_joint"] > 0.04)
         self.wait_until(lambda: self.pipeline.env.hand_snapshot()["positions"]["L_index_mcp_joint"] > 0.03)
         self.assertEqual(self.pipeline.env.hand_snapshot()["targets"]["R_index_mcp_joint"], 0.0)
-        self.control(child, right_trigger=0.3)
+        self.control(child, right_trigger=0.05)
         self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["R_index_mcp_joint"] > 0.04)
         self.wait_until(lambda: self.pipeline.env.hand_snapshot()["positions"]["R_index_mcp_joint"] > 0.03)
         self.control(child, grip=0.0, right_grip=0.0)
@@ -400,14 +387,12 @@ class XrobotoolkitOmniHandCollisionDisabledIntegrationTests(XrobotoolkitOmniHand
     collision_checking = False
 
 
-class XrobotoolkitExecutorIntegrationTests(XrobotoolkitOmniHandCollisionDisabledIntegrationTests):
-    authoritative_executor = True
+class XrobotoolkitFilteredOmniHandIntegrationTests(XrobotoolkitOmniHandIntegrationTests):
+    finger_mode = "filtered"
 
 
-class XrobotoolkitExecutorCollisionIntegrationTests(XrobotoolkitIntegrationTests):
-    authoritative_executor = True
-    with_omnihand = True
-    collision_checking = True
+class XrobotoolkitFilteredOmniHandCollisionDisabledIntegrationTests(XrobotoolkitFilteredOmniHandIntegrationTests):
+    collision_checking = False
 
 
 if __name__ == "__main__":

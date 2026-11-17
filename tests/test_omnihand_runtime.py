@@ -26,24 +26,6 @@ from robojudo.controller.omnihand_runtime import (
 
 
 class TestOmniHandConfig(unittest.TestCase):
-    def test_low_latency_config_is_opt_in_and_only_changes_notifications(self):
-        from robojudo.config.x2 import (
-            x2_xrobotoolkit_omnihand_real_direct,
-            x2_xrobotoolkit_omnihand_real_direct_low_latency,
-        )
-
-        baseline = x2_xrobotoolkit_omnihand_real_direct().model_dump()
-        candidate = x2_xrobotoolkit_omnihand_real_direct_low_latency().model_dump()
-        self.assertFalse(OmniHandCfg().direct_completion_notifications)
-        changed = 0
-        for controller in candidate["ctrl"]:
-            if "omnihand" in controller:
-                self.assertTrue(controller["omnihand"]["direct_completion_notifications"])
-                controller["omnihand"]["direct_completion_notifications"] = False
-                changed += 1
-        self.assertEqual(changed, 1)
-        self.assertEqual(candidate, baseline)
-
     def test_timeouts_and_rates_must_be_finite(self):
         for field in ("command_timeout_s", "joint_state_fps", "joint_state_timeout_s", "startup_timeout_s"):
             with self.subTest(field=field), self.assertRaises(ValueError):
@@ -141,6 +123,7 @@ class TestOmniHandRuntime(unittest.TestCase):
         runtime = OmniHandRuntime.__new__(OmniHandRuntime)
         runtime.cfg = OmniHandCfg()
         runtime.read_only = False
+        runtime._notification_writer = None
         runtime._gate = mp.get_context("spawn").Array("q", [0, 0, 0])
         runtime._lock = threading.RLock()
         runtime._shutdown = threading.Event()

@@ -18,9 +18,10 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
 
     Concrete hand controllers provide only their wire ``hand_type``, physical
     joint schema, output key, and runtime factory. Feedback mode stages checked
-    proposals until environment submission; streaming mode accepts synchronized frames.
+    desired targets until environment submission; streaming mode accepts synchronized frames.
     """
 
+    has_hands = True
     hand_type: str
     hand_data_key: str
     hand_display_name: str
@@ -239,7 +240,7 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         previous = getattr(self, "_hand_stream_generation", None)
         self._hand_stream_generation = generation
         if previous is not None and previous != generation:
-            # Clear queued transport frames and checked proposals on both sides
+            # Clear queued transport frames and checked desired targets on both sides
             # of a hold. Preserve operator intent through this hardware outage.
             if self.feedback is not None:
                 self.invalidate("hand feedback stream changed", recoverable=True)
@@ -252,7 +253,7 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
                 self._last_received_at = None
             log = logger.info if snapshot.get("joint_state_fresh", False) else logger.warning
             log(
-                "%s hardware feedback %s; pending proposals cleared",
+                "%s hardware feedback %s; pending desired targets cleared",
                 self.hand_display_name,
                 snapshot.get("connection_status", "changed"),
             )
@@ -314,17 +315,17 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         self.synchronize_generation()
         return changed
 
-    def submit_hands(self, proposal):
+    def submit_hands(self, desired):
         self.synchronize_generation()
-        proposal.setdefault("_command_timestamps", {})["hand_submitted"] = time.monotonic()
-        deadline = self.feedback._states[proposal["state_id"]][0]
-        identity = (proposal["generation"], proposal["frame_id"])
+        desired.setdefault("_command_timestamps", {})["hand_submitted"] = time.monotonic()
+        deadline = self.feedback._states[desired["state_id"]][0]
+        identity = (desired["generation"], desired["frame_id"])
         if self._hand_runtime is None:
-            self.env.submit_hand_targets(proposal["positions"])
+            self.env.submit_hand_targets(desired["positions"])
         else:
             self._hand_runtime.set_takeover_enabled(True)
-            self._hand_runtime.submit(proposal["positions"], identity, deadline)
-        self.pending = (proposal, identity, deadline)
+            self._hand_runtime.submit(desired["positions"], identity, deadline)
+        self.pending = (desired, identity, deadline)
         self._clear_positions()
 
     def finish_pending(self, state=None, *, observation_source="periodic"):
@@ -332,7 +333,7 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
         if self.pending is None:
             return False
         pending = self.pending
-        proposal, identity, deadline = pending
+        desired, identity, deadline = pending
         generation = self.feedback.generation
         if state is None:
             state = self.hand_snapshot()
@@ -346,12 +347,12 @@ class UpperBodyHandZmqCtrlBase(UpperBodyZmqCtrl):
             return False
         if self._hand_runtime is not None and state["applied"] != identity:
             return False
-        stamps = proposal.setdefault("_command_timestamps", {})
+        stamps = desired.setdefault("_command_timestamps", {})
         stamps["acknowledged"] = time.monotonic()
         if applied:
             stamps.update(state.get("command_timestamps", {}))
-        proposal["_completion_observation_source"] = observation_source
-        self.feedback.acknowledge(proposal)
+        desired["_completion_observation_source"] = observation_source
+        self.feedback.acknowledge(desired)
         if self._hand_runtime is not None:
             self._hand_runtime.acknowledge()
         self.pending = None

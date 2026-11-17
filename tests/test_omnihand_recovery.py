@@ -249,7 +249,7 @@ class SupervisedRecoveryTests(unittest.TestCase):
         self.fail(f"recovery deadline exceeded: {data['connection_status']}")
 
     def test_direct_worker_notifies_across_reconnect_without_supervisor_hints(self):
-        runtime = self.runtime(direct_completion_notifications=True)
+        runtime = self.runtime()
         reader = runtime.notification_socket
         with patch.object(runtime, "_notify"):
             runtime.set_takeover_enabled(True)

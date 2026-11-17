@@ -28,9 +28,10 @@ REQUIRED_FILES = (
     "pyproject.toml",
     "scripts/misc/build_lerobot_bindings.py",
     "xrobotoolkit_teleop/simulation/agibot_x2_teleop_controller.py",
-    "xrobotoolkit_teleop/integrations/robojudo_x2.py",
-    "xrobotoolkit_teleop/common/x2_arm_retargeter.py",
+    "xrobotoolkit_teleop/common/teleop_settings.py",
     "xrobotoolkit_teleop/integrations/robojudo.py",
+    "xrobotoolkit_teleop/common/executor_model.py",
+    "xrobotoolkit_teleop/common/transition_validation.py",
     "xrobotoolkit_teleop/integrations/retargeter.py",
     "xrobotoolkit_teleop/integrations/robot_profiles/x2.py",
     "xrobotoolkit_teleop/integrations/robot_profiles/__init__.py",
@@ -318,7 +319,6 @@ assert Path(pinocchio.__file__).resolve().is_relative_to(expected.resolve()), 'W
 import casadi as ca
 import mujoco, xrobotoolkit_sdk, tyro, zmq
 from xrobotoolkit_teleop.integrations.robojudo import RoboJuDoBridge
-from xrobotoolkit_teleop.integrations.robojudo_x2 import RoboJuDoX2Bridge
 from xrobotoolkit_teleop.integrations.retargeter import ExternalStateRetargeter
 
 def forbid_xr(*args, **kwargs):
@@ -343,11 +343,10 @@ assert abs(opti.solve().value(x) - 1) < 1e-6
     ):
         run([sys.executable, "-I", "-c", imports + smoke, str(prefix)], log=log / f"imports-{index}.log")
     run([sys.executable, "-I", "-m", "pip", "check"], log=log / "pip-check.log")
-    for module in ("robojudo", "robojudo_x2"):
-        run(
-            [sys.executable, "-I", "-m", f"xrobotoolkit_teleop.integrations.{module}", "--help"],
-            log=log / f"{module}-help.log",
-        )
+    run(
+        [sys.executable, "-I", "-m", "xrobotoolkit_teleop.integrations.robojudo", "--help"],
+        log=log / "robojudo-help.log",
+    )
 
 
 def validate_target(prefix):

@@ -1,4 +1,4 @@
-"""Deterministic XR target filter; keep both repository copies identical."""
+"""Robot-side XR target filter shared by arms and filtered fingers."""
 
 import math
 
@@ -23,9 +23,9 @@ def filter_targets(desired, previous, limits, speeds, dt, alpha):
             filtered = value
         lower, upper = max(low, old - speed * dt), min(high, old + speed * dt)
         lo32, hi32 = np.float32(lower), np.float32(upper)
-        if lo32 < lower:
+        if float(lo32) < lower:
             lo32 = np.nextafter(lo32, np.float32(np.inf))
-        if hi32 > upper:
+        if float(hi32) > upper:
             hi32 = np.nextafter(hi32, np.float32(-np.inf))
         if lo32 > hi32 or not np.isfinite([lo32, hi32]).all():
             raise ValueError("no float32 target satisfies position and velocity limits")

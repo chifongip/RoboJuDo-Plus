@@ -9,7 +9,6 @@ import zmq
 from robojudo.controller import Controller, ctrl_registry
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
 from robojudo.controller.upper_body_feedback import StaleVisualization, UpperBodyFeedback
-from robojudo.utils.latency_trace import identity
 
 logger = logging.getLogger(__name__)
 _MAX_MESSAGE_BYTES = 16_384
@@ -38,6 +37,7 @@ class UpperBodyZmqCtrl(Controller):
     """
 
     cfg_ctrl: UpperBodyZmqCtrlCfg
+    has_hands = False
     _conflate_legacy_frames = False
 
     def __init__(self, cfg_ctrl: UpperBodyZmqCtrlCfg, env=None, device="cpu"):
@@ -67,7 +67,7 @@ class UpperBodyZmqCtrl(Controller):
         self._closed = False
         self._transport_error: str | None = None
         self._reset_generation = 0
-        self._proposal = None
+        self._desired = None
         self._target_poses = {}
         self._target_poses_deadline = float("-inf")
         self._target_poses_generation = None
@@ -93,7 +93,7 @@ class UpperBodyZmqCtrl(Controller):
     def _clear_positions(self):
         self._latest_positions.clear()
         self._last_received_at = None
-        self._proposal = None
+        self._desired = None
 
     def reset(self):
         self._clear_positions()
@@ -143,17 +143,10 @@ class UpperBodyZmqCtrl(Controller):
         if self.feedback is not None:
             self.feedback.validate(message, decoded, receiving=True)
             message["_command_timestamps"] = {"received": time.monotonic()}
-            if self.feedback.trace.enabled:
-                self.feedback.trace.record(
-                    "command_received",
-                    at=getattr(self, "_trace_packet_received_at", None),
-                    **identity(message),
-                    accepted_at=message["_command_timestamps"]["received"],
-                )
             self.feedback.command_counts["received"] += 1
-            if self._proposal is not None:
+            if self._desired is not None:
                 self.feedback.command_counts["superseded"] += 1
-            self._proposal = message
+            self._desired = message
         return decoded
 
     def _log_invalid_message(self, exc: Exception, now: float):
@@ -193,8 +186,6 @@ class UpperBodyZmqCtrl(Controller):
                 # Count frames against the budget, including rejected multipart
                 # messages, so a large multipart envelope cannot monopolize a tick.
                 payload = self._socket.recv(flags=zmq.NOBLOCK)
-                if self.feedback is not None and self.feedback.trace.enabled:
-                    self._trace_packet_received_at = time.monotonic()
                 more = bool(self._socket.getsockopt(zmq.RCVMORE))
             except zmq.Again:
                 self._discard_backlog = False
@@ -255,7 +246,7 @@ class UpperBodyZmqCtrl(Controller):
             "transport_error": self._transport_error,
         }
         if self.feedback is not None:
-            result["proposal"] = self._proposal
+            result["desired"] = self._desired
             result["target_poses"] = (
                 self._target_poses
                 if now <= self._target_poses_deadline and self._target_poses_generation == self.feedback.generation
@@ -263,8 +254,21 @@ class UpperBodyZmqCtrl(Controller):
             )
         return result
 
-    def acknowledge(self, proposal=None):
-        self.feedback.acknowledge(self._proposal if proposal is None else proposal)
+    def synchronize_intent(self, intent):
+        if self.feedback.intent == intent:
+            return False
+        self._clear_positions()
+        self.feedback.reset("control intent changed")
+        self.feedback.intent = intent
+        return True
+
+    def invalidate(self, reason, *, recoverable=False):
+        self.reset()
+        self.feedback.reset_reason = "tracking command timeout" if recoverable else reason
+        self._log_invalid_message(ValueError(reason), time.monotonic())
+
+    def acknowledge(self, desired=None):
+        self.feedback.acknowledge(self._desired if desired is None else desired)
         self._clear_positions()
 
     def process_triggers(self, ctrl_data):

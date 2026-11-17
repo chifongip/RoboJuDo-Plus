@@ -1,5 +1,5 @@
 import math
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, model_validator
 
@@ -214,7 +214,6 @@ class OmniHandCfg(Config):
     right_interface: str = "can1"
     hand_can_id: int | None = Field(default=None, ge=1, le=254)
     command_timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
-    direct_completion_notifications: bool = False
     joint_state_fps: float = Field(default=100.0, gt=0.0, allow_inf_nan=False)
     joint_state_timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
     startup_timeout_s: float = Field(default=15.0, gt=0.0, allow_inf_nan=False)
@@ -275,23 +274,23 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
     upper_body_default_pose: list[float] | None = None
     """Optional pose for explicit control disable, ordered like ``joint_names``."""
     timeout_s: float = Field(default=0.25, gt=0.0, allow_inf_nan=False)
-    latency_trace_path: str | None = None
-    latency_trace_delay_s: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
-    latency_trace_duration_s: float = Field(default=30.0, gt=0.0, allow_inf_nan=False)
-    xr_target_filter: bool = False
+    xr_profile: ClassVar[str] = "x2"
+    executor_collision_checking: bool = False
+    executor_collision_margin: ClassVar[float] = 0.02
+    executor_collision_trigger: ClassVar[float] = 0.08
     ema_alpha: float = Field(default=0.95, ge=0.0, lt=1.0)
     max_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
     feedback_endpoint: str | None = None
-    """Opt into versioned, externally collision-checked proposals and robot feedback."""
+    """Opt into robot-authoritative XR execution and measured feedback."""
     command_receive_hwm: int = Field(default=100, ge=1, le=100)
-    """Command SUB queue limit; XR presets use 8 while legacy presets retain 100."""
+    """Command SUB queue limit; XR presets use 8 while streaming controllers retain 100."""
     feedback_send_hwm: int = Field(default=1, ge=1, le=8)
-    """Feedback PUB queue limit; 8 is available for the measured acknowledgement-delivery experiment."""
+    """Bounded feedback PUB queue limit."""
     visualize_targets: bool = False
     """Request torso-relative hand target frames for optional simulation overlays."""
     feedback_timeout_s: float = Field(default=0.1, gt=0.0, allow_inf_nan=False)
     return_joint_velocity_rad_s: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
-    """Return cap advertised in feedback; legacy filtering uses max_joint_velocity_rad_s."""
+    """Return cap advertised in feedback; streaming filtering uses max_joint_velocity_rad_s."""
 
     @model_validator(mode="after")
     def validate_upper_body_zmq(self):
@@ -313,33 +312,23 @@ class UpperBodyZmqCtrlCfg(CtrlCfg):
                 raise ValueError("upper-body feedback supports UpperBodyZmqCtrl and UpperBodyOmniHandZmqCtrl")
             if not self.feedback_endpoint.startswith("tcp://") or not self.feedback_endpoint[6:].strip():
                 raise ValueError("upper-body feedback_endpoint must use tcp://")
-            if self.ema_alpha != 0.0 and getattr(self, "schema_version", 1) != 3:
-                raise ValueError("externally checked proposals require ema_alpha=0")
         return self
 
 
 class UpperBodyOmniHandZmqCtrlCfg(UpperBodyZmqCtrlCfg):
-    """Arm/OmniHand targets; feedback_endpoint opts into checked proposals."""
+    """Arm/OmniHand targets; feedback_endpoint selects robot-authoritative XR execution."""
 
     ctrl_type: str = "UpperBodyOmniHandZmqCtrl"
     endpoint: str = "tcp://127.0.0.1:8560"
-    schema_version: Literal[2, 3] = 2
-    executor_collision_checking: bool = False
-    executor_collision_margin: float = Field(default=0.02, gt=0.0, allow_inf_nan=False)
-    executor_collision_trigger: float = Field(default=0.08, gt=0.0, allow_inf_nan=False)
-    hand_command_mode: Literal["filtered", "direct"] = "filtered"
-    hand_velocity_limit: float = Field(default=2.0, gt=0.0, allow_inf_nan=False)
+    xr_profile: ClassVar[str] = "x2_omnihand"
+    hand_command_mode: Literal["filtered", "direct"] = "direct"
+    hand_velocity_limit: float = Field(default=2.0, gt=0.0, allow_inf_nan=False, strict=True)
     omnihand: OmniHandCfg = OmniHandCfg()
     serial_config: str | None = None
     """Robot-local JSON file with the four HCAN/hand serial fields."""
 
     @model_validator(mode="after")
     def validate_hand_feedback(self):
-        if self.schema_version == 3:
-            if self.feedback_endpoint is None or not self.xr_target_filter or self.hand_command_mode != "direct":
-                raise ValueError("executor requires feedback, XR target filtering and direct fingers")
-            if self.executor_collision_trigger <= self.executor_collision_margin:
-                raise ValueError("executor collision trigger must exceed margin")
         if self.feedback_endpoint is not None and self.omnihand.transport != "hcan":
             raise ValueError("OmniHand feedback hardware uses HCAN")
         return self

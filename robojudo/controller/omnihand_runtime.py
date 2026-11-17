@@ -613,10 +613,6 @@ class OmniHandRuntime:
         self._notification_reader, self._notification_writer = socket.socketpair()
         self._notification_reader.setblocking(False)
         self._notification_writer.setblocking(False)
-        logger.info(
-            "OmniHand direct completion notifications: %s",
-            "enabled" if cfg.direct_completion_notifications else "disabled (supervisor notifications)",
-        )
         self._supervisor = threading.Thread(target=self._supervise, name="omnihand-supervisor", daemon=True)
         self._supervisor.start()
         try:
@@ -677,7 +673,7 @@ class OmniHandRuntime:
                     self._gate,
                     self._errors,
                     self._measurements,
-                    self._notification_writer if self.cfg.direct_completion_notifications else None,
+                    self._notification_writer,
                 ),
                 daemon=True,
             )

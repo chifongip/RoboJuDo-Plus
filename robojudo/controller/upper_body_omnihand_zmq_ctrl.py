@@ -1,4 +1,4 @@
-"""Upper-body and dual-OmniHand control for synchronized frames or checked feedback."""
+"""Upper-body and dual-OmniHand control for synchronized frames or XR execution."""
 
 import json
 import os
@@ -20,7 +20,7 @@ from robojudo.controller.upper_body_hand_zmq_ctrl import UpperBodyHandZmqCtrlBas
 
 @ctrl_registry.register
 class UpperBodyOmniHandZmqCtrl(UpperBodyHandZmqCtrlBase):
-    """Receive synchronized or feedback-checked arm and finger targets."""
+    """Receive synchronized or robot-executed XR arm and finger targets."""
 
     cfg_ctrl: UpperBodyOmniHandZmqCtrlCfg
     hand_type = "omnihand"

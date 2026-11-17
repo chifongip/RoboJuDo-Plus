@@ -19,16 +19,16 @@ def main():
         [
             sys.executable,
             "-c",
-            "from xrobotoolkit_teleop.common.executor_model import ExecutorModel; "
-            "from xrobotoolkit_teleop.common.teleop_settings import TeleopSettings; "
-            "from xrobotoolkit_teleop.integrations.robot_profiles import load_profile; "
-            "settings = TeleopSettings(); "
-            "context = load_profile('x2_omnihand', settings); "
-            "profile = context.__enter__(); "
-            "model = ExecutorModel(profile, settings); "
-            "print('Executor geometry pairs:', model.collision_checker.pair_count); "
-            "print('Model fingerprint:', model.fingerprint); "
-            "context.__exit__(None, None, None)",
+            "from xrobotoolkit_teleop.common.executor_model import ExecutorModel\n"
+            "from xrobotoolkit_teleop.common.teleop_settings import TeleopSettings\n"
+            "from xrobotoolkit_teleop.integrations.robot_profiles import load_profile\n"
+            "settings = TeleopSettings()\n"
+            "for name in ('x2', 'x2_omnihand'):\n"
+            "    with load_profile(name, settings) as profile:\n"
+            "        profile.validate()\n"
+            "        model = ExecutorModel(profile, settings)\n"
+            "        print(name, 'geometry pairs:', model.collision_checker.pair_count)\n"
+            "        print('Model fingerprint:', model.fingerprint)\n",
         ],
         check=True,
     )

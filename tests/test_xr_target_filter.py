@@ -1,17 +1,9 @@
 import unittest
-from pathlib import Path
 
 from robojudo.controller.xr_target_filter import filter_targets
 
 
 class TargetFilterTests(unittest.TestCase):
-    def test_repository_copies_match(self):
-        root = Path(__file__).resolve().parents[1]
-        self.assertEqual(
-            (root / "robojudo/controller/xr_target_filter.py").read_bytes(),
-            (root / "third_party/xrobotoolkit_teleop/xrobotoolkit_teleop/integrations/target_filter.py").read_bytes(),
-        )
-
     def test_large_step_and_reversal(self):
         previous = {"joint": 0.0}
         for desired in (1.0, -1.0):
@@ -27,3 +19,12 @@ class TargetFilterTests(unittest.TestCase):
     def test_incompatible_position_and_velocity_bounds_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "no float32 target"):
             filter_targets({"joint": 1.0}, {"joint": 0.0}, {"joint": [0.5, 1]}, {"joint": 1}, 0.02, 0)
+
+    def test_float32_rounding_stays_inside_nonrepresentable_bounds(self):
+        for value in (0.1, -0.1):
+            with self.subTest(value=value):
+                result = filter_targets(
+                    {"joint": value}, {"joint": 0.0}, {"joint": [-0.1, 0.1]}, {"joint": 10.0}, 0.02, 0.0
+                )
+                self.assertLessEqual(result["joint"], 0.1)
+                self.assertGreaterEqual(result["joint"], -0.1)

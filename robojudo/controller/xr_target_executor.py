@@ -1,4 +1,4 @@
-"""Owner-thread construction of one executable combined frame per desired frame."""
+"""Owner-thread construction of one executable frame per desired frame."""
 
 import math
 import time
@@ -25,21 +25,29 @@ class XRTargetExecutor:
                 collision_margin=cfg.executor_collision_margin,
                 collision_trigger=cfg.executor_collision_trigger,
             )
-            self.profile = self.resources.enter_context(load_profile("x2_omnihand", settings))
+            self.profile = self.resources.enter_context(load_profile(cfg.xr_profile, settings))
             self.profile.validate()
             if tuple(cfg.joint_names) != tuple(self.profile.spec.joints):
                 raise ValueError("executor arm order does not match model")
             self.model = ExecutorModel(self.profile, settings)
+            self.hand_command_mode = None if self.profile.hands is None else cfg.hand_command_mode
+            self.hand_velocity_limit = None if self.profile.hands is None else cfg.hand_velocity_limit
             self.contract = {
                 "contract": CONTRACT,
+                "robot_profile": cfg.xr_profile,
                 "model_fingerprint": self.model.fingerprint,
                 "collision_checking": settings.collision_checking,
                 "collision_margin": settings.collision_margin,
                 "collision_trigger": settings.collision_trigger,
             }
+            if self.profile.hands is not None:
+                self.contract.update(
+                    hand_command_mode=self.hand_command_mode, hand_velocity_limit=self.hand_velocity_limit
+                )
         except Exception:
             self.resources.close()
             raise
+        self.hand_names = [] if self.profile.hands is None else list(self.profile.hands.active)
         self.reset()
 
     def close(self):
@@ -53,7 +61,7 @@ class XRTargetExecutor:
 
     def validate(self, feedback, message, positions):
         if message.get("executor") != self.contract:
-            raise ValueError("incompatible executor model or collision policy")
+            raise ValueError("incompatible executor model or collision policy or finger settings")
         active = message.get("active_joint_names")
         if (
             not isinstance(active, list)
@@ -63,7 +71,7 @@ class XRTargetExecutor:
         ):
             raise ValueError("invalid active command joint names")
         caps = message.get("velocity_limits")
-        if not isinstance(caps, dict) or set(caps) != {"arm", "return", "hand"}:
+        if not isinstance(caps, dict) or set(caps) != {"arm", "return"}:
             raise ValueError("missing executor velocity caps")
         if any(isinstance(v, bool) or not isinstance(v, Real) or not math.isfinite(v) or v <= 0 for v in caps.values()):
             raise ValueError("invalid executor velocity caps")
@@ -74,7 +82,7 @@ class XRTargetExecutor:
         if message["frame_id"] <= self.consumed:
             raise ValueError("desired frame already consumed")
         limits = feedback._states[message["state_id"]][1]["position_limits"]
-        model_limits = {**self.profile.spec.limits, **self.profile.hands.limits}
+        model_limits = {**self.profile.spec.limits, **({} if self.profile.hands is None else self.profile.hands.limits)}
         for name, value in positions.items():
             low = max(limits[name][0], model_limits[name][0])
             high = min(limits[name][1], model_limits[name][1])
@@ -108,15 +116,15 @@ class XRTargetExecutor:
                 if homing:
                     speed = min(speed, feedback.cfg.return_joint_velocity_rad_s, caps["return"])
             else:
-                # Direct tracking fingers are quantized within position bounds only.
-                speed = 0.0 if homing else self.profile.hands.velocities[name]
+                speed = 0.0 if homing else min(self.hand_velocity_limit, self.profile.hands.velocities[name])
             speeds[name] = speed
         active = set(desired["active_joint_names"])
         wanted = {n: value if n in active else baseline[n] for n, value in desired["positions"].items()}
         if homing:
-            wanted.update({n: baseline[n] for n in self.profile.hands.active})
-        # Filter arms and held HOME fingers using the deterministic existing filter.
-        filtered_names = [n for n in wanted if homing or n in feedback.cfg.joint_names]
+            wanted.update({n: baseline[n] for n in self.hand_names})
+        # Arms and filtered fingers share EMA, velocity bounds and float32 rounding.
+        direct_fingers = self.hand_command_mode == "direct" and not homing
+        filtered_names = [n for n in wanted if not direct_fingers or n in feedback.cfg.joint_names]
         issued = filter_targets(
             {n: wanted[n] for n in filtered_names},
             {n: baseline[n] for n in filtered_names},
@@ -125,13 +133,13 @@ class XRTargetExecutor:
             state["control_dt"],
             feedback.cfg.ema_alpha,
         )
-        if not homing:
-            for name in self.profile.hands.active:
+        if direct_fingers:
+            for name in self.hand_names:
                 low, high = limits[name]
                 lo32, hi32 = np.float32(low), np.float32(high)
-                if lo32 < low:
+                if float(lo32) < low:
                     lo32 = np.nextafter(lo32, np.float32(np.inf))
-                if hi32 > high:
+                if float(hi32) > high:
                     hi32 = np.nextafter(hi32, np.float32(-np.inf))
                 if lo32 > hi32:
                     raise ValueError("no float32 finger target within limits")

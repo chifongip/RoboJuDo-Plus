@@ -630,8 +630,8 @@ Bundled packages and third-party components:
   [README](packages/robojudo_recorder/README.md).
 - [`third_party/aimdk`](third_party/aimdk) — pinned AimDK SDK used by X2 deployment.
 - [`third_party/dex_teleop`](third_party/dex_teleop) — optional XR arm and dexterous-hand teleoperation module; see its [README](third_party/dex_teleop/README.md).
-- [`third_party/xrobotoolkit_teleop`](third_party/xrobotoolkit_teleop) — pinned XRoboToolkit X2 simulation and arm
-  teleoperation bridge with minimal installation support.
+- [`third_party/xrobotoolkit_teleop`](third_party/xrobotoolkit_teleop) — XRoboToolkit X2 arm and OmniHand integration;
+  see the [deployment guide](docs/xrobotoolkit_teleop.md).
 - [`third_party/omnihand_sdk`](third_party/omnihand_sdk) — optional OmniHand SDK; see its
   [README](third_party/omnihand_sdk/README.md).
 - [`third_party/casiahand_sdk`](third_party/casiahand_sdk) — optional CASIA Hand-M SDK; see its

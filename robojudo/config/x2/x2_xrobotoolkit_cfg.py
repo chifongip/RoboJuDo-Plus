@@ -1,4 +1,4 @@
-"""Opt-in XRoboToolkit arm control using the X2 observer loco-mimic runtime."""
+"""X2 XR teleoperation presets sharing robot-owned arm and finger settings."""
 
 from robojudo.config import ASSETS_DIR, cfg_registry
 from robojudo.controller.ctrl_cfgs import (
@@ -15,69 +15,30 @@ from robojudo.controller.ctrl_cfgs import (
 from .env.x2_mujuco_env_cfg import X2ObserverMujocoEnvCfg
 from .x2_locomimic_observer_cfg import x2_locomimic_observer, x2_locomimic_real_observer
 
+# Shared by all four presets. The bridge adopts the robot's collision policy.
+XR_ARM_SETTINGS = {
+    "executor_collision_checking": False,
+    "ema_alpha": 0.0,
+    "max_joint_velocity_rad_s": 8.0,
+    "return_joint_velocity_rad_s": 1.0,
+    "feedback_endpoint": "tcp://127.0.0.1:8571",
+    "command_receive_hwm": 8,
+}
 
-def _xr_controllers(base):
-    controllers = []
-    for cfg in base.ctrl:
-        controller = cfg.model_copy(deep=True)
-        if isinstance(cfg, UpperBodyZmqCtrlCfg):
-            controller.feedback_endpoint = "tcp://127.0.0.1:8571"
-            controller.command_receive_hwm = 8
-            controller.visualize_targets = base.env.is_sim
-            controller.ema_alpha = 0.0
-            controller.xr_target_filter = True
-            controller.max_joint_velocity_rad_s = 8.0
-            controller.return_joint_velocity_rad_s = 1.0
-        controllers.append(controller)
-    return controllers
+# Shared by the simulation and hardware OmniHand presets.
+XR_HAND_SETTINGS = {
+    "hand_command_mode": "direct",  # "direct" or "filtered"; filtered uses the arm EMA setting.
+    "hand_velocity_limit": 2.0,  # rad/s; filtered fingers are also bounded by model limits.
+}
 
-
-@cfg_registry.register
-class x2_xrobotoolkit(x2_locomimic_observer):
-    """X2 simulation with externally checked XR arm proposals and measured feedback."""
-
-    ctrl: list[
-        JoystickCtrlCfg
-        | KeyboardCtrlCfg
-        | RosJoystickCtrlCfg
-        | UpperBodyZmqCtrlCfg
-        | VelocityZmqCtrlCfg
-        | LocomanipulationPostureZmqCtrlCfg
-    ] = _xr_controllers(x2_locomimic_observer())
-
-
-@cfg_registry.register
-class x2_xrobotoolkit_real(x2_locomimic_real_observer):
-    """X2 AimDK deployment with the same externally checked XR arm protocol."""
-
-    ctrl: list[
-        JoystickCtrlCfg
-        | KeyboardCtrlCfg
-        | RosJoystickCtrlCfg
-        | UpperBodyZmqCtrlCfg
-        | VelocityZmqCtrlCfg
-        | LocomanipulationPostureZmqCtrlCfg
-    ] = _xr_controllers(x2_locomimic_real_observer())
-
-
-def _xr_hand_controllers(base):
-    controllers = []
-    for cfg in base.ctrl:
-        if isinstance(cfg, UpperBodyZmqCtrlCfg):
-            controllers.append(
-                UpperBodyOmniHandZmqCtrlCfg(
-                    **{
-                        **cfg.model_dump(),
-                        "ctrl_type": "UpperBodyOmniHandZmqCtrl",
-                        "omnihand": OmniHandCfg(joint_state_fps=50.0),
-                    }
-                )
-            )
-        else:
-            controllers.append(cfg.model_copy(deep=True))
-    return controllers
-
-
+XRArmControllers = list[
+    JoystickCtrlCfg
+    | KeyboardCtrlCfg
+    | RosJoystickCtrlCfg
+    | UpperBodyZmqCtrlCfg
+    | VelocityZmqCtrlCfg
+    | LocomanipulationPostureZmqCtrlCfg
+]
 XRHandControllers = list[
     JoystickCtrlCfg
     | KeyboardCtrlCfg
@@ -88,14 +49,50 @@ XRHandControllers = list[
 ]
 
 
+def _xr_controllers(base, *, omnihand=False):
+    controllers = []
+    for cfg in base.ctrl:
+        if not isinstance(cfg, UpperBodyZmqCtrlCfg):
+            controllers.append(cfg.model_copy(deep=True))
+            continue
+        values = {**cfg.model_dump(), **XR_ARM_SETTINGS, "visualize_targets": base.env.is_sim}
+        if omnihand:
+            controllers.append(
+                UpperBodyOmniHandZmqCtrlCfg(
+                    **{
+                        **values,
+                        **XR_HAND_SETTINGS,
+                        "ctrl_type": "UpperBodyOmniHandZmqCtrl",
+                        "omnihand": OmniHandCfg(joint_state_fps=50.0),
+                    }
+                )
+            )
+        else:
+            controllers.append(UpperBodyZmqCtrlCfg(**values))
+    return controllers
+
+
+@cfg_registry.register
+class x2_xrobotoolkit(x2_locomimic_observer):
+    """Arm-only XR simulation with measured feedback and target visualization."""
+
+    ctrl: XRArmControllers = _xr_controllers(x2_locomimic_observer())
+
+
+@cfg_registry.register
+class x2_xrobotoolkit_real(x2_locomimic_real_observer):
+    """Arm-only XR hardware deployment through AimDK."""
+
+    ctrl: XRArmControllers = _xr_controllers(x2_locomimic_real_observer())
+
+
 @cfg_registry.register
 class x2_xrobotoolkit_omnihand(x2_xrobotoolkit):
     """XR arms and independent trigger fingers in the floating X2 simulation."""
 
-    ctrl: XRHandControllers = _xr_hand_controllers(x2_xrobotoolkit())
-    env: X2ObserverMujocoEnvCfg = X2ObserverMujocoEnvCfg(
-        **{
-            **x2_xrobotoolkit().env.model_dump(),
+    ctrl: XRHandControllers = _xr_controllers(x2_locomimic_observer(), omnihand=True)
+    env: X2ObserverMujocoEnvCfg = x2_xrobotoolkit().env.model_copy(
+        update={
             "env_type": "X2OmniHandMujocoEnv",
             "xml": str(ASSETS_DIR / "robots/x2/x2_omnihand.xml"),
         }
@@ -106,49 +103,4 @@ class x2_xrobotoolkit_omnihand(x2_xrobotoolkit):
 class x2_xrobotoolkit_omnihand_real(x2_xrobotoolkit_real):
     """Robot-side HCAN selected by local adapter serials and exact hand identities."""
 
-    ctrl: XRHandControllers = _xr_hand_controllers(x2_xrobotoolkit_real())
-
-
-def _direct_hand_controllers():
-    controllers = _xr_hand_controllers(x2_xrobotoolkit_real())
-    for controller in controllers:
-        if isinstance(controller, UpperBodyOmniHandZmqCtrlCfg):
-            controller.hand_command_mode = "direct"
-    return controllers
-
-
-@cfg_registry.register
-class x2_xrobotoolkit_omnihand_real_direct(x2_xrobotoolkit_omnihand_real):
-    """Experimental final finger targets using unchanged device motor settings."""
-
-    ctrl: XRHandControllers = _direct_hand_controllers()
-
-
-def _low_latency_direct_hand_controllers():
-    controllers = _direct_hand_controllers()
-    for controller in controllers:
-        if isinstance(controller, UpperBodyOmniHandZmqCtrlCfg):
-            controller.omnihand.direct_completion_notifications = True
-    return controllers
-
-
-@cfg_registry.register
-class x2_xrobotoolkit_omnihand_real_direct_low_latency(x2_xrobotoolkit_omnihand_real_direct):
-    """Direct worker notifications and policy-boundary checks with combined-frame control."""
-
-    ctrl: XRHandControllers = _low_latency_direct_hand_controllers()
-
-
-def _executor_controllers():
-    controllers = _low_latency_direct_hand_controllers()
-    for controller in controllers:
-        if isinstance(controller, UpperBodyOmniHandZmqCtrlCfg):
-            controller.schema_version = 3
-    return controllers
-
-
-@cfg_registry.register
-class x2_xrobotoolkit_omnihand_real_direct_executor(x2_xrobotoolkit_omnihand_real_direct_low_latency):
-    """Robot-authoritative transitions from combined XR desired targets (opt in)."""
-
-    ctrl: XRHandControllers = _executor_controllers()
+    ctrl: XRHandControllers = _xr_controllers(x2_locomimic_real_observer(), omnihand=True)

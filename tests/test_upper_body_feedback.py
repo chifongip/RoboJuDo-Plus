@@ -1,10 +1,11 @@
 """Protocol and pipeline lifecycle checks without sockets or robot hardware."""
 
 import copy
+import importlib.util
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import zmq
@@ -51,6 +52,34 @@ class MemoryContext:
         return MemorySocket()
 
 
+class TransportExecutor:
+    """Stand-in numerical executor for transport/barrier tests with a one-joint model.
+
+    Real model, filtering and collision validation are covered in test_xr_target_executor.
+    """
+
+    contract = {}
+
+    def __init__(self, cfg):
+        from robojudo.controller.omnihand_runtime import OMNIHAND_JOINT_NAMES
+
+        self.hand_names = list(OMNIHAND_JOINT_NAMES) if cfg.xr_profile == "x2_omnihand" else []
+
+    def reset(self):
+        pass
+
+    def close(self):
+        pass
+
+    def validate(self, feedback, message, positions):
+        pass
+
+    def prepare(self, feedback, message, measured):
+        feedback.validate(message, message["positions"])
+        return message
+
+
+@unittest.skipUnless(importlib.util.find_spec("xrobotoolkit_teleop"), "install XR executor support")
 class UpperBodyFeedbackTests(unittest.TestCase):
     def test_publication_uses_new_joint_snapshot_without_changing_policy_cache(self):
         cached = self.env.dof_pos.copy()
@@ -134,12 +163,12 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.pipeline._publish_upper_body_feedback(self.env_data, target)
         return self.feedback.socket.frames[-1]
 
-    def proposal(self, state, delta=0.01, frame_id=1, bridge_id="test-bridge"):
+    def desired(self, state, delta=0.01, frame_id=1, bridge_id="test-bridge"):
         targets = state["last_commanded_positions"].copy()
         targets["left_elbow_joint"] += delta
         return {
-            "schema_version": 1,
-            "type": "upper_body_proposal",
+            "schema_version": 3,
+            "type": "upper_body_desired",
             "session_id": state["session_id"],
             "generation": state["generation"],
             "bridge_id": bridge_id,
@@ -150,13 +179,38 @@ class UpperBodyFeedbackTests(unittest.TestCase):
             "status": "homing" if state["intent"] == "HOME" else "tracking",
             "positions": {n: float(np.float32(v)) for n, v in targets.items()},
             "desired_positions": targets.copy(),
-            "filter_contract": "robojudo_filter_v1",
+            "executor": dict(self.feedback.executor.contract),
+            "active_joint_names": list(targets),
+            "velocity_limits": {"arm": 8.0, "return": 1.0},
         }
 
-    def receive(self, proposal):
+    def receive(self, desired):
         self.receiver.get_data()  # Drain packets preceding a reset before publishing.
-        self.receiver._socket.messages.append(proposal)
+        self.receiver._socket.messages.append(desired)
         return {"UpperBodyZmqCtrl": self.receiver.get_data()}
+
+    def test_arm_recording_uses_completed_issued_targets_once(self):
+        self.pipeline._set_upper_body_enabled(True)
+        state = self.publish()
+        desired = self.desired(state, delta=0.05)
+        target = self.pipeline._apply_upper_body_override(self.env.default_pos, self.receive(desired))
+        self.pipeline._recorder_client = Mock()
+        self.pipeline._recording_active = True
+        self.pipeline._recording_paused = False
+        self.pipeline._send_upper_body_target(target)
+        self.publish()
+        completed = self.feedback._completed_positions.copy()
+        newer = target.copy()
+        newer[self.pipeline._upper_body_indices] += 0.1
+        extras = {"locomotion_command": np.zeros(4)}
+        self.pipeline._record_upper_body_sample(self.env_data, extras, newer, rl_active=True)
+        recorder = self.pipeline._recorder_client
+        recorder.submit.assert_called_once()
+        sample = recorder.submit.call_args.kwargs
+        self.assertEqual(sample["joint_names"], self.arm_cfg.joint_names)
+        np.testing.assert_allclose(sample["joint_position_commands"], [completed[n] for n in self.arm_cfg.joint_names])
+        self.pipeline._record_upper_body_sample(self.env_data, extras, newer, rl_active=True)
+        recorder.submit.assert_called_once()
 
     def test_presets_reuse_controller_and_pipeline_without_timeout_policy_switch(self):
         for cfg in (x2_xrobotoolkit(), x2_xrobotoolkit_real()):
@@ -170,15 +224,14 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.assertIsNone(legacy.feedback_endpoint)
         self.assertNotIn("timeout_behavior", UpperBodyZmqCtrlCfg.model_fields)
         self.assertEqual(legacy.max_joint_velocity_rad_s, 1.0)
-        with self.assertRaises(ValueError):
-            UpperBodyZmqCtrlCfg(joint_names=legacy.joint_names, feedback_endpoint="tcp://127.0.0.1:8571")
+        UpperBodyZmqCtrlCfg(joint_names=legacy.joint_names, feedback_endpoint="tcp://127.0.0.1:8571")
 
     def test_pending_home_can_apply_while_tracking_is_disabled(self):
         state = self.publish()
         self.assertEqual(state["intent"], "HOME")
-        proposal = self.proposal(state)
-        target = self.pipeline._apply_upper_body_override(self.env.default_pos, self.receive(proposal))
-        expected = np.asarray(list(proposal["positions"].values()), dtype=np.float32)
+        desired = self.desired(state)
+        target = self.pipeline._apply_upper_body_override(self.env.default_pos, self.receive(desired))
+        expected = np.asarray(list(desired["positions"].values()), dtype=np.float32)
         np.testing.assert_array_equal(target[self.pipeline._upper_body_indices], expected)
         self.assertFalse(self.pipeline._upper_body_stream_was_fresh)
         self.pipeline._send_policy_target(target)
@@ -186,7 +239,7 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.assertEqual(self.feedback.command_id, 1)
         self.assertEqual(len(self.sent), 1)
         with self.assertRaises(ValueError):
-            self.feedback.validate(proposal, proposal["positions"])
+            self.feedback.validate(desired, desired["positions"])
 
     def test_offline_bridge_holds_and_preserves_home_request(self):
         self.publish()
@@ -198,11 +251,11 @@ class UpperBodyFeedbackTests(unittest.TestCase):
             np.testing.assert_array_equal(target[self.pipeline._upper_body_indices], previous)
             self.assertEqual(self.publish()["intent"], "HOME")
 
-    def test_tracking_outage_holds_and_mode_change_revokes_proposals(self):
+    def test_tracking_outage_holds_and_mode_change_revokes_desired_targets(self):
         self.pipeline._set_upper_body_enabled(True)
         state = self.publish()
-        proposal = self.proposal(state, delta=0.1)
-        target = self.pipeline._apply_upper_body_override(self.env.default_pos, self.receive(proposal))
+        desired = self.desired(state, delta=0.1)
+        target = self.pipeline._apply_upper_body_override(self.env.default_pos, self.receive(desired))
         self.assertTrue(self.pipeline._upper_body_stream_was_fresh)
         self.pipeline._send_policy_target(target)
         self.publish()
@@ -213,23 +266,23 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.pipeline._reset_upper_body_feedback()
         self.assertEqual(self.publish()["intent"], "HOLD")
         with self.assertRaises(ValueError):
-            self.feedback.validate(proposal, proposal["positions"])
+            self.feedback.validate(desired, desired["positions"])
 
     def test_expired_and_cached_measurements_are_rejected(self):
         state = self.publish()
-        proposal = self.proposal(state)
+        desired = self.desired(state)
         self.clock.return_value = 10.101
         with self.assertRaisesRegex(ValueError, "expired"):
-            self.feedback.validate(proposal, proposal["positions"])
+            self.feedback.validate(desired, desired["positions"])
         cached = self.publish()
         self.assertGreater(cached["state_id"], state["state_id"])
         self.assertFalse(cached["valid"])
         with self.assertRaises(ValueError):
-            self.feedback.validate(self.proposal(cached), proposal["positions"])
+            self.feedback.validate(self.desired(cached), desired["positions"])
 
     def test_delayed_command_is_rechecked_at_application(self):
         state = self.publish()
-        data = self.receive(self.proposal(state))
+        data = self.receive(self.desired(state))
         self.clock.return_value = 10.101
         previous = self.pipeline._upper_body_filtered.copy()
         target = self.pipeline._apply_upper_body_override(self.env.default_pos, data)
@@ -238,7 +291,7 @@ class UpperBodyFeedbackTests(unittest.TestCase):
     def test_tracking_command_outage_revokes_generation_even_with_fresh_robot_state(self):
         self.pipeline._set_upper_body_enabled(True)
         state = self.publish()
-        self.receive(self.proposal(state))
+        self.receive(self.desired(state))
         self.clock.return_value = 10.2
         self.receiver.get_data()
         self.clock.return_value = 10.3
@@ -249,22 +302,23 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.assertGreater(recovered["generation"], state["generation"])
         self.assertEqual(recovered["reset_reason"], "tracking command timeout")
 
-    def test_return_is_also_bounded_by_overall_arm_speed_override(self):
+    def test_return_is_bounded_by_robot_executor(self):
         self.feedback.cfg.max_joint_velocity_rad_s = 0.25
         state = self.publish()
-        too_fast = self.proposal(state, delta=0.01)
-        with self.assertRaisesRegex(ValueError, "velocity|prediction"):
-            self.feedback.validate(too_fast, too_fast["positions"])
-        allowed = self.proposal(state, delta=0.004)
-        self.feedback.validate(allowed, allowed["positions"])
+        desired = self.desired(state, delta=0.1)
+        issued = self.feedback.executor.prepare(self.feedback, desired, state["positions"])
+        self.assertLessEqual(
+            abs(issued["positions"]["left_elbow_joint"] - state["last_commanded_positions"]["left_elbow_joint"]),
+            0.005001,
+        )
 
     def test_duplicate_partial_invalid_and_over_speed_commands_are_rejected(self):
         state = self.publish()
-        valid = self.proposal(state)
+        valid = self.desired(state)
         self.feedback.validate(valid, valid["positions"], receiving=True)
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.feedback.validate(valid, valid["positions"], receiving=True)
-        for mutation in ("partial", "speed", "session", "boolean", "limits"):
+        for mutation in ("partial", "session", "boolean", "limits"):
             bad = copy.deepcopy(valid)
             bad["frame_id"] = 2
             if mutation == "partial":
@@ -282,24 +336,24 @@ class UpperBodyFeedbackTests(unittest.TestCase):
 
     def test_bridge_restart_rotates_generation_and_requires_new_feedback(self):
         state = self.publish()
-        valid = self.proposal(state)
+        valid = self.desired(state)
         self.feedback.validate(valid, valid["positions"], receiving=True)
-        restart = self.proposal(state, bridge_id="restarted")
+        restart = self.desired(state, bridge_id="restarted")
         with self.assertRaisesRegex(ValueError, "restarted"):
             self.feedback.validate(restart, restart["positions"], receiving=True)
         next_state = self.publish()
         self.assertGreater(next_state["generation"], state["generation"])
-        fresh = self.proposal(next_state, bridge_id="restarted")
+        fresh = self.desired(next_state, bridge_id="restarted")
         self.feedback.validate(fresh, fresh["positions"], receiving=True)
 
     def test_completion_identity_and_targets_are_cleared_on_generation_reset(self):
         state = self.publish()
-        proposal = self.proposal(state)
-        self.feedback.acknowledge(proposal)
+        desired = self.desired(state)
+        self.feedback.acknowledge(desired)
         completed = self.publish()
-        self.assertEqual(completed["applied_bridge_id"], proposal["bridge_id"])
-        self.assertEqual(completed["applied_frame_id"], proposal["frame_id"])
-        self.assertEqual(completed["last_commanded_positions"], proposal["positions"])
+        self.assertEqual(completed["applied_bridge_id"], desired["bridge_id"])
+        self.assertEqual(completed["applied_frame_id"], desired["frame_id"])
+        self.assertEqual(completed["last_commanded_positions"], desired["positions"])
         self.feedback.reset()
         reset = self.publish()
         self.assertIsNone(reset["applied_bridge_id"])
@@ -347,19 +401,19 @@ class UpperBodyFeedbackTests(unittest.TestCase):
 
     def test_visualization_messages_cannot_refresh_commands_and_expire(self):
         state = self.publish()
-        message = self.proposal(state)
+        message = self.desired(state)
         message.update(type="upper_body_visualization", positions=None, target_poses={"left": np.eye(4).tolist()})
         data = self.receive(message)["UpperBodyZmqCtrl"]
         self.assertEqual(set(data["target_poses"]), {"left"})
         self.assertFalse(data["fresh"])
-        self.assertIsNone(self.feedback.last_proposal_at)
+        self.assertIsNone(self.feedback.last_desired_at)
         self.assertEqual(self.feedback.command_id, 0)
         self.clock.return_value = 10.101
         self.assertEqual(self.receiver.get_data()["target_poses"], {})
 
     def test_visualization_rejects_invalid_transforms_without_rejecting_valid_commands(self):
         state = self.publish()
-        message = self.proposal(state)
+        message = self.desired(state)
         message["target_poses"] = {"left": np.zeros((4, 4)).tolist()}
         data = self.receive(message)["UpperBodyZmqCtrl"]
         self.assertTrue(data["fresh"])
@@ -367,7 +421,7 @@ class UpperBodyFeedbackTests(unittest.TestCase):
 
     def test_expired_visualization_is_debug_only_and_does_not_hide_command_rejections(self):
         state = self.publish()
-        message = self.proposal(state)
+        message = self.desired(state)
         message.update(type="upper_body_visualization", positions=None, target_poses={"left": np.eye(4).tolist()})
         self.clock.return_value = 10.101
         with self.assertLogs("robojudo.controller.upper_body_zmq_ctrl", level="DEBUG") as logs:
@@ -375,28 +429,28 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.assertTrue(all(record.levelname == "DEBUG" for record in logs.records))
         self.assertEqual(self.receiver._last_invalid_log_at, float("-inf"))
         with self.assertLogs("robojudo.controller.upper_body_zmq_ctrl", level="WARNING") as logs:
-            self.receive(self.proposal(state))
+            self.receive(self.desired(state))
         self.assertIn("Rejected upper-body ZMQ message", logs.output[0])
         self.assertIn("expired", logs.output[0])
 
-    def test_completion_timestamps_follow_acknowledged_proposal_and_reset(self):
+    def test_completion_timestamps_follow_acknowledged_desired_and_reset(self):
         state = self.publish()
-        proposal = self.proposal(state)
-        proposal["_command_timestamps"] = {"received": 9.98, "acknowledged": 9.99}
-        self.feedback.acknowledge(proposal)
+        desired = self.desired(state)
+        desired["_command_timestamps"] = {"received": 9.98, "acknowledged": 9.99}
+        self.feedback.acknowledge(desired)
         frame = self.publish()
         stamps = frame["feedback_diagnostics"]["command_timestamps"]
         self.assertEqual(
             stamps, {"received": 9.98, "acknowledged": 9.99, "feedback_built": 10.0, "first_feedback_built": 10.0}
         )
-        self.assertEqual(frame["applied_frame_id"], proposal["frame_id"])
+        self.assertEqual(frame["applied_frame_id"], desired["frame_id"])
         self.feedback.reset()
         self.assertNotIn("command_timestamps", self.publish()["feedback_diagnostics"])
 
     def test_first_ack_state_id_tracks_accepted_send_attempt_not_delivery(self):
         state = self.publish()
-        proposal = self.proposal(state)
-        self.feedback.acknowledge(proposal)
+        desired = self.desired(state)
+        self.feedback.acknowledge(desired)
         first = self.publish()
         next_state = self.publish()
         self.assertEqual(first["feedback_diagnostics"]["first_ack_state_id"], first["state_id"])
@@ -407,7 +461,7 @@ class UpperBodyFeedbackTests(unittest.TestCase):
 
     def test_silent_pub_drop_preserves_first_attempt_marker_in_later_snapshot(self):
         state = self.publish()
-        self.feedback.acknowledge(self.proposal(state))
+        self.feedback.acknowledge(self.desired(state))
         with patch.object(self.feedback.socket, "send_json", return_value=None):
             self.publish()
         missing_state_id = self.feedback.state_id
@@ -416,9 +470,9 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.assertNotIn(missing_state_id, [f["state_id"] for f in self.feedback.socket.frames])
 
     def test_first_feedback_timestamp_retries_failed_send_and_stays_fixed(self):
-        proposal = self.proposal(self.publish())
-        proposal["_command_timestamps"] = {"received": 9.98, "acknowledged": 9.99}
-        self.feedback.acknowledge(proposal)
+        desired = self.desired(self.publish())
+        desired["_command_timestamps"] = {"received": 9.98, "acknowledged": 9.99}
+        self.feedback.acknowledge(desired)
         with patch.object(self.feedback.socket, "send_json", side_effect=zmq.Again()):
             self.publish()
         self.assertIsNone(self.feedback._first_feedback_built)
@@ -430,23 +484,22 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         stamps = later["feedback_diagnostics"]["command_timestamps"]
         self.assertEqual(stamps["first_feedback_built"], 10.02)
         self.assertEqual(stamps["feedback_built"], 10.04)
-        self.feedback.acknowledge(dict(proposal, frame_id=proposal["frame_id"] + 1))
+        self.feedback.acknowledge(dict(desired, frame_id=desired["frame_id"] + 1))
         self.assertIsNone(self.feedback._first_feedback_built)
         self.clock.return_value = 10.06
         self.assertEqual(self.publish()["feedback_diagnostics"]["command_timestamps"]["first_feedback_built"], 10.06)
         self.feedback.reset()
         self.assertIsNone(self.feedback._first_feedback_built)
 
-    def test_ack_keeps_fresh_visualization_but_rejects_old_command_baseline(self):
+    def test_ack_keeps_fresh_visualization_and_desired_lease(self):
         state = self.publish()
-        proposal = self.proposal(state)
-        self.feedback.validate(proposal, proposal["positions"], receiving=True)
+        desired = self.desired(state)
+        self.feedback.validate(desired, desired["positions"], receiving=True)
         self.feedback.acknowledge()
-        visual = dict(proposal, target_poses={"left": np.eye(4).tolist()})
+        visual = dict(desired, target_poses={"left": np.eye(4).tolist()})
         poses, _ = self.feedback.visualization(visual)
         self.assertIn("left", poses)
-        with self.assertRaisesRegex(ValueError, "superseded"):
-            self.feedback.validate(proposal, proposal["positions"])
+        self.feedback.validate(desired, desired["positions"])
 
     def test_older_visualization_cannot_replace_newer_target(self):
         old = self.publish()
@@ -456,20 +509,20 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         for state, offset in ((new, 0.3), (old, 0.1)):
             target = np.eye(4)
             target[0, 3] = offset
-            message = self.proposal(state)
+            message = self.desired(state)
             message.update(type="upper_body_visualization", positions=None, target_poses={"left": target.tolist()})
             self.receive(message)
         self.assertEqual(self.receiver.get_data()["target_poses"]["left"][0][3], 0.3)
 
-    def test_proposal_arriving_during_inference_is_applied_in_the_same_cycle(self):
+    def test_desired_arriving_during_inference_is_applied_in_the_same_cycle(self):
         self.pipeline._set_upper_body_enabled(True)
         state = self.publish()
-        proposal = self.proposal(state)
+        desired = self.desired(state)
         self.receiver.get_data()  # Drain the enable-session reset before inference.
 
         def infer(obs):
             self.clock.return_value = 10.06
-            self.receiver._socket.messages.append(proposal)
+            self.receiver._socket.messages.append(desired)
             return self.env.default_pos.copy()
 
         self.pipeline.policy = SimpleNamespace(
@@ -477,7 +530,7 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         )
         target, _ = self.pipeline._step_rl_policy(self.env_data, {"UpperBodyZmqCtrl": {"fresh": False}}, dry_run=False)
         index = self.env.joint_names.index("left_elbow_joint")
-        self.assertAlmostEqual(target[index], proposal["positions"]["left_elbow_joint"], places=6)
+        self.assertAlmostEqual(target[index], desired["positions"]["left_elbow_joint"], places=6)
         self.assertEqual(len(self.sent), 1)
         self.assertIsNotNone(self.pipeline._upper_body_pending)
 

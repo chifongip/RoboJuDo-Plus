@@ -1,4 +1,4 @@
-"""Versioned command feedback and optional robot-authoritative target execution.
+"""Robot-authoritative XR targets and completed-command feedback.
 
 All deadlines belong to this process. A publisher echoes feedback identifiers;
 its clock is never compared with the robot's monotonic clock.
@@ -12,9 +12,6 @@ from collections import OrderedDict
 
 import numpy as np
 import zmq
-
-from robojudo.controller.xr_target_filter import filter_targets
-from robojudo.utils.latency_trace import LatencyTrace, command_stamps, identity
 
 
 def _counter(value):
@@ -30,11 +27,6 @@ class StaleVisualization(ValueError):
 class UpperBodyFeedback:
     def __init__(self, cfg, context):
         self.cfg = cfg
-        self.trace = LatencyTrace(
-            getattr(cfg, "latency_trace_path", None),
-            getattr(cfg, "latency_trace_duration_s", 30.0),
-            getattr(cfg, "latency_trace_delay_s", 0.0),
-        )
         self.session_id = uuid.uuid4().hex
         self.generation = 0
         self.command_id = 0
@@ -50,16 +42,14 @@ class UpperBodyFeedback:
         self.intent = "HOLD"
         self.reset_reason = "startup"
         self.bridge_id = None
-        self.last_proposal_at = None
+        self.last_desired_at = None
         self._frame_id = -1
         self._states = OrderedDict()
         self._last_publication_timing = None
-        self.executor = None
-        self.latest_measurements = None
-        if self.schema_version == 3:
-            from robojudo.controller.xr_target_executor import XRTargetExecutor
+        from robojudo.controller.xr_target_executor import XRTargetExecutor
 
-            self.executor = XRTargetExecutor(cfg)
+        self.latest_measurements = None
+        self.executor = XRTargetExecutor(cfg)
         self.socket = context.socket(zmq.PUB)
         try:
             self.socket.setsockopt(zmq.LINGER, 0)
@@ -72,17 +62,15 @@ class UpperBodyFeedback:
             raise
         logging.getLogger(__name__).info("Upper-body feedback configured SNDHWM=%d", cfg.feedback_send_hwm)
 
+    schema_version = 3
+
     @property
-    def schema_version(self):
-        return getattr(self.cfg, "schema_version", 1)
+    def has_hands(self):
+        return bool(self.executor.hand_names)
 
     @property
     def command_names(self):
-        if self.schema_version in (2, 3):
-            from robojudo.controller.omnihand_runtime import OMNIHAND_JOINT_NAMES
-
-            return [*self.cfg.joint_names, *OMNIHAND_JOINT_NAMES]
-        return self.cfg.joint_names
+        return [*self.cfg.joint_names, *self.executor.hand_names]
 
     def reset(self, reason="controller session reset"):
         self.reset_reason = reason
@@ -92,7 +80,7 @@ class UpperBodyFeedback:
         if self.executor is not None:
             self.executor.reset()
         self.latest_measurements = None
-        self.last_proposal_at = None
+        self.last_desired_at = None
         self.applied_bridge_id = None
         self.applied_frame_id = None
         self._completed_positions = None
@@ -104,8 +92,8 @@ class UpperBodyFeedback:
     def expire_tracking(self, now):
         if (
             self.intent == "TRACK"
-            and self.last_proposal_at is not None
-            and now - self.last_proposal_at > self.cfg.timeout_s
+            and self.last_desired_at is not None
+            and now - self.last_desired_at > self.cfg.timeout_s
         ):
             self.reset("tracking command timeout")
             return True
@@ -115,10 +103,6 @@ class UpperBodyFeedback:
         self.socket.close(linger=0)
         if self.executor is not None:
             self.executor.close()
-        try:
-            self.trace.export()
-        except OSError:
-            logging.getLogger(__name__).exception("Could not export latency trace")
 
     def publish(
         self,
@@ -214,35 +198,17 @@ class UpperBodyFeedback:
             "pipeline_timing_ms": {} if timing_ms is None else dict(timing_ms),
             "feedback_diagnostics": feedback_diagnostics,
         }
-        if self.schema_version in (2, 3):
-            frame["hand_command_mode"] = getattr(self.cfg, "hand_command_mode", "filtered")
-            frame["hand_velocity_limit"] = self.cfg.hand_velocity_limit
-        if self.cfg.xr_target_filter:
-            frame["filter_contract"] = "robojudo_filter_v1"
-            frame["ema_alpha"] = self.cfg.ema_alpha
-            frame["arm_joint_names"] = list(self.cfg.joint_names)
-        if self.executor is not None:
-            frame["filter_contract"] = "robojudo_executor_v1"
-            frame["executor"] = dict(self.executor.contract)
+        frame["executor"] = dict(self.executor.contract)
         deadline = min(sample_times.values(), default=float("-inf")) + self.cfg.feedback_timeout_s
         self._states[self.state_id] = (deadline, frame)
         while len(self._states) > 16:
             self._states.popitem(last=False)
         built = time.perf_counter()
         sent = True
-        send_started = time.monotonic() if self.trace.enabled else None
         try:
             self.socket.send_json(frame, flags=zmq.NOBLOCK, allow_nan=False)
         except zmq.Again:
             sent = False
-        if self.trace.enabled:
-            self.trace.record(
-                "feedback_send",
-                at=send_started,
-                **identity(frame, applied=True),
-                accepted=sent,
-                first_ack_state_id=feedback_diagnostics.get("first_ack_state_id"),
-            )
         if sent and self.applied_frame_id is not None and self._first_ack_state_id is None:
             self._first_ack_state_id = self.state_id
         if sent and self._command_timestamps and self._first_feedback_built is None:
@@ -259,15 +225,15 @@ class UpperBodyFeedback:
         if (
             type(message.get("schema_version")) is not int
             or message["schema_version"] != self.schema_version
-            or message.get("type") != ("upper_body_desired" if self.schema_version == 3 else "upper_body_proposal")
+            or message.get("type") != "upper_body_desired"
         ):
-            kind = "upper_body_desired" if self.schema_version == 3 else "upper_body_proposal"
+            kind = "upper_body_desired"
             raise ValueError(f"expected {kind} schema version {self.schema_version}")
         if message.get("session_id") != self.session_id or _counter(message.get("generation")) != self.generation:
             raise ValueError("obsolete upper-body session or generation")
         frame_id = _counter(message.get("frame_id"))
         state_id = _counter(message.get("state_id"))
-        command_id = _counter(message.get("command_id"))
+        _counter(message.get("command_id"))
         bridge_id = message.get("bridge_id")
         if not isinstance(bridge_id, str) or not 1 <= len(bridge_id) <= 64:
             raise ValueError("bridge_id must be a non-empty bounded string")
@@ -292,91 +258,23 @@ class UpperBodyFeedback:
                 f"age_at_publish={age_at_publish * 1000:.1f} ms, "
                 f"budget={self.cfg.feedback_timeout_s * 1000:.1f} ms)"
             )
-        if self.schema_version != 3 and (command_id != self.command_id or command_id != feedback["command_id"]):
-            raise ValueError("superseded arm command baseline")
         if message.get("intent") != self.intent or self.intent not in {"TRACK", "HOME"}:
-            raise ValueError("arm proposal is not authorized by the current intent")
+            raise ValueError("arm desired is not authorized by the current intent")
         if set(positions) != set(self.command_names):
-            raise ValueError("feedback proposals must contain all configured arm joints")
+            raise ValueError("feedback desired targets must contain all configured arm joints")
         if receiving and frame_id <= self._frame_id:
-            raise ValueError("duplicate or out-of-order arm proposal")
+            raise ValueError("duplicate or out-of-order arm desired")
         status = message.get("status")
         if status not in {"tracking", "homing"} or (self.intent == "HOME" and status != "homing"):
-            raise ValueError("proposal status is incompatible with its control intent")
-        hand_mode = feedback.get("hand_command_mode", "filtered")
-        proposed_mode = message.get("hand_command_mode", "filtered")
-        if self.schema_version in (2, 3) and proposed_mode != hand_mode:
-            raise ValueError("finger command mode mismatch")
-        if self.executor is not None:
-            self.executor.validate(self, message, positions)
-            if receiving:
-                self.bridge_id = bridge_id
-                self._frame_id = frame_id
-                self.last_proposal_at = time.monotonic()
-            return
-        if self.cfg.xr_target_filter:
-            if message.get("filter_contract") != "robojudo_filter_v1":
-                raise ValueError("incompatible target filter contract")
-            desired = message.get("desired_positions")
-            if not isinstance(desired, dict) or set(desired) != set(positions):
-                raise ValueError("missing desired targets")
-            for name, value in desired.items():
-                low, high = feedback["position_limits"][name]
-                if not math.isfinite(value) or not low <= value <= high:
-                    raise ValueError("desired target exceeds position limits")
-            speeds = {}
-            for name in positions:
-                speeds[name] = (
-                    min(feedback["arm_velocity_limit"], feedback["return_velocity_limit"])
-                    if status == "homing"
-                    else feedback["arm_velocity_limit"]
-                )
-                if name not in self.cfg.joint_names:
-                    speeds[name] = 0.0 if status == "homing" else feedback["hand_velocity_limit"]
-            expected = filter_targets(
-                desired,
-                feedback["last_commanded_positions"],
-                feedback["position_limits"],
-                speeds,
-                feedback["control_dt"],
-                feedback["ema_alpha"],
-            )
-            if hand_mode == "direct" and status == "tracking":
-                for name in positions:
-                    if name not in self.cfg.joint_names:
-                        expected[name] = float(np.float32(desired[name]))
-            if expected != positions:
-                raise ValueError("filtered target prediction mismatch")
-        speed = feedback["arm_velocity_limit"]
-        if status == "homing":
-            speed = min(speed, feedback["return_velocity_limit"])
-        for name, value in positions.items():
-            lower, upper = feedback["position_limits"][name]
-            if not lower <= value <= upper:
-                raise ValueError(
-                    f"arm target exceeds position limits: {name}={value!r}, allowed [{lower!r}, {upper!r}]"
-                )
-            joint_speed = speed
-            if self.schema_version == 2 and name not in self.cfg.joint_names:
-                joint_speed = 0.0 if status == "homing" else feedback["hand_velocity_limit"]
-            if (
-                self.schema_version == 2
-                and name not in self.cfg.joint_names
-                and status == "tracking"
-                and hand_mode == "direct"
-            ):
-                continue
-            if abs(value - feedback["last_commanded_positions"][name]) > joint_speed * feedback["control_dt"] + 1e-6:
-                raise ValueError(f"arm target exceeds command velocity limit: {name}")
-        if self.schema_version == 2 and any(float(np.float32(value)) != value for value in positions.values()):
-            raise ValueError("proposals must contain already checked float32 targets")
+            raise ValueError("desired status is incompatible with its control intent")
+        self.executor.validate(self, message, positions)
         if receiving:
             self.bridge_id = bridge_id
             self._frame_id = frame_id
-            self.last_proposal_at = time.monotonic()
+            self.last_desired_at = time.monotonic()
 
-    def acknowledge(self, proposal=None):
-        source = None if proposal is None else proposal.get("_completion_observation_source")
+    def acknowledge(self, desired=None):
+        source = None if desired is None else desired.get("_completion_observation_source")
         self._completion_observation_source = (
             source if source in ("idle", "periodic", "before_policy", "after_policy") else None
         )
@@ -384,21 +282,16 @@ class UpperBodyFeedback:
         self._first_ack_state_id = None
         self.command_id += 1
         self.command_counts["completed"] += 1
-        if proposal is not None:
-            self.applied_bridge_id = proposal["bridge_id"]
-            self.applied_frame_id = proposal["frame_id"]
-            self._completed_positions = dict(proposal["positions"])
-            self._command_timestamps = dict(proposal.get("_command_timestamps", {}))
-            if self.trace.enabled:
-                self.trace.record(
-                    "robot_acknowledged", **identity(proposal), stamps=command_stamps(self._command_timestamps)
-                )
+        if desired is not None:
+            self.applied_bridge_id = desired["bridge_id"]
+            self.applied_frame_id = desired["frame_id"]
+            self._completed_positions = dict(desired["positions"])
+            self._command_timestamps = dict(desired.get("_command_timestamps", {}))
         else:
             self.applied_bridge_id = self.applied_frame_id = None
             self._completed_positions = None
             self._command_timestamps = {}
-        # Command IDs invalidate old proposals. Keep the bounded snapshots until
-        # their deadlines so acknowledgement does not discard valid overlays.
+        # Fresh waiting desired targets and overlays retain their measurement leases.
 
     def visualization(self, message):
         """Validate display-only poses without authorizing or refreshing commands."""

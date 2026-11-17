@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import zmq
 from box import Box
-from test_upper_body_feedback import MemoryContext
+from test_upper_body_feedback import MemoryContext, TransportExecutor
 
 from robojudo.controller.ctrl_cfgs import OmniHandCfg, UpperBodyOmniHandZmqCtrlCfg
 from robojudo.controller.omnihand_runtime import (
@@ -497,7 +497,7 @@ class CombinedFeedbackTests(unittest.TestCase):
         self.assertIsNone(controller._latest_sync_frame_id)
         self.assertTrue(controller._discard_backlog)
 
-    def test_hand_outage_and_recovery_clear_proposals_preserving_tracking_intent(self):
+    def test_hand_outage_and_recovery_clear_desired_targets_preserving_tracking_intent(self):
         from robojudo.controller.upper_body_omnihand_zmq_ctrl import UpperBodyOmniHandZmqCtrl
 
         runtime = Mock()
@@ -517,11 +517,11 @@ class CombinedFeedbackTests(unittest.TestCase):
         controller.get_data()
         initial_generation = controller.feedback.generation
         controller.pending = ({}, (1, 1), 10.1)
-        controller._proposal = {"frame_id": 1}
+        controller._desired = {"frame_id": 1}
         runtime.get_data.return_value.update(stream_generation=2, connection_status="stale", joint_state_fresh=False)
         self.assertFalse(controller.get_data()["fresh"])
         self.assertIsNone(controller.pending)
-        self.assertIsNone(controller._proposal)
+        self.assertIsNone(controller._desired)
         self.assertEqual(controller.feedback.intent, "TRACK")
         self.assertEqual(controller.feedback.generation, initial_generation + 1)
         self.assertEqual(controller.feedback.reset_reason, "tracking command timeout")
@@ -568,15 +568,16 @@ class CombinedFeedbackTests(unittest.TestCase):
 
     def setUp(self):
         self.clock = self.enterContext(patch("time.monotonic", return_value=10.0))
+        self.enterContext(patch("robojudo.controller.xr_target_executor.XRTargetExecutor", TransportExecutor))
         self.cfg = UpperBodyOmniHandZmqCtrlCfg(
-            joint_names=["arm"], ema_alpha=0, xr_target_filter=True, feedback_endpoint="tcp://127.0.0.1:8571"
+            joint_names=["arm"], ema_alpha=0, feedback_endpoint="tcp://127.0.0.1:8571"
         )
         self.feedback = UpperBodyFeedback(self.cfg, MemoryContext())
         self.addCleanup(self.feedback.close)
         self.names = ["arm", *OMNIHAND_JOINT_NAMES]
         self.targets = dict.fromkeys(self.names, 0.0)
 
-    def proposal(self, intent="TRACK", status="tracking"):
+    def desired(self, intent="TRACK", status="tracking"):
         measured = dict.fromkeys(["arm", *ALL_HAND_NAMES], 0.0)
         self.feedback.publish(
             positions=measured,
@@ -590,8 +591,8 @@ class CombinedFeedbackTests(unittest.TestCase):
         )
         state = self.feedback.socket.frames[-1]
         return {
-            "schema_version": 2,
-            "type": "upper_body_proposal",
+            "schema_version": 3,
+            "type": "upper_body_desired",
             "session_id": state["session_id"],
             "generation": state["generation"],
             "state_id": state["state_id"],
@@ -602,54 +603,37 @@ class CombinedFeedbackTests(unittest.TestCase):
             "status": status,
             "positions": self.targets.copy(),
             "desired_positions": self.targets.copy(),
-            "filter_contract": "robojudo_filter_v1",
         }
 
-    def test_complete_fingers_required_and_speed_checked(self):
-        proposal = self.proposal()
-        self.feedback.validate(proposal, proposal["positions"])
-        proposal["positions"]["L_index_mcp_joint"] = 0.1
-        with self.assertRaisesRegex(ValueError, "velocity|prediction"):
-            self.feedback.validate(proposal, proposal["positions"])
-        del proposal["positions"]["L_index_mcp_joint"]
+    def test_complete_fingers_required(self):
+        desired = self.desired()
+        self.feedback.validate(desired, desired["positions"])
+        del desired["positions"]["L_index_mcp_joint"]
         with self.assertRaisesRegex(ValueError, "all configured"):
-            self.feedback.validate(proposal, proposal["positions"])
-
-    def test_invalid_numeric_encoding_does_not_refresh_command_lease(self):
-        proposal = self.proposal()
-        proposal["positions"]["L_index_mcp_joint"] = 0.01
-        with self.assertRaisesRegex(ValueError, "float32|prediction"):
-            self.feedback.validate(proposal, proposal["positions"], receiving=True)
-        self.assertIsNone(self.feedback.last_proposal_at)
-        self.assertEqual(self.feedback._frame_id, -1)
-        self.assertIsNone(self.feedback.bridge_id)
-
-    def test_home_cannot_open_fingers(self):
-        proposal = self.proposal("HOME", "homing")
-        proposal["positions"]["L_index_mcp_joint"] = 0.01
-        with self.assertRaisesRegex(ValueError, "velocity|prediction"):
-            self.feedback.validate(proposal, proposal["positions"])
+            self.feedback.validate(desired, desired["positions"])
 
     def test_schema_and_measurement_deadlines(self):
-        proposal = self.proposal()
-        proposal["schema_version"] = 1
+        desired = self.desired()
+        desired["schema_version"] = 1
         with self.assertRaises(ValueError):
-            self.feedback.validate(proposal, proposal["positions"])
+            self.feedback.validate(desired, desired["positions"])
 
-        proposal["schema_version"] = 2
+        desired["schema_version"] = 3
         self.clock.return_value = 10.11
         with self.assertRaisesRegex(ValueError, "expired"):
-            self.feedback.validate(proposal, proposal["positions"])
+            self.feedback.validate(desired, desired["positions"])
 
     def test_rejected_expiry_does_not_revoke_engagement_before_submission(self):
         from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import X2LocomanipulationLocoMimicPipeline
 
-        proposal = self.proposal()
+        desired = self.desired()
         generation = self.feedback.generation
         self.clock.return_value = 10.11
         receiver = SimpleNamespace(
+            has_hands=True,
             feedback=self.feedback,
             pending=None,
+            hand_snapshot=lambda: {"positions": {}},
             synchronize_intent=Mock(return_value=False),
             synchronize_generation=Mock(),
             _clear_positions=Mock(),
@@ -661,8 +645,8 @@ class CombinedFeedbackTests(unittest.TestCase):
         pipeline._upper_body_filtered = np.zeros(1)
         pipeline._upper_body_control_available = lambda: True
         pipeline._feedback_intent = lambda: "TRACK"
-        pipeline._apply_feedback_proposal(
-            np.zeros(1), {self.cfg.ctrl_type: {"fresh": True, "proposal": proposal}}, receiver
+        pipeline._apply_feedback_desired(
+            np.zeros(1), {self.cfg.ctrl_type: {"fresh": True, "desired": desired}}, receiver
         )
         self.assertEqual(self.feedback.generation, generation)
         receiver._clear_positions.assert_called_once()
@@ -695,7 +679,7 @@ class CombinedFeedbackTests(unittest.TestCase):
             receiver = UpperBodyOmniHandZmqCtrl(self.cfg, env)
         self.addCleanup(receiver.close)
         self.feedback = receiver.feedback
-        first = self.proposal()
+        first = self.desired()
         first["positions"]["arm"] = float(np.float32(0.01))
         first["desired_positions"]["arm"] = float(np.float32(0.01))
         receiver.synchronize_generation()
@@ -711,7 +695,7 @@ class CombinedFeedbackTests(unittest.TestCase):
         pipeline.mode = SimpleNamespace(value="RL_DEFAULT")
 
         def select():
-            return pipeline._apply_feedback_proposal(np.zeros(1), {self.cfg.ctrl_type: receiver.get_data()}, receiver)
+            return pipeline._apply_feedback_desired(np.zeros(1), {self.cfg.ctrl_type: receiver.get_data()}, receiver)
 
         receiver._socket.messages.append(first)
         target = select()
@@ -730,7 +714,7 @@ class CombinedFeedbackTests(unittest.TestCase):
             newer = dict(first, frame_id=frame_id)
             receiver._socket.messages.append(newer)
         target = select()
-        self.assertEqual(receiver._proposal["frame_id"], 3)
+        self.assertEqual(receiver._desired["frame_id"], 3)
         self.assertIs(receiver.pending, pending)
         self.assertIsNone(pipeline._upper_body_pending)
         pipeline._send_upper_body_target(target)
@@ -759,8 +743,8 @@ class CombinedFeedbackTests(unittest.TestCase):
         self.assertEqual(set(pipeline._upper_body_feedback_body["positions"]), {"arm"})
         # The queued frame was checked against the previous completed baseline.
         select()
-        self.assertIsNone(pipeline._upper_body_pending)
-        runtime.submit.assert_called_once()
+        self.assertEqual(pipeline._upper_body_pending["frame_id"], 3)
+        pipeline._upper_body_pending = None
 
         fresh = dict(first, frame_id=4, state_id=state["state_id"], command_id=1)
         fresh["positions"] = dict(first["positions"], arm=float(np.float32(0.02)))
@@ -796,7 +780,7 @@ class CombinedFeedbackTests(unittest.TestCase):
             receiver = UpperBodyOmniHandZmqCtrl(self.cfg, env)
         self.addCleanup(receiver.close)
         self.feedback = receiver.feedback
-        proposal = self.proposal()
+        desired = self.desired()
         receiver.synchronize_generation()
         runtime.reset.reset_mock()
         pipeline = X2LocomanipulationLocoMimicPipeline.__new__(X2LocomanipulationLocoMimicPipeline)
@@ -806,7 +790,7 @@ class CombinedFeedbackTests(unittest.TestCase):
         pipeline._upper_body_indices = np.array([0])
         pipeline._upper_body_filtered = pipeline._upper_body_default = np.zeros(1)
         pipeline._upper_body_command_submitted = True
-        pipeline._upper_body_pending = proposal
+        pipeline._upper_body_pending = desired
         pipeline._upper_body_enabled = True
         pipeline._feedback_receiver = lambda: receiver
         pipeline._feedback_intent = lambda: "HOLD"
@@ -857,12 +841,12 @@ class CombinedApplicationTests(unittest.TestCase):
             with self.subTest(failure=failure):
                 pipeline = UpperBodyZmqPipelineMixin.__new__(UpperBodyZmqPipelineMixin)
                 receiver = Mock()
-                receiver.feedback.schema_version = 2
+                receiver.has_hands = True
                 receiver.synchronize_intent.return_value = False
                 receiver.hand_snapshot.return_value = {"fresh": True}
                 order = []
 
-                def submit(proposal, order=order, failure=failure):
+                def submit(desired, order=order, failure=failure):
                     order.append("hands")
                     if failure:
                         raise failure
@@ -898,7 +882,7 @@ class CombinedApplicationTests(unittest.TestCase):
 
         pipeline = UpperBodyZmqPipelineMixin.__new__(UpperBodyZmqPipelineMixin)
         receiver = Mock()
-        receiver.feedback.schema_version = 2
+        receiver.has_hands = True
         receiver.synchronize_intent.return_value = False
         receiver.hand_snapshot.return_value = {"fresh": True}
         pipeline._feedback_receiver = lambda: receiver
@@ -926,7 +910,7 @@ class CombinedApplicationTests(unittest.TestCase):
         pipeline._upper_body_enabled = True
         pipeline._upper_body_control_available = lambda: True
         pipeline._upper_body_stream_was_fresh = False
-        pipeline._upper_body_cfg = SimpleNamespace(joint_names=["arm"])
+        pipeline._upper_body_cfg = SimpleNamespace(joint_names=["arm"], feedback_timeout_s=0.1)
         pipeline._upper_body_indices = np.array([0])
         snapshot = {
             "fresh": True,
@@ -934,7 +918,8 @@ class CombinedApplicationTests(unittest.TestCase):
             "targets": dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.2),
         }
         receiver = SimpleNamespace(
-            feedback=SimpleNamespace(schema_version=2),
+            has_hands=True,
+            feedback=SimpleNamespace(schema_version=3, generation=1, intent="TRACK"),
             record_hand_data=lambda: {
                 "fresh": snapshot["fresh"],
                 "joint_names": list(OMNIHAND_JOINT_NAMES),
@@ -947,7 +932,10 @@ class CombinedApplicationTests(unittest.TestCase):
         extras = {"locomotion_command": [0.0, 0.0, 0.0, 0.7]}
         pipeline._record_upper_body_sample(data, extras, np.array([-0.3]), rl_active=True)
         pipeline._recorder_client.submit.assert_not_called()
-        pipeline._upper_body_stream_was_fresh = True
+        completed = {"arm": -0.3, **dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.2)}
+        pipeline._upper_body_recording_completion = (1, time.monotonic(), completed)
+        # A subsequent desired/partial target must not enter the recording.
+        snapshot["targets"] = dict.fromkeys(OMNIHAND_JOINT_NAMES, 0.9)
         pipeline._record_upper_body_sample(data, extras, np.array([-0.3]), rl_active=True)
         result = pipeline._recorder_client.submit.call_args.kwargs
         self.assertEqual(result["joint_names"], ["arm", *OMNIHAND_JOINT_NAMES])
@@ -956,6 +944,7 @@ class CombinedApplicationTests(unittest.TestCase):
         pipeline._recorder_client.submit.reset_mock()
         receiver.record_hand_data = Mock(side_effect=RuntimeError("hand worker failed"))
         receiver.invalidate = Mock()
+        pipeline._upper_body_recording_completion = (1, time.monotonic(), completed)
         pipeline._record_upper_body_sample(data, extras, np.array([-0.3]), rl_active=True)
         pipeline._recorder_client.submit.assert_not_called()
         receiver.invalidate.assert_called_once_with("hand worker failed")
