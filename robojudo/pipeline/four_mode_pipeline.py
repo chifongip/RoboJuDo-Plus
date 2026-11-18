@@ -177,6 +177,9 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             self._manual_mode_override = ControlMode.PASSIVE_DEFAULT
             self.env.reborn()
             self._reset_policy_state()
+            inner = self._inner_policy()
+            if hasattr(inner, "reset_posture_commands"):
+                inner.reset_posture_commands()
             self._enter_mode(ControlMode.PASSIVE_DEFAULT, force=True)
             return
 

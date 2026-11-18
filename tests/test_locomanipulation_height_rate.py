@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -11,14 +11,17 @@ from robojudo.config.g1.policy.g1_locomanipulation_policy_cfg import (
 from robojudo.config.x2.policy.x2_gr00t_locomanipulation_policy_cfg import X2Gr00tLocomanipulationPolicyCfg
 from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import X2LocomanipulationPolicyCfg
 from robojudo.controller.velocity_source import JOYSTICK_SOURCE_TYPES
+from robojudo.pipeline.x2_locomanipulation_pipeline import X2LocomanipulationPipeline
 from robojudo.policy.locomanipulation_policy import LocomanipulationPolicyBase
 from robojudo.policy.x2_gr00t_locomanipulation_policy import X2Gr00tLocomanipulationPolicy
 
 
-def make_policy(policy_type=LocomanipulationPolicyBase, rate=0.10):
+def make_policy(policy_type=LocomanipulationPolicyBase, rate=0.10, yaw_rate=0.10):
     """Initialize command state without loading a checkpoint or robot SDK."""
     policy = policy_type.__new__(policy_type)
-    policy.cfg_policy = X2LocomanipulationPolicyCfg(max_height_command_rate_m_s=rate, command_status_interval_s=0.0)
+    policy.cfg_policy = X2LocomanipulationPolicyCfg(
+        max_height_command_rate_m_s=rate, max_waist_yaw_command_rate_rad_s=yaw_rate, command_status_interval_s=0.0
+    )
     policy.commands_map = policy.cfg_policy.commands_map
     policy._command_defaults = np.asarray([entry[1] for entry in policy.commands_map], dtype=np.float32)
     policy.cmd = policy._command_defaults.copy()
@@ -75,9 +78,12 @@ class TestLocomanipulationHeightRate(unittest.TestCase):
             with self.subTest(config=cfg_type.__name__):
                 self.assertEqual(cfg_type().max_height_command_rate_m_s, 0.20)
                 self.assertEqual(cfg_type(max_height_command_rate_m_s=0.05).max_height_command_rate_m_s, 0.05)
+                self.assertEqual(cfg_type().max_waist_yaw_command_rate_rad_s, 0.20)
                 for value in (0.0, -0.1, float("nan"), float("inf"), float("-inf")):
                     with self.subTest(value=value), self.assertRaises(ValueError):
                         cfg_type(max_height_command_rate_m_s=value)
+                    with self.subTest(value=value), self.assertRaises(ValueError):
+                        cfg_type(max_waist_yaw_command_rate_rad_s=value)
 
     def test_elapsed_time_reversal_clipping_and_arrival_without_overshoot(self):
         policy = make_policy(rate=0.05)
@@ -94,6 +100,41 @@ class TestLocomanipulationHeightRate(unittest.TestCase):
         self.assertAlmostEqual(self.step(policy, 20.0, posture(9.0))[3], initial, places=6)
         self.assertAlmostEqual(self.step(policy, 30.0, posture(-1.0))[3], 0.3, places=6)
         self.assertAlmostEqual(self.step(policy, 30.02, {})[3], 0.3, places=6)
+
+    def test_waist_yaw_slews_to_default_on_takeover_and_reset(self):
+        policy = make_policy(X2Gr00tLocomanipulationPolicy, rate=0.05, yaw_rate=0.10)
+        initial = self.step(policy, 10.0, posture(0.3))
+        commands = self.step(policy, 11.0, posture(0.3))
+        self.assertAlmostEqual(commands[3], initial[3] - 0.05, places=6)
+        self.assertAlmostEqual(commands[4], 0.10, places=6)
+        expert = posture(0.3)
+        expert["Gr00tZmqCtrl"] = {"takeover_enabled": True, "expert_applied": True}
+        self.assertAlmostEqual(self.step(policy, 11.1, expert)[4], 0.09, places=6)
+        self.assertAlmostEqual(self.step(policy, 11.2, gr00t())[4], 0.08, places=6)
+
+        policy.reset()
+        self.assertAlmostEqual(self.step(policy, 20.0, {})[4], 0.08, places=6)
+        self.assertAlmostEqual(self.step(policy, 20.3, {})[4], 0.05, places=6)
+        self.assertAlmostEqual(self.step(policy, 21.0, {})[4], 0.0, places=6)
+
+    def test_sim_reborn_restores_all_command_defaults_before_rl_reentry(self):
+        policy = make_policy()
+        active_input = posture(0.3) | keyboard("w", "a", "q")
+        active_input["POSTURE_SOURCE"] = "LocomanipulationPostureZmqCtrl"
+        self.step(policy, 10.0, active_input)
+        before = self.step(policy, 11.0, active_input)
+        self.assertTrue(np.all(before != policy._command_defaults))
+
+        pipeline = X2LocomanipulationPipeline.__new__(X2LocomanipulationPipeline)
+        pipeline.policy = policy
+        pipeline.env = Mock()
+        with patch.object(pipeline, "_set_upper_body_enabled"), patch.object(pipeline, "_enter_mode"):
+            pipeline._process_commands(["[SIM_REBORN]"])
+        pipeline.env.reborn.assert_called_once_with()
+
+        pipeline._on_enter_rl()
+        np.testing.assert_array_equal(self.step(policy, 20.0, {}), policy._command_defaults)
+        np.testing.assert_array_equal(self.step(policy, 20.02, {}), policy._command_defaults)
 
     def test_repeated_or_backward_clock_does_not_move_height(self):
         policy = make_policy()
@@ -157,7 +198,7 @@ class TestLocomanipulationHeightRate(unittest.TestCase):
         self.assertEqual(policy._height_command, initial)
         self.assertEqual(self.step(policy, 100.0, {})[3], initial)
 
-    def test_manual_sources_share_limiter_and_preserve_waist_and_velocity(self):
+    def test_manual_sources_share_posture_limiter_and_preserve_velocity(self):
         sources = {"KeyboardCtrl", *JOYSTICK_SOURCE_TYPES}
         for source in sources:
             with self.subTest(source=source):
@@ -169,8 +210,8 @@ class TestLocomanipulationHeightRate(unittest.TestCase):
                 self.assertEqual(first[3], initial)
                 self.assertAlmostEqual(second[3], initial - 0.002, places=6)
                 self.assertAlmostEqual(policy._target_height, initial - 0.02, places=6)
-                self.assertAlmostEqual(first[4], 0.005, places=6)
-                self.assertAlmostEqual(second[4], 0.00975, places=6)
+                self.assertEqual(first[4], 0.0)
+                self.assertAlmostEqual(second[4], 0.002, places=6)
                 expected_vx = 1.0 if source == "KeyboardCtrl" else 0.6
                 self.assertAlmostEqual(first[0], expected_vx, places=6)
                 self.assertAlmostEqual(second[0], expected_vx * 0.95, places=6)
@@ -210,7 +251,7 @@ class TestLocomanipulationHeightRate(unittest.TestCase):
                 current = float(policy.cmd[3])
                 policy.reset()
                 self.assertEqual(policy.cmd[3], current)
-                self.assertIsNone(policy._last_height_command_at)
+                self.assertIsNone(policy._last_posture_command_at)
                 self.assertEqual(self.step(policy, 100.0, {})[3], current)
                 self.assertAlmostEqual(self.step(policy, 100.02, {})[3], current + 0.002, places=6)
 

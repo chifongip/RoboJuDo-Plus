@@ -40,15 +40,18 @@ class Gr00tLocomanipulationPolicyMixin:
             # local joystick supplies all four locomotion command dimensions.
             # Calling the base path preserves its deadzone, velocity decay and
             # D-pad height smoothing instead of duplicating that mapping here.
-            commands = np.asarray(super()._get_commands(ctrl_data), dtype=np.float32).copy()
+            self._update_manual_command_targets(ctrl_data)
+            # The expert locomotion action has no waist yaw dimension.
+            self._target_waist_yaw = self.commands_map[4][1]
+            commands = self.cmd.copy()
+            commands[:3] = self.current_vel_cmd
+            self._update_posture_commands(commands)
             if commands.shape != (5,) or not np.isfinite(commands).all():
                 raise ValueError("expert locomotion path must produce a finite five-element command")
-            # Waist remains at the trained default and is not part of DAgger.
-            commands[4] = self._command_defaults[4]
-            self._target_waist_yaw = float(commands[4])
             self.cmd[:] = commands
             stream["locomotion_command"] = commands[:4].copy()
             stream["locomotion_source"] = "expert"
+            self._print_command_status(commands)
             return commands
 
         commands = self.cmd.copy()
@@ -75,10 +78,9 @@ class Gr00tLocomanipulationPolicyMixin:
             self._height_command = self._target_height
             stream["locomotion_source"] = "hold"
 
-        commands[3] = self._get_height_command()
-        # GR00T does not output waist yaw; keep the trained default command.
-        commands[4] = self._command_defaults[4]
-        self._target_waist_yaw = float(commands[4])
+        # GR00T does not output waist yaw; ramp back to the trained default.
+        self._target_waist_yaw = self.commands_map[4][1]
+        self._update_posture_commands(commands)
         self.cmd[:] = commands
         print(
             f"\rvel=({commands[0]:+.1f}, {commands[1]:+.1f}, "

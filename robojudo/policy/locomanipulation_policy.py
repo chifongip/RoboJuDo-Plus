@@ -47,14 +47,14 @@ class LocomanipulationPolicyBase(Policy):
         raise ValueError(f"Unknown device: {device}")
 
     def reset(self):
-        # Keep the emitted height continuous across policy reactivation/reset.
-        height = float(self.cmd[3])
-        self._height_command = height
+        # Keep the emitted posture continuous across policy reactivation/reset.
+        self._height_command = float(self.cmd[3])
+        self._waist_yaw_command = float(self.cmd[4])
         self._last_command_status_at = float("-inf")
-        self._last_height_command_at = None
+        self._last_posture_command_at = None
         self.timestep = 0
         self.cmd = self._command_defaults.copy()
-        self.cmd[3] = height
+        self.cmd[3:5] = (self._height_command, self._waist_yaw_command)
         self.last_action = np.zeros(self.num_actions, dtype=np.float32)
         self.current_vel_cmd = np.zeros(3, dtype=np.float32)
         self._target_height = self.base_height_default
@@ -64,12 +64,29 @@ class LocomanipulationPolicyBase(Policy):
             key: deque(maxlen=self.cfg_policy.history_length) for key in self.cfg_policy.history_obs_dims
         }
 
+    def reset_posture_commands(self) -> None:
+        """Restore posture defaults after the environment resets its pose."""
+        self._reset_commands()
+        self._height_command = self.base_height_default
+        self._waist_yaw_command = float(self._command_defaults[4])
+        self.cmd[3:5] = (self._height_command, self._waist_yaw_command)
+        self._last_posture_command_at = None
+
     def post_step_callback(self, commands: list[str] | None = None):
         del commands
         self.timestep += 1
 
     def _get_commands(self, ctrl_data) -> np.ndarray:
+        self._update_manual_command_targets(ctrl_data)
         commands = self.cmd.copy()
+        commands[:3] = self.current_vel_cmd
+        self._update_posture_commands(commands)
+        self.cmd[3:5] = commands[3:5]
+
+        self._print_command_status(commands)
+        return commands
+
+    def _update_manual_command_targets(self, ctrl_data) -> None:
         target_vel = np.zeros(3, dtype=np.float32)
         selected = get_selected_velocity_source(ctrl_data)
         selected_posture = get_selected_posture_source(ctrl_data)
@@ -181,14 +198,6 @@ class LocomanipulationPolicyBase(Policy):
             for index in range(3):
                 self.current_vel_cmd[index] = self._clip_command(target_vel[index], self.commands_map[index])
 
-        commands[:3] = self.current_vel_cmd
-        commands[3] = self._get_height_command()
-        commands[4] = self._smooth_command(self.cmd[4], self._target_waist_yaw)
-        self.cmd[3:5] = commands[3:5]
-
-        self._print_command_status(commands)
-        return commands
-
     def _print_command_status(self, commands):
         interval = self.cfg_policy.command_status_interval_s
         if interval == 0.0:
@@ -208,24 +217,23 @@ class LocomanipulationPolicyBase(Policy):
     def _clip_command(value: float, command_map: list[float]) -> float:
         return float(np.clip(value, min(command_map[0], command_map[2]), max(command_map[0], command_map[2])))
 
-    def _smooth_command(self, current: float, target: float) -> float:
-        value = self.cfg_policy.command_decay * current + (1.0 - self.cfg_policy.command_decay) * target
-        return float(target if abs(value - target) < 0.001 else value)
-
-    def _get_height_command(self) -> float:
-        """Slew the policy height command in metres using elapsed monotonic time."""
+    def _update_posture_commands(self, commands: np.ndarray) -> None:
+        """Slew height and waist yaw using their configured rates."""
         now = time.monotonic()
-        previous = self._last_height_command_at
-        self._last_height_command_at = now
-        # Retain sub-float32 progress between updates; feeding back cmd[3]
-        # would round every step and can stall or bias small configured rates.
-        current = self._height_command
-        if previous is None:
-            return current
-        max_delta = self.cfg_policy.max_height_command_rate_m_s * max(0.0, now - previous)
-        target = self._clip_command(self._target_height, self.commands_map[3])
-        self._height_command = current + float(np.clip(target - current, -max_delta, max_delta))
-        return self._height_command
+        previous = self._last_posture_command_at
+        self._last_posture_command_at = now
+        if previous is not None:
+            elapsed = max(0.0, now - previous)
+            max_height_delta = self.cfg_policy.max_height_command_rate_m_s * elapsed
+            max_yaw_delta = self.cfg_policy.max_waist_yaw_command_rate_rad_s * elapsed
+            height = self._clip_command(self._target_height, self.commands_map[3])
+            waist_yaw = self._clip_command(self._target_waist_yaw, self.commands_map[4])
+            # Keep sub-float32 progress between updates for both axes.
+            self._height_command += float(np.clip(height - self._height_command, -max_height_delta, max_height_delta))
+            self._waist_yaw_command += float(
+                np.clip(waist_yaw - self._waist_yaw_command, -max_yaw_delta, max_yaw_delta)
+            )
+        commands[3:5] = (self._height_command, self._waist_yaw_command)
 
     def _reset_commands(self):
         self.current_vel_cmd[:] = 0.0
