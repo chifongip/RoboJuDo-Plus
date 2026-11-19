@@ -28,6 +28,7 @@ import time
 import numpy as np
 from xrobotoolkit_teleop.integrations.robojudo import RoboJuDoBridge
 from xrobotoolkit_teleop.common.teleop_settings import TeleopSettings
+from xrobotoolkit_teleop.common.waist_tracking import WaistSample
 
 class SyntheticXR:
     def __init__(self):
@@ -37,6 +38,13 @@ class SyntheticXR:
         self.right_trigger = 0.0
         self.z = 0.0
         self.freeze = False
+        self.freeze_body = False
+        self.body_timestamp = 1
+        self.height = 0.0
+        self.twist = 0.0
+        self.heading = 0.0
+        self.home = False
+        self.ik_delay = 0.0
         self.timestamp = 1
         self.next_update = 0.0
     def get_timestamp_ns(self):
@@ -50,46 +58,93 @@ class SyntheticXR:
         return {'left_grip': self.grip, 'right_grip': self.right_grip,
                 'left_trigger': self.trigger, 'right_trigger': self.right_trigger}.get(name, 0.0)
     def get_button_state_by_name(self, name):
-        return False
+        return self.home
+    def get_waist_sample(self, *, pelvis_ik=False):
+        stamp = self.get_timestamp_ns()
+        if not self.freeze_body:
+            self.body_timestamp = stamp
+        yaw = self.heading
+        pelvis = np.array([0., self.height, 0., 0., np.sin(yaw / 2), 0., np.cos(yaw / 2)])
+        def pair(angle):
+            axis = np.array([-np.cos(angle), 0., np.sin(angle)])
+            return np.array([axis, -axis])
+        controllers = {}
+        for side in ("left", "right"):
+            pose = self.get_pose_by_name(f"{side}_controller")
+            delta = np.array([np.sin(yaw) * pose[2], self.height, np.cos(yaw) * pose[2]])
+            controllers[side] = np.r_[delta, pelvis[3:]]
+        return WaistSample(
+            pelvis, controllers, self.body_timestamp, stamp, time.monotonic(), pair(yaw),
+            shoulder_positions=pair(yaw + self.twist),
+            grips={s: self.get_key_value_by_name(f"{s}_grip") for s in controllers},
+            triggers={s: self.get_key_value_by_name(f"{s}_trigger") for s in controllers},
+        )
     def close(self):
         pass
 
-if os.environ.get("XROBOTOOLKIT_TEST_DIAGNOSTICS"):
-    logging.basicConfig(level=logging.INFO)
-xr = SyntheticXR()
-settings = TeleopSettings(collision_checking=sys.argv[5] == "True")
-bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], settings=settings, xr_client=xr,
-                       ik_backend=sys.argv[3], robot=sys.argv[4])
-try:
-    deadline = time.monotonic()
-    while True:
-        time.sleep(max(0, deadline - time.monotonic()))
-        if select.select([sys.stdin], [], [], 0)[0]:
-            line = sys.stdin.readline()
-            if not line:
-                break
-            for name, value in json.loads(line).items():
-                setattr(xr, name, value)
-        bridge.poll()
-        deadline += 0.02
-        now = time.monotonic()
-        if deadline < now:
-            deadline += (int((now - deadline) / 0.02) + 1) * 0.02
-finally:
-    bridge.close()
+def delayed_solve(delay, *args):
+    from xrobotoolkit_teleop.integrations.pelvis_ik import solve_arms
+
+    time.sleep(delay)
+    return solve_arms(*args)
+
+
+def main():
+    diagnostics = os.environ.get("XROBOTOOLKIT_TEST_DIAGNOSTICS")
+    if diagnostics:
+        logging.basicConfig(level=logging.DEBUG if diagnostics == "debug" else logging.INFO)
+    xr = SyntheticXR()
+    settings = TeleopSettings(collision_checking=sys.argv[5] == "True")
+    options = dict(settings=settings, xr_client=xr, ik_backend=sys.argv[3], robot=sys.argv[4])
+    if sys.argv[6]:
+        from xrobotoolkit_teleop.integrations.pelvis_ik import PelvisIKBridge
+
+        bridge = PelvisIKBridge(sys.argv[1], sys.argv[2], posture_endpoint=sys.argv[6], **options)
+        submit = bridge.retargeter.pool.submit
+        bridge.retargeter.pool.submit = lambda _solve, *args: submit(delayed_solve, xr.ik_delay, *args)
+    else:
+        bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], **options)
+    try:
+        deadline = time.monotonic()
+        status = None
+        feedback_generation = None
+        while True:
+            time.sleep(max(0, deadline - time.monotonic()))
+            if select.select([sys.stdin], [], [], 0)[0]:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                for name, value in json.loads(line).items():
+                    setattr(xr, name, value)
+            bridge.poll()
+            current = bridge.status, bridge.hold_reason
+            if diagnostics and current != status:
+                logging.info("Bridge status %s (%s)", *current)
+                status = current
+            feedback = bridge._latest
+            if diagnostics == "debug" and feedback and feedback["generation"] != feedback_generation:
+                feedback_generation = feedback["generation"]
+                logging.debug("Feedback generation %s (%s)", feedback_generation, feedback["reset_reason"])
+            deadline += 0.02
+            now = time.monotonic()
+            if deadline < now:
+                deadline += (int((now - deadline) / 0.02) + 1) * 0.02
+    finally:
+        bridge.close()
+
+if __name__ == "__main__":
+    main()
 """
 
 
-@unittest.skipUnless(
-    os.environ.get("XROBOTOOLKIT_TEST_PYTHON"), "set XROBOTOOLKIT_TEST_PYTHON for two-process XR tests"
-)
-class XrobotoolkitIntegrationTests(unittest.TestCase):
+class XrobotoolkitFixture:
     with_omnihand = False
     finger_mode = "direct"
     collision_checking = True
+    pelvis_ik = False
 
     def setUp(self):
-        from robojudo.config.x2 import x2_xrobotoolkit, x2_xrobotoolkit_omnihand
+        from robojudo.config.x2 import x2_xrobotoolkit, x2_xrobotoolkit_omnihand, x2_xrobotoolkit_omnihand_pelvis_ik
         from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
         from robojudo.pipeline.four_mode_pipeline import ControlMode
         from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import X2LocomanipulationLocoMimicPipeline
@@ -101,14 +156,28 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
             reserved.bind(("127.0.0.1", 0))
             port = reserved.getsockname()[1]
         self.command_endpoint = f"tcp://127.0.0.1:{port}"
-        cfg = x2_xrobotoolkit_omnihand() if self.with_omnihand else x2_xrobotoolkit()
+        if self.pelvis_ik:
+            cfg = x2_xrobotoolkit_omnihand_pelvis_ik()
+        else:
+            cfg = x2_xrobotoolkit_omnihand() if self.with_omnihand else x2_xrobotoolkit()
         upper = next(item for item in cfg.ctrl if isinstance(item, UpperBodyZmqCtrlCfg))
         upper.endpoint = self.command_endpoint
         upper.feedback_endpoint = "tcp://127.0.0.1:*"
         upper.executor_collision_checking = self.collision_checking
         if self.with_omnihand:
             upper.hand_command_mode = self.finger_mode
-        cfg.ctrl = [upper]
+        self.posture_endpoint = ""
+        if self.pelvis_ik:
+            from robojudo.controller.ctrl_cfgs import LocomanipulationPostureZmqCtrlCfg
+
+            posture = next(item for item in cfg.ctrl if isinstance(item, LocomanipulationPostureZmqCtrlCfg))
+            with socket.socket() as reserved:
+                reserved.bind(("127.0.0.1", 0))
+                posture.endpoint = f"tcp://127.0.0.1:{reserved.getsockname()[1]}"
+            self.posture_endpoint = posture.endpoint
+            cfg.ctrl = [upper, posture]
+        else:
+            cfg.ctrl = [upper]
         cfg.env.headless = True
         cfg.env.visualize_extras = False
         cfg.env.forward_kinematic = None
@@ -135,32 +204,40 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
 
     def stop_children(self):
         for child in self.children:
+            if child.stdin is not None:
+                child.stdin.close()
             if child.poll() is None:
-                child.terminate()
                 try:
                     child.wait(timeout=3)
                 except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait(timeout=3)
-            if child.stdin is not None:
-                child.stdin.close()
+                    child.terminate()
+                    try:
+                        child.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=3)
 
     def start_bridge(self):
         root = Path(__file__).resolve().parents[1]
         log = self.enterContext(open(Path(self.directory) / f"bridge-{len(self.children)}.log", "w"))
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(root / "third_party/xrobotoolkit_teleop")
+        script_args = ["-c", BRIDGE_PROCESS]
+        if self.pelvis_ik:
+            script = Path(self.directory) / "bridge.py"
+            script.write_text(BRIDGE_PROCESS)
+            script_args = [str(script)]
         child = subprocess.Popen(
             [
                 os.environ["XROBOTOOLKIT_TEST_PYTHON"],
                 "-u",
-                "-c",
-                BRIDGE_PROCESS,
+                *script_args,
                 self.command_endpoint,
                 self.feedback_endpoint,
-                os.environ.get("XROBOTOOLKIT_TEST_BACKEND", "placo"),
+                "lerobot" if self.pelvis_ik else os.environ.get("XROBOTOOLKIT_TEST_BACKEND", "placo"),
                 "x2_omnihand" if self.with_omnihand else "x2",
                 str(self.collision_checking),
+                self.posture_endpoint,
             ],
             stdin=subprocess.PIPE,
             stdout=log,
@@ -193,6 +270,11 @@ class XrobotoolkitIntegrationTests(unittest.TestCase):
         child.stdin.write(json.dumps(values) + "\n")
         child.stdin.flush()
 
+
+@unittest.skipUnless(
+    os.environ.get("XROBOTOOLKIT_TEST_PYTHON"), "set XROBOTOOLKIT_TEST_PYTHON for two-process XR tests"
+)
+class XrobotoolkitIntegrationTests(XrobotoolkitFixture, unittest.TestCase):
     def test_tracking_loss_pending_return_and_bridge_restart(self):
         child = self.start_bridge()
         self.wait_until(lambda: self.receiver.feedback.command_id > 0)
@@ -371,11 +453,13 @@ class XrobotoolkitOmniHandIntegrationTests(XrobotoolkitIntegrationTests):
         self.cycles(0.3)
         self.assertEqual(self.pipeline.env.hand_snapshot()["targets"], held)
 
-        self.control(child, trigger=0.0, right_trigger=0.0)
+        self.control(child, trigger=0.0)
         self.cycles(0.2)
         self.assertEqual(self.pipeline.env.hand_snapshot()["targets"], held)
         self.pipeline._set_upper_body_enabled(True)
         self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["L_index_mcp_joint"] < 0.01)
+        self.assertEqual(self.pipeline.env.hand_snapshot()["targets"]["R_index_mcp_joint"], held["R_index_mcp_joint"])
+        self.control(child, right_trigger=0.0)
         self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["R_index_mcp_joint"] < 0.01)
 
 
@@ -397,3 +481,130 @@ class XrobotoolkitFilteredOmniHandCollisionDisabledIntegrationTests(Xrobotoolkit
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(os.environ.get("XROBOTOOLKIT_TEST_PYTHON"), "set XROBOTOOLKIT_TEST_PYTHON")
+class XrobotoolkitPelvisIKIntegrationTests(XrobotoolkitFixture, unittest.TestCase):
+    with_omnihand = True
+    pelvis_ik = True
+    collision_checking = False
+
+    def test_manual_posture_takeover_requires_grip_release(self):
+        from robojudo.controller.ctrl_cfgs import KeyboardCtrlCfg
+        from robojudo.controller.posture_source import PostureSourceArbiter
+
+        manager = self.pipeline.ctrl_manager
+        posture = manager.controllers.LocomanipulationPostureZmqCtrl
+        keyboard_cfg = KeyboardCtrlCfg(posture_priority=300, posture_lease_timeout_s=0.1)
+        keyboard_data = {"keyboard_event": [], "pressed_keys": []}
+        keyboard = SimpleNamespace(
+            get_data=lambda: keyboard_data,
+            process_triggers=lambda data: (data, []),
+            post_step_callback=lambda commands: None,
+        )
+        manager.controllers["KeyboardCtrl"] = {"inst": keyboard, "cfg": keyboard_cfg}
+        manager.posture_source_arbiter = PostureSourceArbiter([keyboard_cfg, posture.cfg])
+
+        child = self.start_bridge()
+        self.wait_until(lambda: self.receiver.feedback.command_id > 0, timeout=15)
+        self.pipeline._set_upper_body_enabled(True)
+        self.wait_until(lambda: self.pipeline._upper_body_stream_was_fresh)
+        self.control(child, grip=1.0)
+        self.cycles(0.2)
+        self.control(child, height=-0.1)
+        policy = self.pipeline._inner_policy()
+        self.wait_until(lambda: policy.posture_targets[0] < 0.57)
+        keyboard_data["pressed_keys"] = ["r"]
+        keyboard_data["keyboard_event"] = [{"name": "r", "type": "keyboard", "pressed": True}]
+        self.cycles(0.02)
+        keyboard_data["keyboard_event"] = []
+        manual_target = policy.posture_targets[0]
+        self.assertGreater(manual_target, 0.55)
+        keyboard_data["pressed_keys"] = []
+        self.control(child, height=-0.18)
+        self.cycles(0.3)
+        self.assertEqual(policy.posture_targets[0], manual_target)
+        self.control(child, grip=0.0)
+        self.cycles(0.15)
+        self.control(child, grip=1.0)
+        self.cycles(0.15)
+        self.control(child, height=-0.23)
+        self.wait_until(lambda: policy.posture_targets[0] < manual_target - 0.02)
+
+    def test_slow_ik_keeps_height_live_and_drops_stale_yaw(self):
+        child = self.start_bridge()
+        self.wait_until(lambda: self.receiver.feedback.command_id > 0, timeout=15)
+        self.pipeline._set_upper_body_enabled(True)
+        self.wait_until(lambda: self.pipeline._upper_body_stream_was_fresh)
+        policy = self.pipeline._inner_policy()
+        self.control(child, grip=1.0)
+        self.cycles(0.4)
+        self.control(child, ik_delay=0.18)
+        self.cycles(0.08)
+        self.control(child, height=-0.1, twist=0.3)
+        self.wait_until(lambda: policy.posture_targets[0] < 0.57)
+        self.cycles(0.35)
+        self.assertAlmostEqual(policy.posture_targets[1], 0.0, places=2)
+        held = policy.cmd[3:5].copy()
+        self.pipeline._set_upper_body_enabled(False)
+        self.cycles(0.15)
+        np.testing.assert_array_equal(policy.cmd[3:5], held)
+
+    def test_short_home_press_completes_arm_return(self):
+        if self.collision_checking:
+            self.skipTest("large arm travel is exercised with collision checking disabled")
+        child = self.start_bridge()
+        self.wait_until(lambda: self.receiver.feedback.command_id > 0, timeout=15)
+        self.pipeline._set_upper_body_enabled(True)
+        self.wait_until(lambda: self.pipeline._upper_body_stream_was_fresh)
+        self.control(child, grip=1.0)
+        self.cycles(0.2)
+        self.control(child, z=-0.22)
+        defaults = self.pipeline._upper_body_default
+        self.wait_until(lambda: np.max(np.abs(self.pipeline._upper_body_filtered - defaults)) > 0.32)
+        self.control(child, home=True)
+        self.cycles(0.08)
+        self.control(child, home=False, grip=0.0)
+        self.wait_until(lambda: np.max(np.abs(self.pipeline._upper_body_filtered - defaults)) < 0.025)
+
+    def test_separate_streams_track_crouch_twist_fingers_and_home(self):
+        child = self.start_bridge()
+        self.wait_until(lambda: self.receiver.feedback.command_id > 0, timeout=15)
+        self.pipeline._set_upper_body_enabled(True)
+        self.wait_until(lambda: self.pipeline._upper_body_stream_was_fresh)
+        policy = self.pipeline._inner_policy()
+        self.control(child, trigger=0.02)
+        self.wait_until(lambda: self.pipeline.env.hand_snapshot()["targets"]["L_index_mcp_joint"] > 0.01)
+        self.control(child, grip=1.0)
+        self.cycles(0.4)
+        self.control(child, height=-0.1, heading=0.25)
+        self.wait_until(lambda: policy.posture_targets[0] < 0.57)
+        self.assertAlmostEqual(policy.posture_targets[1], 0.0, places=2)
+        for twist in (0.10, 0.17, 0.24):
+            self.control(child, twist=twist)
+            self.cycles(0.16)
+        self.wait_until(lambda: abs(policy.posture_targets[1]) > 0.05)
+        self.control(child, right_grip=1.0)
+        self.cycles(0.15)
+        self.control(child, grip=0.0)
+        self.cycles(0.2)
+        self.control(child, height=-0.17)
+        self.wait_until(lambda: policy.posture_targets[0] < 0.53)
+        self.control(child, freeze_body=True)
+        self.cycles(0.4)
+        held = policy.posture_targets
+        self.control(child, height=-0.22)
+        self.cycles(0.15)
+        self.assertEqual(policy.posture_targets, held)
+        self.control(child, home=True)
+        self.wait_until(lambda: policy.posture_targets == (0.64, 0.0))
+        self.control(child, home=False, freeze_body=False, height=-0.28)
+        self.cycles(0.4)
+        self.assertEqual(policy.posture_targets, (0.64, 0.0))
+        self.pipeline._set_upper_body_enabled(False)
+        self.cycles(0.15)
+        self.assertFalse(self.pipeline.ctrl_manager.controllers.LocomanipulationPostureZmqCtrl.inst.get_data()["fresh"])
+
+
+class XrobotoolkitPelvisIKCollisionIntegrationTests(XrobotoolkitPelvisIKIntegrationTests):
+    collision_checking = True

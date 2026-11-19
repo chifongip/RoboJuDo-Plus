@@ -7,6 +7,7 @@ import zmq
 
 from robojudo.controller.ctrl_cfgs import LocomanipulationPostureZmqCtrlCfg
 from robojudo.controller.locomanipulation_posture_zmq_ctrl import LocomanipulationPostureZmqCtrl
+from robojudo.controller.upper_body_feedback import UpperBodyFeedback
 from robojudo.policy.locomanipulation_policy import LocomanipulationPolicyBase
 
 
@@ -136,6 +137,57 @@ class TestLocomanipulationPostureZmq(unittest.TestCase):
         with patch("robojudo.controller.locomanipulation_posture_zmq_ctrl.time.monotonic", return_value=4.251):
             self.assertFalse(controller.get_data()["fresh"])
 
+    def test_xr_posture_rejects_stale_and_revoked_authority(self):
+        controller = self.make_controller()
+        controller.cfg_ctrl.xr_authorized = True
+        controller._xr_epoch = 0
+        controller._xr_sequence = -1
+        controller._xr_manual = False
+        controller._xr_key = None
+        feedback = UpperBodyFeedback.__new__(UpperBodyFeedback)
+        feedback.intent = "TRACK"
+        feedback.session_id = "robot"
+        feedback.bridge_id = "bridge"
+        feedback.generation = 5
+        feedback.latest_measurements = {"waist_yaw_joint": 0.0}
+        feedback._states = {
+            20: (10.1, {"valid": True, "intent": "TRACK", "xr_posture": {"available": True, "epoch": 0}})
+        }
+        message = {
+            "schema_version": 1,
+            "bridge_id": "bridge",
+            "session_id": "robot",
+            "generation": 5,
+            "state_id": 20,
+            "epoch": 0,
+            "sequence": 1,
+            "height": 0.5,
+            "waist_yaw": 0.2,
+        }
+        limits = ((0.3, 0.64), (-1.57, 1.57))
+        controller._accept_xr(message, feedback, limits, 10.0)
+        self.assertTrue(controller._data(10.0)["fresh"])
+        self.assertFalse(controller._data(10.11)["fresh"])
+        for extra, now in (
+            ({}, 10.0),  # Replay.
+            ({"sequence": 2, "generation": 4}, 10.0),
+            ({"sequence": 2, "bridge_id": "other"}, 10.0),
+            ({"sequence": 2, "height": 0.8}, 10.0),
+            ({"sequence": 2}, 10.11),
+        ):
+            with self.subTest(extra=extra, now=now), self.assertRaises(ValueError):
+                controller._accept_xr({**message, **extra}, feedback, limits, now)
+        measurements = feedback.latest_measurements
+        feedback.latest_measurements = None
+        with self.assertRaisesRegex(ValueError, "expired or unavailable"):
+            controller._accept_xr({**message, "sequence": 2}, feedback, limits, 10.0)
+        feedback.latest_measurements = measurements
+        with patch.object(controller, "_receive_available"):
+            self.assertFalse(controller.update_xr(feedback, eligible=True, manual=True, limits=limits)["fresh"])
+            self.assertFalse(controller.update_xr(feedback, eligible=True, manual=False, limits=limits)["fresh"])
+        with self.assertRaises(ValueError):
+            controller._accept_xr({**message, "sequence": 2}, feedback, limits, 10.0)
+
     def test_fresh_posture_clips_both_axes_without_affecting_velocity(self):
         policy = policy_with_posture_controls()
         commands = policy._get_commands({"LocomanipulationPostureZmqCtrl": posture_entry(height=1.0, waist_yaw=2.0)})
@@ -143,6 +195,15 @@ class TestLocomanipulationPostureZmq(unittest.TestCase):
         np.testing.assert_allclose(commands[:3], np.zeros(3))
         np.testing.assert_allclose(commands[3:], [0.64, 1.0])
         self.assertEqual(policy._target_waist_yaw, 1.5708)
+
+    def test_hold_posture_freezes_both_axes_at_current_command(self):
+        policy = policy_with_posture_controls()
+        self.clock.return_value = 0.5
+        first = policy._get_commands({"LocomanipulationPostureZmqCtrl": posture_entry(0.4, 1.0)})
+        policy.hold_posture_commands()
+        self.clock.return_value = 1.0
+        held = policy._get_commands({"POSTURE_SOURCE": None, "LocomanipulationPostureZmqCtrl": {"fresh": False}})
+        np.testing.assert_array_equal(held[3:5], first[3:5])
 
     def test_posture_and_velocity_zmq_use_independent_sources(self):
         policy = policy_with_posture_controls()

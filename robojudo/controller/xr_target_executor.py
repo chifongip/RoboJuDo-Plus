@@ -94,7 +94,7 @@ class XRTargetExecutor:
             ):
                 raise ValueError("desired target exceeds compatible position limits")
 
-    def prepare(self, feedback, desired, measured):
+    def prepare(self, feedback, desired, measured, *, validate_transition=True):
         feedback.validate(desired, desired["positions"])
         self.consumed = desired["frame_id"]
         baseline = feedback._completed_positions
@@ -146,7 +146,8 @@ class XRTargetExecutor:
                 issued[name] = float(np.clip(np.float32(wanted[name]), lo32, hi32))
         started = time.monotonic()
         try:
-            self.model.validate_transition(measured, baseline, issued)
+            if validate_transition:
+                self.model.validate_transition(measured, baseline, issued)
         except RuntimeError as exc:
             # An unissued candidate rejection holds without revoking the clutch.
             # Runtime/transport failures after admission retain existing invalidation.
