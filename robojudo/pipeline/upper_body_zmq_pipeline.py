@@ -4,9 +4,11 @@ import time
 import numpy as np
 
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
+from robojudo.controller.posture_source import POSTURE_SOURCE_KEY, POSTURE_ZMQ_SOURCE_TYPE
 from robojudo.recording import RecorderClient
 
 logger = logging.getLogger(__name__)
+WAIST_YAW_JOINT = "waist_yaw_joint"
 
 
 class UpperBodyZmqPipelineMixin:
@@ -23,6 +25,7 @@ class UpperBodyZmqPipelineMixin:
         self._upper_body_pending = None
         self._upper_body_command_submitted = False
         self._upper_body_recording_completion = None
+        self._xr_checked_waist_yaw = None
         self._upper_body_indices = np.asarray([], dtype=np.int32)
         self._upper_body_default = np.asarray([], dtype=np.float32)
         self._upper_body_filtered = np.asarray([], dtype=np.float32)
@@ -33,6 +36,10 @@ class UpperBodyZmqPipelineMixin:
         super().__init__(cfg=cfg)
         self._configure_upper_body_override()
         receiver = self._feedback_receiver()
+        if self._xr_posture_controller() is not None and (
+            cfg.robot != "x2" or receiver is None or not receiver.has_hands
+        ):
+            raise ValueError("XR-authorized posture requires X2 OmniHand upper-body feedback")
         if receiver is not None and receiver.has_hands:
             logger.info("Upper-body completion checkpoints enabled before and after policy inference")
         if cfg.record.enabled:
@@ -51,6 +58,7 @@ class UpperBodyZmqPipelineMixin:
         self._upper_body_stream_was_fresh = False
         self._upper_body_pending = None
         self._upper_body_command_submitted = False
+        self._xr_checked_waist_yaw = None
         super().reset()
         if self._upper_body_indices.size:
             self._upper_body_filtered = self.env.dof_pos[self._upper_body_indices].astype(np.float32)
@@ -95,6 +103,8 @@ class UpperBodyZmqPipelineMixin:
         enabled = bool(enabled and getattr(self, "_upper_body_cfg", None) is not None)
         if getattr(self, "_upper_body_enabled", False) == enabled:
             return
+        if not enabled and self._xr_posture_controller() is not None:
+            self._inner_policy().hold_posture_commands()
         self._upper_body_enabled = enabled
         self._upper_body_stream_was_fresh = False
         self._upper_body_pending = None
@@ -205,6 +215,7 @@ class UpperBodyZmqPipelineMixin:
         return "TRACK" if self._upper_body_enabled else "HOME"
 
     def _reset_upper_body_feedback(self):
+        self._xr_checked_waist_yaw = None
         receiver = self._feedback_receiver()
         if receiver is not None:
             receiver.reset()
@@ -217,6 +228,35 @@ class UpperBodyZmqPipelineMixin:
             # Proposals may arrive while policy inference is running. Sample
             # them at application time rather than adding another control cycle.
             ctrl_data[self._upper_body_cfg.ctrl_type] = receiver.get_data()
+
+    def _xr_posture_controller(self):
+        manager = getattr(self, "ctrl_manager", None)
+        entry = getattr(manager, "controllers", {}).get(POSTURE_ZMQ_SOURCE_TYPE)
+        if entry is not None and entry.cfg.xr_authorized:
+            return entry.inst
+        return None
+
+    def _xr_posture_settings(self):
+        height, yaw = self.cfg.loco_policy.commands_map[3:5]
+        return ((min(height[0], height[2]), max(height[0], height[2])), (min(yaw[0], yaw[2]), max(yaw[0], yaw[2]))), (
+            height[1],
+            yaw[1],
+        )
+
+    def _update_xr_posture(self, ctrl_data):
+        posture = self._xr_posture_controller()
+        if posture is None:
+            return
+        receiver = self._feedback_receiver()
+        limits, _ = self._xr_posture_settings()
+        selected = ctrl_data[POSTURE_SOURCE_KEY]
+        ctrl_data[POSTURE_ZMQ_SOURCE_TYPE] = posture.update_xr(
+            receiver.feedback,
+            eligible=self._feedback_intent() == "TRACK",
+            manual=selected not in (None, POSTURE_ZMQ_SOURCE_TYPE),
+            limits=limits,
+        )
+        ctrl_data[POSTURE_SOURCE_KEY] = self.ctrl_manager.posture_source_arbiter.update(ctrl_data)
 
     def _apply_feedback_desired(self, pd_target, ctrl_data, receiver):
         # An outage never sends the arms home. Only HOME intent authorizes the
@@ -243,7 +283,12 @@ class UpperBodyZmqPipelineMixin:
                     raise ValueError("executor measurements unavailable")
                 if hands:
                     measured = {**measured, **receiver.hand_snapshot()["positions"]}
-                desired = receiver.feedback.executor.prepare(receiver.feedback, desired, measured)
+                executor = receiver.feedback.executor
+                if self._checks_xr_waist(receiver):
+                    # The final policy yaw and the executable upper-body step are checked together at submission.
+                    desired = executor.prepare(receiver.feedback, desired, measured, validate_transition=False)
+                else:
+                    desired = executor.prepare(receiver.feedback, desired, measured)
                 positions = desired["positions"]
                 receiver.feedback.validate(desired, positions)
                 if hands and not receiver.hand_snapshot()["fresh"]:
@@ -271,6 +316,58 @@ class UpperBodyZmqPipelineMixin:
         target[self._upper_body_indices] = self._upper_body_filtered
         return target
 
+    def _checks_xr_waist(self, receiver):
+        return (
+            self._xr_posture_controller() is not None
+            and self._feedback_intent() in ("TRACK", "HOME")
+            and receiver.feedback.executor.contract["collision_checking"]
+        )
+
+    def _check_xr_waist_transition(self, pd_target, receiver, desired):
+        feedback = receiver.feedback
+        waist_index = self.env.joint_names.index(WAIST_YAW_JOINT)
+        old_yaw = self._xr_checked_waist_yaw
+        if old_yaw is None:
+            old_yaw = float(self.env.dof_pos[waist_index])
+        yaw = float(np.clip(pd_target[waist_index], *self.env.position_limits[waist_index]))
+        pd_target[waist_index] = yaw
+        try:
+            measured = feedback.latest_measurements
+            baseline = feedback._completed_positions
+            latest = next(reversed(feedback._states.values()), None)
+            if measured is None or baseline is None or latest is None or time.monotonic() > latest[0]:
+                raise ValueError("XR waist transition requires fresh robot feedback")
+            hands = receiver.hand_snapshot()
+            if not hands["fresh"]:
+                raise ValueError("XR waist transition requires fresh finger feedback")
+            measured = {**measured, **hands["positions"]}
+            previous = {**baseline, WAIST_YAW_JOINT: old_yaw}
+            if receiver.pending is not None:
+                previous.update(receiver.pending[0]["positions"])
+            arm_baseline = self._upper_body_filtered if desired is None else self._upper_body_previous
+            previous.update(zip(self._upper_body_cfg.joint_names, arm_baseline.tolist(), strict=True))
+            candidate = {**previous, WAIST_YAW_JOINT: yaw}
+            if desired is not None:
+                candidate.update(desired["positions"])
+            feedback.executor.model.validate_transition(
+                measured, previous, candidate, independent_joints=(WAIST_YAW_JOINT,)
+            )
+            if time.monotonic() > latest[0] or latest[1]["generation"] != feedback.generation:
+                raise ValueError("XR waist transition feedback expired during collision checking")
+            if desired is not None:
+                feedback.validate(desired, desired["positions"])
+        except (KeyError, ValueError, RuntimeError) as exc:
+            receiver._log_invalid_message(ValueError(str(exc)), time.monotonic())
+            pd_target[waist_index] = old_yaw
+            if desired is not None:
+                feedback.command_counts["rejected"] += 1
+                self._upper_body_pending = None
+                self._upper_body_stream_was_fresh = False
+                self._upper_body_filtered = self._upper_body_previous.copy()
+                pd_target[self._upper_body_indices] = self._upper_body_filtered
+            return False
+        return True
+
     def _send_upper_body_target(self, pd_target, hand_pose=None):
         """Admit hands before issuing the corresponding arm target.
 
@@ -280,6 +377,12 @@ class UpperBodyZmqPipelineMixin:
         receiver = self._feedback_receiver()
         hands = receiver is not None and receiver.has_hands
         desired = getattr(self, "_upper_body_pending", None)
+        check_waist = receiver is not None and self._checks_xr_waist(receiver)
+        if not check_waist:
+            self._xr_checked_waist_yaw = None
+        if check_waist and not self._check_xr_waist_transition(pd_target, receiver, desired):
+            desired = None
+            check_waist = False
         if receiver is not None and desired is not None:
             try:
                 if receiver.synchronize_intent(self._feedback_intent()):
@@ -295,10 +398,19 @@ class UpperBodyZmqPipelineMixin:
                 self._upper_body_stream_was_fresh = False
                 self._upper_body_filtered = self._upper_body_previous.copy()
                 pd_target[self._upper_body_indices] = self._upper_body_filtered
+                if check_waist:
+                    index = self.env.joint_names.index(WAIST_YAW_JOINT)
+                    pd_target[index] = (
+                        self.env.dof_pos[index] if self._xr_checked_waist_yaw is None else self._xr_checked_waist_yaw
+                    )
+                desired = None
+                check_waist = False
         try:
             if hands and desired is not None:
                 desired.setdefault("_command_timestamps", {})["arm_submission_started"] = time.monotonic()
             self.env.step(pd_target, hand_pose)
+            if check_waist:
+                self._xr_checked_waist_yaw = float(pd_target[self.env.joint_names.index(WAIST_YAW_JOINT)])
             if hands and desired is not None:
                 desired.setdefault("_command_timestamps", {})["arm_submission_completed"] = time.monotonic()
         except Exception:
@@ -502,6 +614,16 @@ class UpperBodyZmqPipelineMixin:
                     if key in hand_state
                 }
             timing["feedback_assembly"] = 1000 * (time.perf_counter() - assembly_started)
+            xr_posture = None
+            posture = self._xr_posture_controller()
+            if posture is not None:
+                limits, defaults = self._xr_posture_settings()
+                xr_posture = posture.xr_feedback(
+                    limits=limits,
+                    defaults=defaults,
+                    targets=getattr(self._inner_policy(), "posture_targets", defaults),
+                    available=self._feedback_intent() == "TRACK",
+                )
             receiver.feedback.publish(
                 **payload,
                 intent=self._feedback_intent(),
@@ -511,6 +633,7 @@ class UpperBodyZmqPipelineMixin:
                 source_groups=source_groups,
                 diagnostics=diagnostics,
                 measurements_available=hand_state["fresh"] if hands else True,
+                xr_posture=xr_posture,
             )
             if hands:
                 receiver.synchronize_generation()

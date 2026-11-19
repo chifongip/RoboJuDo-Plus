@@ -144,6 +144,7 @@ class LocomanipulationLocoMimicPipelineMixin:
         started = time.perf_counter()
         before_checkpoint = self._service_upper_body_completion_checkpoint("before_policy", dry_run=dry_run)
         before_ms = 1000 * (time.perf_counter() - started)
+        self._update_xr_posture(ctrl_data)
         started = time.perf_counter()
         pd_target, extras = self._get_policy_step(env_data, ctrl_data)
         self._upper_body_timing_ms = {"policy": 1000 * (time.perf_counter() - started)}

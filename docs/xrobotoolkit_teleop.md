@@ -62,10 +62,48 @@ release to hold its issued target. XR `Y` returns both arms toward defaults. Joy
 Targets are relative to the measured torso. Headset horizontal heading is captured at engagement; subsequent head
 motion does not move targets. OmniHand triggers control fingers independently of arm grips. HOME holds finger targets.
 
+### Pelvis IK with OmniHand
+
+Enable XR body tracking, then launch the pelvis IK simulation and bridge from separate environments:
+
+```bash
+# RoboJuDo environment
+python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_pelvis_ik
+
+# XR environment
+conda activate robojudo-xr
+python -m xrobotoolkit_teleop.integrations.robojudo --robot x2_omnihand --ik-backend lerobot \
+  --tracking-reference pelvis-ik
+```
+
+Enter `JOINT_DEFAULT`, wait for interpolation, enter `RL_DEFAULT`, and enable XR tracking. Release both grips
+before engaging. Either grip engages posture and its own arm. Keeping one grip held while handing off preserves
+the posture reference. Triggers control fingers independently of grips.
+
+Crouch or rise to move the height target. Twist your shoulders relative to your pelvis to change preferred waist
+yaw. The solver can adjust yaw when an active hand misses its goal. Hand goals follow the robot pelvis during a
+crouch. The locomotion policy applies its configured height and waist slew rates.
+
+The bridge sends posture on the separate loopback port 8557 (`--posture-endpoint`) and sends arms and fingers
+on the existing upper-body stream. Height can update while arm IK is running. RoboJuDo validates posture against
+the current XR session and gives manual posture input priority. After manual takeover, release both grips before
+engaging posture again. Releasing both grips or losing body tracking stops new posture targets. The policy can
+finish ramping to the last accepted target. Explicitly disabling XR freezes the posture command at its current
+value. Press XR `Y` to request arm and posture defaults while the fingers hold their issued targets. The arm
+return continues after the button is released until robot feedback confirms convergence. Release both grips
+before resuming tracking.
+
+The bridge adopts a solved waist target after RoboJuDo acknowledges the corresponding upper-body frame.
+With collision checking enabled, RoboJuDo checks the executable waist, arm, and finger transition together
+before submission. An expired or rejected transition holds the previous safe targets.
+
+This preset requires the paired XRoboToolkit revision and the X2 OmniHand simulation assets.
+
 ## Deployment settings
 
-The bridge CLI exposes only `--robot`, `--ik-backend`, `--command-endpoint`, `--feedback-endpoint`, `--scale-factor`,
-`--arm-velocity-limit`, and `--return-velocity-limit`. Endpoints default to loopback ports 8559
+The bridge CLI exposes `--robot`, `--ik-backend`, `--tracking-reference`, `--command-endpoint`,
+`--feedback-endpoint`, `--posture-endpoint`, `--scale-factor`, `--arm-velocity-limit`, and
+`--return-velocity-limit`. Upper-body endpoints default to loopback ports 8559
 (commands) and 8571 (feedback); edit the corresponding RoboJuDo controller endpoints for a multi-host deployment.
 Run only one bridge publisher.
 
@@ -125,8 +163,8 @@ position-limit, freshness, authorization and applicable velocity checks.
 ## Real robot and hands
 
 Follow [X2 AimDK setup](x2_sim2real.md), then use `x2_xrobotoolkit_real` or `x2_xrobotoolkit_omnihand_real`.
-The bridge command remains the same. Real joystick preparation uses `RB+Y` and `RB+X`. Real presets inherit observer
-compensation `OFF`; simulation uses `ACTIVE`.
+For pelvis IK use `x2_xrobotoolkit_omnihand_pelvis_ik_real` with the LeRobot bridge below. Real joystick
+preparation uses `RB+Y` and `RB+X`. Real presets inherit observer compensation mode `OFF`.
 
 For physical OmniHands, install the SDK in the robot's RoboJuDo environment and configure USB permissions:
 
@@ -172,6 +210,40 @@ Both advance the same completed-command baseline, retaining fresh waiting desire
 Recording (`--record`, with the configured recorder service) stores fresh acknowledged tracking commands and measured
 positions, excluding HOME and outage holds. Combined command recording uses the completed issued baseline, including
 completion observed between control ticks.
+
+### Pelvis IK on X2 with OmniHand
+
+Complete the AimDK and HCAN setup above and enable XR body tracking. Source the AimDK setup file in the RoboJuDo
+environment on the robot host and start the hardware preset.
+
+```bash
+export ROBOJUDO_OMNIHAND_CONFIG="$PWD/.local/omnihand.json"
+python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_pelvis_ik_real
+```
+
+Start the pelvis IK bridge in a separate XR environment.
+
+```bash
+conda activate robojudo-xr
+python -m xrobotoolkit_teleop.integrations.robojudo --robot x2_omnihand --ik-backend lerobot \
+  --tracking-reference pelvis-ik
+```
+
+These commands use loopback endpoints. For a bridge on another host, use the following endpoint settings with
+the actual hostnames.
+
+| Stream | Robot controller setting | XR bridge argument |
+|---|---|---|
+| Posture | `LocomanipulationPostureZmqCtrl.endpoint = tcp://XR_HOST:8557` | `--posture-endpoint 'tcp://*:8557'` |
+| Arms and fingers | `UpperBodyOmniHandZmqCtrl.endpoint = tcp://XR_HOST:8559` | `--command-endpoint 'tcp://*:8559'` |
+| Feedback | `UpperBodyOmniHandZmqCtrl.feedback_endpoint = tcp://*:8571` | `--feedback-endpoint tcp://ROBOT_HOST:8571` |
+
+The hardware preset uses the same posture rate limits as the pelvis IK simulation, **0.2 m/s** for height and
+**1.0 rad/s** for waist yaw. With the robot supported and the work area clear, use `RB+Y` to enter `JOINT_DEFAULT`, wait for
+interpolation, then use `RB+X` to enter `RL_DEFAULT`. Release both XR grips and enable XR tracking with
+joystick `L`. For the first hardware check, use small crouch and twist movements with one grip, verify each
+finger trigger independently, then verify grip release, XR `Y` HOME, and the joystick damping command `RB+B`.
+Check tracking and feedback loss before trying larger motions.
 
 ## Validation and migration
 

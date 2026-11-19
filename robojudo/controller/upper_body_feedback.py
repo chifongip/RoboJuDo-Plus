@@ -119,6 +119,7 @@ class UpperBodyFeedback:
         source_groups=None,
         diagnostics=None,
         measurements_available=True,
+        xr_posture=None,
     ):
         started = time.perf_counter()
         now = time.monotonic()
@@ -199,6 +200,8 @@ class UpperBodyFeedback:
             "feedback_diagnostics": feedback_diagnostics,
         }
         frame["executor"] = dict(self.executor.contract)
+        if xr_posture is not None:
+            frame["xr_posture"] = xr_posture
         deadline = min(sample_times.values(), default=float("-inf")) + self.cfg.feedback_timeout_s
         self._states[self.state_id] = (deadline, frame)
         while len(self._states) > 16:
@@ -220,6 +223,33 @@ class UpperBodyFeedback:
             "encode_send_ms": 1000 * (time.perf_counter() - built),
             "sent": sent,
         }
+
+    def validate_posture_reference(self, message, epoch, now):
+        if (
+            self.intent != "TRACK"
+            or self.bridge_id is None
+            or message["bridge_id"] != self.bridge_id
+            or message["session_id"] != self.session_id
+            or _counter(message["generation"]) != self.generation
+            or _counter(message["epoch"]) != epoch
+        ):
+            raise ValueError("obsolete XR posture authority")
+        state = self._states.get(_counter(message["state_id"]))
+        if state is None:
+            raise ValueError("unknown XR posture feedback state")
+        deadline, feedback = state
+        posture = feedback.get("xr_posture")
+        if (
+            now > deadline
+            or self.latest_measurements is None
+            or not feedback["valid"]
+            or feedback["intent"] != "TRACK"
+            or not posture
+            or not posture["available"]
+            or posture["epoch"] != epoch
+        ):
+            raise ValueError("XR posture feedback is expired or unavailable")
+        return deadline
 
     def validate(self, message, positions, *, receiving=False):
         if (

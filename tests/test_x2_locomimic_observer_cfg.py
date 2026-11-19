@@ -60,6 +60,26 @@ class TestX2LocomimicObserverConfig(unittest.TestCase):
                 if controller.ctrl_type != "UpperBodyZmqCtrl":
                     self.assertEqual(controller.model_dump(), original.model_dump())
 
+    def test_real_pelvis_ik_preset_inherits_hardware_setup(self):
+        from robojudo.config.x2 import (
+            x2_xrobotoolkit_omnihand_pelvis_ik,
+            x2_xrobotoolkit_omnihand_pelvis_ik_real,
+            x2_xrobotoolkit_omnihand_real,
+        )
+
+        name = "x2_xrobotoolkit_omnihand_pelvis_ik_real"
+        self.assertIs(cfg_registry.get(name), x2_xrobotoolkit_omnihand_pelvis_ik_real)
+        cfg = ConfigManager(name).get_cfg()
+        expected = x2_xrobotoolkit_omnihand_real().model_dump()
+        sim_policy = x2_xrobotoolkit_omnihand_pelvis_ik().loco_policy
+        expected["loco_policy"]["max_height_command_rate_m_s"] = sim_policy.max_height_command_rate_m_s
+        expected["loco_policy"]["max_waist_yaw_command_rate_rad_s"] = sim_policy.max_waist_yaw_command_rate_rad_s
+        posture = next(ctrl for ctrl in expected["ctrl"] if ctrl["ctrl_type"] == "LocomanipulationPostureZmqCtrl")
+        posture["xr_authorized"] = True
+        self.assertEqual(cfg.model_dump(), expected)
+        self.assertFalse(cfg.env.is_sim)
+        self.assertTrue(cfg.do_safety_check)
+
     def test_arm_limits_use_joint_names_and_compensation_defaults_off(self):
         cfg = x2_locomimic_real_observer()
         limits = dict(zip(cfg.env.dof.joint_names, cfg.env.dof.torque_limits, strict=True))

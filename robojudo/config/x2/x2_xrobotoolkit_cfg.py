@@ -13,9 +13,10 @@ from robojudo.controller.ctrl_cfgs import (
 )
 
 from .env.x2_mujuco_env_cfg import X2ObserverMujocoEnvCfg
+from .policy.x2_locomanipulation_policy_cfg import X2LocomanipulationPolicyCfg
 from .x2_locomimic_observer_cfg import x2_locomimic_observer, x2_locomimic_real_observer
 
-# Shared by all four presets. The bridge adopts the robot's collision policy.
+# The bridge adopts the robot's collision policy.
 XR_ARM_SETTINGS = {
     "executor_collision_checking": False,
     "ema_alpha": 0.0,
@@ -29,6 +30,11 @@ XR_ARM_SETTINGS = {
 XR_HAND_SETTINGS = {
     "hand_command_mode": "direct",  # "direct" or "filtered"; filtered uses the arm EMA setting.
     "hand_velocity_limit": 2.0,  # rad/s; filtered fingers are also bounded by model limits.
+}
+
+PELVIS_IK_POSTURE_RATES = {
+    "max_height_command_rate_m_s": 0.2,
+    "max_waist_yaw_command_rate_rad_s": 1.0,
 }
 
 XRArmControllers = list[
@@ -72,6 +78,15 @@ def _xr_controllers(base, *, omnihand=False):
     return controllers
 
 
+def _pelvis_ik_controllers(base) -> XRHandControllers:
+    return [
+        cfg.model_copy(deep=True, update={"xr_authorized": True})
+        if isinstance(cfg, LocomanipulationPostureZmqCtrlCfg)
+        else cfg.model_copy(deep=True)
+        for cfg in base.ctrl
+    ]
+
+
 @cfg_registry.register
 class x2_xrobotoolkit(x2_locomimic_observer):
     """Arm-only XR simulation with measured feedback and target visualization."""
@@ -100,7 +115,27 @@ class x2_xrobotoolkit_omnihand(x2_xrobotoolkit):
 
 
 @cfg_registry.register
+class x2_xrobotoolkit_omnihand_pelvis_ik(x2_xrobotoolkit_omnihand):
+    """Pelvis-relative XR arms and session-authorized posture in simulation."""
+
+    loco_policy: X2LocomanipulationPolicyCfg = x2_xrobotoolkit_omnihand().loco_policy.model_copy(
+        update=PELVIS_IK_POSTURE_RATES
+    )
+    ctrl: XRHandControllers = _pelvis_ik_controllers(x2_xrobotoolkit_omnihand())
+
+
+@cfg_registry.register
 class x2_xrobotoolkit_omnihand_real(x2_xrobotoolkit_real):
     """Robot-side HCAN selected by local adapter serials and exact hand identities."""
 
     ctrl: XRHandControllers = _xr_controllers(x2_locomimic_real_observer(), omnihand=True)
+
+
+@cfg_registry.register
+class x2_xrobotoolkit_omnihand_pelvis_ik_real(x2_xrobotoolkit_omnihand_real):
+    """Pelvis-relative XR arms and posture with AimDK and robot-side OmniHands."""
+
+    loco_policy: X2LocomanipulationPolicyCfg = x2_xrobotoolkit_omnihand_real().loco_policy.model_copy(
+        update=PELVIS_IK_POSTURE_RATES
+    )
+    ctrl: XRHandControllers = _pelvis_ik_controllers(x2_xrobotoolkit_omnihand_real())

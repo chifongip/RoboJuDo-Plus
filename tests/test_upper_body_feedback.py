@@ -302,6 +302,48 @@ class UpperBodyFeedbackTests(unittest.TestCase):
         self.assertGreater(recovered["generation"], state["generation"])
         self.assertEqual(recovered["reset_reason"], "tracking command timeout")
 
+    def test_stalled_poll_revokes_the_lease_as_a_recoverable_timeout(self):
+        self.pipeline._set_upper_body_enabled(True)
+        state = self.publish()
+        self.assertTrue(self.receive(self.desired(state))["UpperBodyZmqCtrl"]["fresh"])
+        self.clock.return_value = 10.0 + self.arm_cfg.timeout_s + 0.01
+        self.assertFalse(self.receiver.get_data()["fresh"])
+        self.assertEqual(self.feedback.generation, state["generation"] + 1)
+        self.assertEqual(self.feedback.reset_reason, "tracking command timeout")
+
+    def test_rejected_combined_waist_transition_holds_both_commands(self):
+        waist = "waist_yaw_joint"
+        index = self.env.joint_names.index(waist)
+        pipeline = self.pipeline
+        pipeline._xr_checked_waist_yaw = 0.1
+        pipeline._upper_body_previous = pipeline._upper_body_filtered.copy()
+        pipeline._upper_body_filtered = pipeline._upper_body_previous + 0.01
+        self.feedback.latest_measurements = dict(zip(self.env.joint_names, self.env.dof_pos.tolist(), strict=True))
+        self.feedback._completed_positions = dict(
+            zip(self.arm_cfg.joint_names, pipeline._upper_body_previous, strict=True)
+        )
+        self.feedback._states[1] = (10.1, {"generation": self.feedback.generation})
+        desired = {"positions": dict(zip(self.arm_cfg.joint_names, pipeline._upper_body_filtered, strict=True))}
+        pipeline._upper_body_pending = desired
+        target = self.env.default_pos.copy()
+        target[index] = 0.2
+        target[pipeline._upper_body_indices] = pipeline._upper_body_filtered
+        receiver = SimpleNamespace(
+            feedback=self.feedback,
+            pending=None,
+            hand_snapshot=lambda: {"fresh": True, "positions": {}},
+            _log_invalid_message=Mock(),
+        )
+        with patch.object(
+            self.feedback.executor.model, "validate_transition", side_effect=RuntimeError("collision")
+        ) as check:
+            self.assertFalse(pipeline._check_xr_waist_transition(target, receiver, desired))
+        self.assertEqual(check.call_args.kwargs, {"independent_joints": (waist,)})
+        self.assertAlmostEqual(check.call_args.args[2][waist], 0.2)
+        self.assertAlmostEqual(float(target[index]), 0.1)
+        np.testing.assert_array_equal(target[pipeline._upper_body_indices], pipeline._upper_body_previous)
+        self.assertIsNone(pipeline._upper_body_pending)
+
     def test_return_is_bounded_by_robot_executor(self):
         self.feedback.cfg.max_joint_velocity_rad_s = 0.25
         state = self.publish()

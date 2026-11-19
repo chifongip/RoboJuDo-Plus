@@ -226,10 +226,19 @@ class UpperBodyZmqCtrl(Controller):
 
     def get_data(self):
         now = time.monotonic()
-        if self.feedback is not None and self.feedback.expire_tracking(now):
-            self._clear_positions()
         if self._last_poll_at is not None and now - self._last_poll_at > self.cfg_ctrl.timeout_s:
+            feedback = self.feedback
+            recoverable = (
+                feedback is not None
+                and feedback.intent == "TRACK"
+                and (feedback.last_desired_at is not None or feedback.reset_reason == "tracking command timeout")
+            )
             self.reset()
+            if recoverable:
+                # A stalled control tick revokes the lease without revoking the operator's clutch.
+                feedback.reset_reason = "tracking command timeout"
+        elif self.feedback is not None and self.feedback.expire_tracking(now):
+            self._clear_positions()
         self._last_poll_at = now
         if not self._closed:
             self._receive_available(now)

@@ -72,6 +72,14 @@ class LocomanipulationPolicyBase(Policy):
         self.cmd[3:5] = (self._height_command, self._waist_yaw_command)
         self._last_posture_command_at = None
 
+    @property
+    def posture_targets(self):
+        return float(self._target_height), float(self._target_waist_yaw)
+
+    def hold_posture_commands(self):
+        self._target_height = self._height_command
+        self._target_waist_yaw = self._waist_yaw_command
+
     def post_step_callback(self, commands: list[str] | None = None):
         del commands
         self.timestep += 1

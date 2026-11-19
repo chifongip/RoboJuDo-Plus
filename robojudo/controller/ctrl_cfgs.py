@@ -452,6 +452,7 @@ class LocomanipulationPostureZmqCtrlCfg(CtrlCfg):
     endpoint: str = "tcp://127.0.0.1:8557"
     timeout_s: float = Field(default=0.25, gt=0.0)
     posture_priority: int | None = Field(default=None, ge=0)
+    xr_authorized: bool = False
 
     @model_validator(mode="after")
     def validate_locomanipulation_posture_zmq(self):
