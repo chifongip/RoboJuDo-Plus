@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
+from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg, VelocityZmqCtrlCfg
 from robojudo.controller.posture_source import POSTURE_SOURCE_KEY, POSTURE_ZMQ_SOURCE_TYPE
 from robojudo.recording import RecorderClient
 
@@ -17,6 +17,10 @@ class UpperBodyZmqPipelineMixin:
     def __init__(self, cfg):
         self._upper_body_cfg = next(
             (ctrl_cfg for ctrl_cfg in cfg.ctrl if isinstance(ctrl_cfg, UpperBodyZmqCtrlCfg)),
+            None,
+        )
+        self._xr_velocity_cfg = next(
+            (ctrl for ctrl in cfg.ctrl if isinstance(ctrl, VelocityZmqCtrlCfg) and ctrl.xr_authorized),
             None,
         )
         self._upper_body_enabled = False
@@ -240,6 +244,16 @@ class UpperBodyZmqPipelineMixin:
             height[1],
             yaw[1],
         )
+
+    def _xr_velocity_settings(self, intent):
+        cfg = getattr(self, "_xr_velocity_cfg", None)
+        if cfg is None:
+            return None
+        settings = {"endpoint": cfg.endpoint}
+        if intent == "TRACK":
+            policy = self._inner_policy()
+            settings.update(commands_map=policy.commands_map[:3], deadzone=policy.joystick_deadzone)
+        return settings
 
     def _update_xr_posture(self, ctrl_data):
         posture = self._xr_posture_controller()
@@ -613,6 +627,7 @@ class UpperBodyZmqPipelineMixin:
                     if key in hand_state
                 }
             timing["feedback_assembly"] = 1000 * (time.perf_counter() - assembly_started)
+            intent = self._feedback_intent()
             xr_posture = None
             posture = self._xr_posture_controller()
             if posture is not None:
@@ -621,11 +636,11 @@ class UpperBodyZmqPipelineMixin:
                     limits=limits,
                     defaults=defaults,
                     targets=getattr(self._inner_policy(), "posture_targets", defaults),
-                    available=self._feedback_intent() == "TRACK",
+                    available=intent == "TRACK",
                 )
             receiver.feedback.publish(
                 **payload,
-                intent=self._feedback_intent(),
+                intent=intent,
                 mode=self.mode.value,
                 control_dt=self.dt,
                 timing_ms=timing,
@@ -633,6 +648,7 @@ class UpperBodyZmqPipelineMixin:
                 diagnostics=diagnostics,
                 measurements_available=hand_state["fresh"] if hands else True,
                 xr_posture=xr_posture,
+                xr_velocity=self._xr_velocity_settings(intent),
             )
             if hands:
                 receiver.synchronize_generation()

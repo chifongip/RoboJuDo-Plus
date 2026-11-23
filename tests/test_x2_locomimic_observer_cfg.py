@@ -46,6 +46,7 @@ class TestX2LocomimicObserverConfig(unittest.TestCase):
 
     def test_xr_presets_inherit_observer_runtime(self):
         from robojudo.config.x2 import x2_xrobotoolkit, x2_xrobotoolkit_real
+        from robojudo.controller.ctrl_cfgs import VelocityZmqCtrlCfg
 
         for xr, base in (
             (x2_xrobotoolkit(), x2_locomimic_observer()),
@@ -57,7 +58,14 @@ class TestX2LocomimicObserverConfig(unittest.TestCase):
             self.assertEqual(actual, expected)
             self.assertEqual([type(ctrl) for ctrl in xr.ctrl], [type(ctrl) for ctrl in base.ctrl])
             for controller, original in zip(xr.ctrl, base.ctrl, strict=True):
-                if controller.ctrl_type != "UpperBodyZmqCtrl":
+                if isinstance(controller, VelocityZmqCtrlCfg):
+                    self.assertTrue(controller.xr_authorized)
+                    self.assertFalse(original.xr_authorized)
+                    self.assertEqual(
+                        controller.model_dump(exclude={"xr_authorized"}),
+                        original.model_dump(exclude={"xr_authorized"}),
+                    )
+                elif controller.ctrl_type != "UpperBodyZmqCtrl":
                     self.assertEqual(controller.model_dump(), original.model_dump())
 
     def test_pelvis_ik_presets_inherit_their_base_setups(self):

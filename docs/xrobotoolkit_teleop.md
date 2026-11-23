@@ -97,6 +97,22 @@ grips before resuming tracking. XR-button HOME requires a live XR stream. RoboJu
 with XR offline while the bridge and robot feedback are available. In simulation, torso and hand target
 markers can include rejected requests.
 
+### Drive with the XR thumbsticks
+
+The X2 XR presets enable thumbstick driving through `XR_VELOCITY_SETTINGS` in
+`robojudo/config/x2/x2_xrobotoolkit_cfg.py`. The XR bridge reads the configured velocity port
+from robot feedback.
+
+Enter locomotion and turn on XR tracking with `t` or a left-stick click on the RoboJuDo gamepad.
+Center the XR sticks to enable driving. Push the left XR stick up or down to move forward or backward,
+move it sideways to strafe, and move the right XR stick sideways to turn. The sticks use the same
+speed mapping as the RoboJuDo gamepad. You can drive with either arm grip held or released.
+
+Centering the sticks commands a stop. Tracking disable, HOME, and lost XR or robot feedback pause XR
+driving. Center the sticks again when tracking resumes. The RoboJuDo gamepad and simulation keyboard
+have higher priority and retain their usual controls and handoff behavior. Verify directions and stopping
+in MuJoCo before using the hardware presets.
+
 ### Pelvis IK controls
 
 Either grip engages posture and its own arm. Keep one grip held while switching hands to preserve the
@@ -158,14 +174,16 @@ export ROBOJUDO_OMNIHAND_CONFIG="$PWD/.local/omnihand.json"
 The defaults support RoboJuDo and the XR Bridge on the same host. Run one bridge publisher per command
 stream. For separate hosts, replace `XR_HOST` and `ROBOT_HOST` with reachable addresses.
 
-| Stream | Default port | RoboJuDo controller and setting | XR Bridge option |
+| Stream | Default port | RoboJuDo setting | XR Bridge configuration |
 |---|---|---|---|
 | Arm targets and optional finger targets | 8559 | `UpperBodyZmqCtrl` or `UpperBodyOmniHandZmqCtrl`, `endpoint = tcp://XR_HOST:8559` | `--command-endpoint 'tcp://*:8559'` |
 | Robot feedback | 8571 | Same upper-body controller, `feedback_endpoint = tcp://*:8571` | `--feedback-endpoint tcp://ROBOT_HOST:8571` |
-| Pelvis IK posture | 8557 | `LocomanipulationPostureZmqCtrl`, `endpoint = tcp://XR_HOST:8557` | `--posture-endpoint 'tcp://*:8557'` |
+| Pelvis IK posture | 8557 | `XR_POSTURE_SETTINGS["endpoint"] = "tcp://XR_HOST:8557"` | `--posture-endpoint 'tcp://*:8557'` |
+| XR stick velocity | 8558 | `XR_VELOCITY_SETTINGS["endpoint"] = "tcp://XR_HOST:8558"` | Uses the arm command bind interface and the configured velocity port |
 
 The bridge binds the target streams and connects to feedback. RoboJuDo binds feedback and connects to the
-target streams.
+target streams. To reserve the velocity endpoint for another Twist publisher, set
+`XR_VELOCITY_SETTINGS["xr_authorized"]` to `False`.
 
 ## Tune XR Bridge and executor settings
 

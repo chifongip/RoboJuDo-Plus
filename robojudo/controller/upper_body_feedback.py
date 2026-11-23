@@ -120,6 +120,7 @@ class UpperBodyFeedback:
         diagnostics=None,
         measurements_available=True,
         xr_posture=None,
+        xr_velocity=None,
     ):
         started = time.perf_counter()
         now = time.monotonic()
@@ -202,6 +203,8 @@ class UpperBodyFeedback:
         frame["executor"] = dict(self.executor.contract)
         if xr_posture is not None:
             frame["xr_posture"] = xr_posture
+        if xr_velocity is not None:
+            frame["xr_velocity"] = xr_velocity
         deadline = min(sample_times.values(), default=float("-inf")) + self.cfg.feedback_timeout_s
         self._states[self.state_id] = (deadline, frame)
         while len(self._states) > 16:

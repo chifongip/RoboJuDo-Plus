@@ -44,6 +44,8 @@ class SyntheticXR:
         self.twist = 0.0
         self.heading = 0.0
         self.home = False
+        self.left_stick = (0, 0)
+        self.right_stick = (0, 0)
         self.ik_delay = 0.0
         self.timestamp = 1
         self.next_update = 0.0
@@ -59,6 +61,8 @@ class SyntheticXR:
                 'left_trigger': self.trigger, 'right_trigger': self.right_trigger}.get(name, 0.0)
     def get_button_state_by_name(self, name):
         return self.home
+    def get_joystick_state(self, controller):
+        return self.left_stick if controller == "left" else self.right_stick
     def get_waist_sample(self, *, pelvis_ik=False, include_triggers=True):
         stamp = self.get_timestamp_ns()
         if not self.freeze_body:
@@ -108,13 +112,13 @@ def main():
         submit = bridge.retargeter.pool.submit
         bridge.retargeter.pool.submit = lambda _solve, *args: submit(delayed_solve, xr.ik_delay, *args)
     else:
-        bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], **options)
+        bridge = RoboJuDoBridge(sys.argv[1], sys.argv[2], tracking_reference=sys.argv[7], **options)
     try:
         deadline = time.monotonic()
         status = None
         feedback_generation = None
         while True:
-            time.sleep(max(0, deadline - time.monotonic()))
+            bridge.wait_until_publish(deadline)
             if select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if not line:
@@ -147,6 +151,8 @@ class XrobotoolkitFixture:
     finger_mode = "direct"
     collision_checking = True
     pelvis_ik = False
+    tracking_reference = "fixed-heading"
+    with_velocity = False
 
     def setUp(self):
         from robojudo.config.x2 import (
@@ -155,7 +161,7 @@ class XrobotoolkitFixture:
             x2_xrobotoolkit_omnihand_pelvis_ik,
             x2_xrobotoolkit_pelvis_ik,
         )
-        from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
+        from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg, VelocityZmqCtrlCfg
         from robojudo.pipeline.four_mode_pipeline import ControlMode
         from robojudo.pipeline.x2_locomanipulation_loco_mimic_pipeline import X2LocomanipulationLocoMimicPipeline
 
@@ -174,6 +180,7 @@ class XrobotoolkitFixture:
         upper.endpoint = self.command_endpoint
         upper.feedback_endpoint = "tcp://127.0.0.1:*"
         upper.executor_collision_checking = self.collision_checking
+        controllers = [upper]
         if self.with_omnihand:
             upper.hand_command_mode = self.finger_mode
         self.posture_endpoint = ""
@@ -185,9 +192,15 @@ class XrobotoolkitFixture:
                 reserved.bind(("127.0.0.1", 0))
                 posture.endpoint = f"tcp://127.0.0.1:{reserved.getsockname()[1]}"
             self.posture_endpoint = posture.endpoint
-            cfg.ctrl = [upper, posture]
-        else:
-            cfg.ctrl = [upper]
+            controllers.append(posture)
+        if self.with_velocity:
+            velocity = next(item for item in cfg.ctrl if isinstance(item, VelocityZmqCtrlCfg))
+            with socket.socket() as reserved:
+                reserved.bind(("127.0.0.1", 0))
+                velocity.endpoint = f"tcp://127.0.0.1:{reserved.getsockname()[1]}"
+            controllers.append(velocity)
+            cfg.loco_policy.commands_map[0] = [-0.5, 0.0, 0.8]
+        cfg.ctrl = controllers
         cfg.env.headless = True
         cfg.env.visualize_extras = False
         cfg.env.forward_kinematic = None
@@ -248,6 +261,7 @@ class XrobotoolkitFixture:
                 "x2_omnihand" if self.with_omnihand else "x2",
                 str(self.collision_checking),
                 self.posture_endpoint,
+                self.tracking_reference,
             ],
             stdin=subprocess.PIPE,
             stdout=log,
@@ -628,6 +642,73 @@ class XrobotoolkitPelvisIKIntegrationTests(XrobotoolkitPelvisIKFixture, unittest
 
 class XrobotoolkitPelvisIKCollisionIntegrationTests(XrobotoolkitPelvisIKIntegrationTests):
     collision_checking = True
+
+
+class XrobotoolkitVelocityFixture(XrobotoolkitFixture):
+    with_velocity = True
+    collision_checking = False
+
+    def test_xr_thumbsticks_drive_the_policy_only_while_tracking(self):
+        child = self.start_bridge()
+        policy = self.pipeline._inner_policy()
+        receiver = self.pipeline.ctrl_manager.controllers.VelocityZmqCtrl.inst
+
+        def wait_for_velocity(forward, lateral, yaw):
+            self.wait_until(lambda: np.allclose(policy.current_vel_cmd, [forward, lateral, yaw]))
+
+        def wait_for_stop():
+            self.wait_until(lambda: np.allclose(policy.current_vel_cmd, 0) and not receiver.get_data()["fresh"])
+
+        self.wait_until(lambda: self.receiver.feedback.command_id > 0)
+        self.control(child, left_stick=[0, 0.25])
+        self.cycles(0.15)
+        self.assertFalse(receiver.get_data()["has_received"])
+
+        self.pipeline._process_commands(["[UPPER_BODY_TOGGLE]"])
+        self.cycles(0.25)
+        self.assertFalse(receiver.get_data()["has_received"])
+        self.control(child, left_stick=[0, 0])
+        self.wait_until(lambda: receiver.get_data()["fresh"])
+        self.control(child, left_stick=[-0.25, 0.25], right_stick=[0.15, 0])
+        wait_for_velocity(0.2, 0.125, -0.15)
+        self.control(child, grip=1.0, left_stick=[0, -0.25], right_stick=[0, 0])
+        wait_for_velocity(-0.125, 0, 0)
+
+        self.control(child, freeze=True)
+        wait_for_stop()
+        self.control(child, freeze=False)
+        self.cycles(0.25)
+        self.assertFalse(receiver.get_data()["fresh"])
+        self.control(child, left_stick=[0, 0])
+        self.wait_until(lambda: receiver.get_data()["fresh"])
+        self.control(child, left_stick=[0, 0.25])
+        wait_for_velocity(0.2, 0, 0)
+        self.pipeline._process_commands(["[UPPER_BODY_TOGGLE]"])
+        wait_for_stop()
+        self.pipeline._process_commands(["[UPPER_BODY_TOGGLE]"])
+        self.cycles(0.25)
+        self.assertFalse(receiver.get_data()["fresh"])
+        self.control(child, grip=0.0, left_stick=[0, 0])
+        self.wait_until(lambda: receiver.get_data()["fresh"])
+        self.control(child, left_stick=[0, 0.25])
+        wait_for_velocity(0.2, 0, 0)
+        self.control(child, home=True)
+        wait_for_stop()
+
+
+@unittest.skipUnless(
+    os.environ.get("XROBOTOOLKIT_TEST_PYTHON"), "set XROBOTOOLKIT_TEST_PYTHON for two-process XR tests"
+)
+class XrobotoolkitFixedHeadingVelocityTests(XrobotoolkitVelocityFixture, unittest.TestCase):
+    pass
+
+
+class XrobotoolkitWaistVelocityTests(XrobotoolkitFixedHeadingVelocityTests):
+    tracking_reference = "waist"
+
+
+class XrobotoolkitPelvisIKVelocityTests(XrobotoolkitFixedHeadingVelocityTests):
+    pelvis_ik = True
 
 
 if __name__ == "__main__":

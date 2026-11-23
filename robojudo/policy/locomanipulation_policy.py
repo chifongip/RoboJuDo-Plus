@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 class LocomanipulationPolicyBase(Policy):
     """Robot-neutral ONNX Locomanipulation runtime shared by G1 and X2."""
 
+    joystick_deadzone = 0.1
+
     def __init__(self, cfg_policy: PolicyCfg, device: str):
         super().__init__(cfg_policy=cfg_policy, device=device)
         self.session = create_onnx_session(
@@ -179,7 +181,10 @@ class LocomanipulationPolicyBase(Policy):
                 target_vel = clip_velocity(velocity, self.commands_map[:3])
         elif selected in JOYSTICK_SOURCE_TYPES:
             axes = ctrl_data[selected]["axes"]
-            lx, ly, rx = (axis if abs(axis) >= 0.1 else 0.0 for axis in (axes["LeftX"], axes["LeftY"], axes["RightX"]))
+            lx, ly, rx = (
+                axis if abs(axis) >= self.joystick_deadzone else 0.0
+                for axis in (axes["LeftX"], axes["LeftY"], axes["RightX"])
+            )
             target_vel[0] = command_remap(ly, self.commands_map[0])
             target_vel[1] = command_remap(lx, self.commands_map[1])
             target_vel[2] = command_remap(rx, self.commands_map[2])

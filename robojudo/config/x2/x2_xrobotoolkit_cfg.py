@@ -35,6 +35,18 @@ XR_HAND_SETTINGS = {
     "hand_velocity_limit": 2.0,  # rad/s; filtered fingers are also bounded by model limits.
 }
 
+XR_VELOCITY_SETTINGS = {
+    "endpoint": "tcp://127.0.0.1:8558",
+    "velocity_priority": 100,
+    "xr_authorized": True,
+}
+
+XR_POSTURE_SETTINGS = {
+    "endpoint": "tcp://127.0.0.1:8557",
+    "posture_priority": 100,
+    "xr_authorized": False,
+}
+
 PELVIS_IK_POSTURE_RATES = {
     "max_height_command_rate_m_s": 0.2,
     "max_waist_yaw_command_rate_rad_s": 1.0,
@@ -61,8 +73,19 @@ _ControllerCfg = TypeVar("_ControllerCfg", bound=CtrlCfg)
 
 
 def _xr_controllers(base, *, omnihand=False):
+    replacements = {
+        cfg.ctrl_type: cfg
+        for cfg in (
+            VelocityZmqCtrlCfg(**XR_VELOCITY_SETTINGS),
+            LocomanipulationPostureZmqCtrlCfg(**XR_POSTURE_SETTINGS),
+        )
+    }
     controllers = []
     for cfg in base.ctrl:
+        replacement = replacements.pop(cfg.ctrl_type, None)
+        if replacement is not None:
+            controllers.append(replacement)
+            continue
         if not isinstance(cfg, UpperBodyZmqCtrlCfg):
             controllers.append(cfg.model_copy(deep=True))
             continue
@@ -80,6 +103,7 @@ def _xr_controllers(base, *, omnihand=False):
             )
         else:
             controllers.append(UpperBodyZmqCtrlCfg(**values))
+    controllers.extend(replacements.values())
     return controllers
 
 
