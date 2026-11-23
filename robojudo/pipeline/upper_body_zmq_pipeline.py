@@ -36,10 +36,8 @@ class UpperBodyZmqPipelineMixin:
         super().__init__(cfg=cfg)
         self._configure_upper_body_override()
         receiver = self._feedback_receiver()
-        if self._xr_posture_controller() is not None and (
-            cfg.robot != "x2" or receiver is None or not receiver.has_hands
-        ):
-            raise ValueError("XR-authorized posture requires X2 OmniHand upper-body feedback")
+        if self._xr_posture_controller() is not None and (cfg.robot != "x2" or receiver is None):
+            raise ValueError("XR-authorized posture requires X2 upper-body feedback")
         if receiver is not None and receiver.has_hands:
             logger.info("Upper-body completion checkpoints enabled before and after policy inference")
         if cfg.record.enabled:
@@ -337,13 +335,14 @@ class UpperBodyZmqPipelineMixin:
             latest = next(reversed(feedback._states.values()), None)
             if measured is None or baseline is None or latest is None or time.monotonic() > latest[0]:
                 raise ValueError("XR waist transition requires fresh robot feedback")
-            hands = receiver.hand_snapshot()
-            if not hands["fresh"]:
-                raise ValueError("XR waist transition requires fresh finger feedback")
-            measured = {**measured, **hands["positions"]}
             previous = {**baseline, WAIST_YAW_JOINT: old_yaw}
-            if receiver.pending is not None:
-                previous.update(receiver.pending[0]["positions"])
+            if receiver.has_hands:
+                hands = receiver.hand_snapshot()
+                if not hands["fresh"]:
+                    raise ValueError("XR waist transition requires fresh finger feedback")
+                measured = {**measured, **hands["positions"]}
+                if receiver.pending is not None:
+                    previous.update(receiver.pending[0]["positions"])
             arm_baseline = self._upper_body_filtered if desired is None else self._upper_body_previous
             previous.update(zip(self._upper_body_cfg.joint_names, arm_baseline.tolist(), strict=True))
             candidate = {**previous, WAIST_YAW_JOINT: yaw}

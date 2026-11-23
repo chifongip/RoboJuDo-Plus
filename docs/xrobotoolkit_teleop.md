@@ -1,24 +1,25 @@
-# XRoboToolkit integration
+# X2 XR teleoperation with RoboJuDo and XRoboToolkit
 
-RoboJuDo owns robot modes, walking, hardware, recording, and executable targets. A separate XR bridge reads
-XRoboToolkit PC Service input and solves arm IK using measured robot feedback. Both arm-only and OmniHand XR send desired targets to RoboJuDo's robot-authoritative executor.
-The robot profile selects the model and optional hand capability; both use the same protocol.
-Update RoboJuDo and its XR submodule together.
+RoboJuDo runs the X2 simulation or AimDK hardware pipeline, manages robot modes and locomotion, and validates
+and applies commands. The XR Bridge reads headset and controller data from XRoboToolkit PC Service, solves arm IK
+using measured robot feedback, and publishes desired targets over ZMQ. Update RoboJuDo and its XRoboToolkit
+submodule together so the protocol and model assets match.
 
-## Install
+## Install both environments
 
-Initialize the repository's pinned submodules. Keep RoboJuDo in its existing environment. From the repository root,
-create the separate Python 3.11 XR environment with both supported IK backends:
+Set up RoboJuDo using the [repository installation guide](../README.md). From the RoboJuDo-Plus root,
+initialize the pinned XRoboToolkit submodule and create the Python 3.11 bridge environment.
 
 ```bash
+git submodule update --init --recursive third_party/xrobotoolkit_teleop
 python scripts/install_xrobotoolkit_teleop.py
 ```
 
 The installer requires Conda, Linux x86_64/aarch64, and a system C++ compiler. It installs pinned native dependencies,
 Placo and LeRobot, and verifies imports and solver construction without opening XR or a viewer. Native build logs
 and the manifest are under `$CONDA_PREFIX/share/robojudo-xr/`. An existing environment requires `--reuse`; use
-`--name NAME` for another environment or `--jobs 1` on a memory-limited machine. Reactivate after installation
-so the installer's Conda native-runtime setting takes effect. No manual `PYTHONPATH` overlay is required.
+`--name NAME` for another environment or `--jobs 1` on a memory-limited machine. Activate the resulting Conda environment
+before running the bridge so its native-runtime settings take effect.
 
 For **all XR presets**, install and verify numeric executor support with the RoboJuDo environment's interpreter:
 
@@ -26,147 +27,105 @@ For **all XR presets**, install and verify numeric executor support with the Rob
 python scripts/install_xr_executor.py
 ```
 
-This installs the numeric Pinocchio/Coal dependencies and the shared XR model package without installing XR SDK/IK
-packages into RoboJuDo. The installer verifies both profiles. Simulation and hardware use the same executor and model identity checks.
-Rerun the executor installer after updating the submodule to clear older SDK/IK dependency errors in `pip check`.
+This installs the numeric Pinocchio/Coal dependencies and the shared XR model package. The installer verifies
+both profiles. Simulation and hardware use the same executor and model identity checks.
+Rerun the executor installer after updating the submodule to refresh the installed dependencies.
 
 Install and start XRoboToolkit PC Service separately, connect the headset/controllers, and enable headset pose streaming.
 
-## Run simulation
+## Choose a profile and tracking mode
 
-Use two terminals from the repository root:
+Choose one row. Use the simulation preset first, then the corresponding AimDK preset after completing [hardware
+preparation](#prepare-x2-hardware).
+
+| Tracking mode | Bridge `--robot` | Simulation preset | AimDK preset |
+|---|---|---|---|
+| Fixed heading or waist | `x2` | `x2_xrobotoolkit` | `x2_xrobotoolkit_real` |
+| Fixed heading or waist | `x2_omnihand` | `x2_xrobotoolkit_omnihand` | `x2_xrobotoolkit_omnihand_real` |
+| Pelvis IK | `x2` | `x2_xrobotoolkit_pelvis_ik` | `x2_xrobotoolkit_pelvis_ik_real` |
+| Pelvis IK | `x2_omnihand` | `x2_xrobotoolkit_omnihand_pelvis_ik` | `x2_xrobotoolkit_omnihand_pelvis_ik_real` |
+
+| Bridge `--tracking-reference` | XR input and behavior | IK backend |
+|---|---|---|
+| `fixed-heading` (default) | Captures horizontal headset heading when you engage the grips. Subsequent head motion leaves the reference fixed. | Placo (default) or LeRobot |
+| `waist` | Uses PICO full-body tracking to compensate for shared pelvis and controller motion. Changes the arm reference while posture stays under RoboJuDo control. | Placo (default) or LeRobot |
+| `pelvis-ik` | Uses PICO full-body tracking to control crouch and waist yaw alongside pelvis-relative arm targets. | Placo (default) or LeRobot |
+
+Complete PICO's native full-body calibration for `waist` and `pelvis-ik`.
+Waist-relative tracking checks both XR packet and body-frame freshness.
+See the [PICO calibration and body-tracking diagnostics](../third_party/xrobotoolkit_teleop/docs/agibot_x2.md#waist-relative-reference).
+
+## Launch RoboJuDo and the XR Bridge
+
+In the RoboJuDo environment, run the preset from the table. This example starts arm-only pelvis IK in simulation.
 
 ```bash
-# RoboJuDo environment: arm-only
-python scripts/run_pipeline.py -c x2_xrobotoolkit
-# Or arms and OmniHand
-python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand
+python scripts/run_pipeline.py -c x2_xrobotoolkit_pelvis_ik
 ```
 
+In a second terminal, activate the XR environment and select the matching bridge profile and tracking mode.
+
 ```bash
-# XR environment: match the selected robot profile
 conda activate robojudo-xr
-python -m xrobotoolkit_teleop.integrations.robojudo --robot x2
-# Or arms and OmniHand
-python -m xrobotoolkit_teleop.integrations.robojudo --robot x2_omnihand
+python -m xrobotoolkit_teleop.integrations.robojudo --robot x2 \
+  --tracking-reference pelvis-ik --ik-backend placo --scale-factor 1.0
 ```
 
-Placo is the default IK backend; use `--ik-backend lerobot` to select LeRobot. Both use the same XR environment.
-The simulation displays torso and requested hand frames; rejected requests may still appear as display-only targets.
+For the default fixed-heading mode, use the corresponding preset and omit `--tracking-reference`.
+For waist-relative tracking, use that same preset with `--tracking-reference waist`.
+Use `--ik-backend lerobot` to select LeRobot without changing the RoboJuDo preset.
+For a list of bridge options, run `python -m xrobotoolkit_teleop.integrations.robojudo --help`.
 
-Select `JOINT_DEFAULT` with keyboard `i` / joystick `Y`, wait for interpolation, then select `RL_DEFAULT` with `j` / `X`.
-Toggle arm tracking with `t` / joystick `L`. Release both XR grips before engagement. Hold a grip to move that arm;
-release to hold its issued target. XR `Y` returns both arms toward defaults. Joystick `Back` selects locomotion and
-`Start` selects mimic; XR tracking requires available locomotion control after interpolation.
+### Controls
 
-Targets are relative to the measured torso. Headset horizontal heading is captured at engagement; subsequent head
-motion does not move targets. OmniHand triggers control fingers independently of arm grips. HOME holds finger targets.
+With the robot supported and the work area clear on hardware, enter `JOINT_DEFAULT`, wait for interpolation,
+then enter `RL_DEFAULT` and enable XR tracking.
 
-### Pelvis IK with OmniHand
+| Action | Simulation keyboard | Simulation joystick | AimDK joystick |
+|---|---|---|---|
+| Enter `JOINT_DEFAULT` | `i` | `Y` | `RB+Y` |
+| Enter `RL_DEFAULT` | `j` | `X` | `RB+X` |
+| Toggle XR tracking | `t` | `L` | `L` |
+| Select locomotion | `]` | `Back` | `Back` |
+| Select mimic | `[` | `Start` | `Start` |
+| Enter damping | `l` | `B` | `RB+B` |
 
-Enable XR body tracking, then launch the pelvis IK simulation and bridge from separate environments:
+XR tracking requires an active locomotion policy and completed interpolation. Release both XR grips before
+engaging. Hold a grip to move its arm and release it to hold the issued target. With OmniHand, each trigger
+controls the corresponding fingers independently of the arm grips. XR `Y` requests HOME. Release both
+grips before resuming tracking. XR-button HOME requires a live XR stream. RoboJuDo can request arm HOME
+with XR offline while the bridge and robot feedback are available. In simulation, torso and hand target
+markers can include rejected requests.
 
-```bash
-# RoboJuDo environment
-python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_pelvis_ik
+### Pelvis IK controls
 
-# XR environment
-conda activate robojudo-xr
-python -m xrobotoolkit_teleop.integrations.robojudo --robot x2_omnihand --ik-backend lerobot \
-  --tracking-reference pelvis-ik
-```
+Either grip engages posture and its own arm. Keep one grip held while switching hands to preserve the
+posture reference. Crouch or rise to change the height target. Twist your shoulders relative to your pelvis
+to change preferred waist yaw. Both IK backends try that yaw first. If an active hand misses its goal,
+the solver can adjust yaw while favoring the operator's preference. Hand targets
+follow the robot pelvis as it crouches. Simulation and hardware limit posture commands to **0.2 m/s** in
+height and **1.0 rad/s** in waist yaw.
 
-Enter `JOINT_DEFAULT`, wait for interpolation, enter `RL_DEFAULT`, and enable XR tracking. Release both grips
-before engaging. Either grip engages posture and its own arm. Keeping one grip held while handing off preserves
-the posture reference. Triggers control fingers independently of grips.
+Height can update while arm IK is running. The bridge adopts a solved waist target after RoboJuDo acknowledges
+the corresponding upper-body command. When collision checking is enabled, RoboJuDo validates the combined
+waist and upper-body transition before submission.
 
-Crouch or rise to move the height target. Twist your shoulders relative to your pelvis to change preferred waist
-yaw. The solver can adjust yaw when an active hand misses its goal. Hand goals follow the robot pelvis during a
-crouch. The locomotion policy applies its configured height and waist slew rates.
+RoboJuDo gives manual posture input priority. Release both XR grips after manual takeover before re-engaging
+posture. Releasing both grips or losing body tracking stops new posture targets. The policy can finish ramping
+toward the last accepted target. Disabling XR freezes the posture command at its current value. XR `Y` requests
+arm and posture defaults, and the arm return continues until feedback confirms convergence. OmniHand fingers
+hold their issued targets during HOME.
 
-The bridge sends posture on the separate loopback port 8557 (`--posture-endpoint`) and sends arms and fingers
-on the existing upper-body stream. Height can update while arm IK is running. RoboJuDo validates posture against
-the current XR session and gives manual posture input priority. After manual takeover, release both grips before
-engaging posture again. Releasing both grips or losing body tracking stops new posture targets. The policy can
-finish ramping to the last accepted target. Explicitly disabling XR freezes the posture command at its current
-value. Press XR `Y` to request arm and posture defaults while the fingers hold their issued targets. The arm
-return continues after the button is released until robot feedback confirms convergence. Release both grips
-before resuming tracking.
+## Prepare X2 hardware
 
-The bridge adopts a solved waist target after RoboJuDo acknowledges the corresponding upper-body frame.
-With collision checking enabled, RoboJuDo checks the executable waist, arm, and finger transition together
-before submission. An expired or rejected transition holds the previous safe targets.
+Complete the AimDK and joystick setup, and source the AimDK environment on the robot host before starting
+the selected hardware preset. The XR hardware presets default to observer compensation mode `OFF`. For the
+initial hardware check, verify small motions, grip release, HOME, damping, and tracking and feedback loss.
+With OmniHand, also verify each trigger independently. [X2 AimDK setup](x2_sim2real.md)
 
-This preset requires the paired XRoboToolkit revision and the X2 OmniHand simulation assets.
+### OmniHand Pro through robot-side HCAN
 
-## Deployment settings
-
-The bridge CLI exposes `--robot`, `--ik-backend`, `--tracking-reference`, `--command-endpoint`,
-`--feedback-endpoint`, `--posture-endpoint`, `--scale-factor`, `--arm-velocity-limit`, and
-`--return-velocity-limit`. Upper-body endpoints default to loopback ports 8559
-(commands) and 8571 (feedback); edit the corresponding RoboJuDo controller endpoints for a multi-host deployment.
-Run only one bridge publisher.
-
-| Setting | Release default |
-|---|---:|
-| Control rate | 50 Hz |
-| Motion scale | 1.0 |
-| Arm / return speed cap | 8.0 / 1.0 rad/s |
-| Grip activation | greater than 0.9 |
-| XR / robot measurement freshness | 0.25 / 0.1 s |
-| Collision checking | Disabled; explicitly opt in |
-| Collision margin / activation distance | 0.02 / 0.08 m |
-
-Applicable model limits and robot caps also bound arm motion.
-
-Configure fingers in `XR_HAND_SETTINGS` in `robojudo/config/x2/x2_xrobotoolkit_cfg.py`:
-
-```python
-"hand_command_mode": "direct",  # "direct" (default) or "filtered"
-"hand_velocity_limit": 2.0,      # rad/s, applied in filtered mode
-```
-
-This shared configuration applies to both existing OmniHand simulation and hardware presets. There is no
-additional enable switch, launcher flag, or special preset. Restart RoboJuDo after changing it; the bridge
-validates and echoes the robot-owned settings through the existing executor handshake.
-
-- **Direct:** issue final finger targets within position bounds; device motor settings govern movement.
-- **Filtered:** apply the same robot-side EMA and independent per-joint velocity filter as the arms, using the
-  smaller of `hand_velocity_limit` and each joint's model velocity limit. Both use the existing `ema_alpha`
-  (0.0 in XR presets), position limits, and float32 rounding.
-
-The bridge sends final desired targets in either mode. Filtering advances once per fresh desired frame from
-the completed issued baseline, without accumulating movement allowance during gaps or pending writes. HOME
-holds fingers in both modes; collision checks and recording use actual issued targets after filtering.
-Software target ramps do not guarantee physical finger speed or stopping behavior. Revoking commands does not
-cancel movement toward a target already accepted by the device.
-
-Configure collision checking for all four presets in `XR_ARM_SETTINGS` in the same file:
-
-```python
-"executor_collision_checking": False,  # Set True to enable collision checking.
-```
-
-RoboJuDo owns this setting. Start the existing preset normally; neither the launcher nor the bridge has a
-collision override flag.
-
-Start the bridge normally. Validated feedback supplies the profile identity and collision policy; the bridge
-initializes the corresponding IK checks before publishing desired targets. The policy is fixed for the robot
-session. Changing it requires restarting RoboJuDo; a bridge cannot independently disable robot checks.
-
-Model mismatches, malformed policy, or enabled-check initialization failures block commands. Initialization and
-IK time count toward measurement freshness. Large direct finger changes can exceed the bounded collision-sampling
-budget and hold; use gradual trigger movement when checks are enabled. The executor does not search for smaller
-steps. Numeric collision defaults are shared internally. Disabling collision checks retains finite-value,
-position-limit, freshness, authorization and applicable velocity checks.
-
-## Real robot and hands
-
-Follow [X2 AimDK setup](x2_sim2real.md), then use `x2_xrobotoolkit_real` or `x2_xrobotoolkit_omnihand_real`.
-For pelvis IK use `x2_xrobotoolkit_omnihand_pelvis_ik_real` with the LeRobot bridge below. Real joystick
-preparation uses `RB+Y` and `RB+X`. Real presets inherit observer compensation mode `OFF`.
-
-For physical OmniHands, install the SDK in the robot's RoboJuDo environment and configure USB permissions:
+For physical OmniHands, install the SDK in the robot's RoboJuDo environment and configure USB permissions.
 
 ```bash
 python submodule_install.py omnihand_sdk
@@ -192,90 +151,93 @@ Stop all other SDK clients, then run the read-only identity check:
 ```bash
 python scripts/check_omnihand_hcan.py --config .local/omnihand.json
 export ROBOJUDO_OMNIHAND_CONFIG="$PWD/.local/omnihand.json"
-python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_real
 ```
 
-One spawned SDK process owns both adapters, with independent per-hand I/O threads. A combined command completes only
-after successful arm submission and both hand writes. A returned SDK call does not prove firmware acceptance,
-physical arrival or simultaneous movement. Partial failures invalidate outstanding authorization; they cannot roll
-back physical motion. Default receive/startup budgets remain 200 ms / 15 s and do not relax measurement freshness.
+## Configure endpoints
+
+The defaults support RoboJuDo and the XR Bridge on the same host. Run one bridge publisher per command
+stream. For separate hosts, replace `XR_HOST` and `ROBOT_HOST` with reachable addresses.
+
+| Stream | Default port | RoboJuDo controller and setting | XR Bridge option |
+|---|---|---|---|
+| Arm targets and optional finger targets | 8559 | `UpperBodyZmqCtrl` or `UpperBodyOmniHandZmqCtrl`, `endpoint = tcp://XR_HOST:8559` | `--command-endpoint 'tcp://*:8559'` |
+| Robot feedback | 8571 | Same upper-body controller, `feedback_endpoint = tcp://*:8571` | `--feedback-endpoint tcp://ROBOT_HOST:8571` |
+| Pelvis IK posture | 8557 | `LocomanipulationPostureZmqCtrl`, `endpoint = tcp://XR_HOST:8557` | `--posture-endpoint 'tcp://*:8557'` |
+
+The bridge binds the target streams and connects to feedback. RoboJuDo binds feedback and connects to the
+target streams.
+
+## Tune XR Bridge and executor settings
+
+| Setting | Default |
+|---|---:|
+| Control rate | 50 Hz |
+| Hand target translation multiplier in all tracking modes (XR Bridge `--scale-factor`) | 1.0 |
+| Arm / return speed cap | 8.0 / 1.0 rad/s |
+| Grip activation | greater than 0.9 |
+| XR / robot measurement freshness | 0.25 / 0.1 s |
+| Collision checking | Disabled; explicitly opt in |
+| Collision margin / activation distance | 0.02 / 0.08 m |
+
+Applicable model limits and robot caps also bound arm motion.
+
+Configure fingers in `XR_HAND_SETTINGS` in `robojudo/config/x2/x2_xrobotoolkit_cfg.py`:
+
+```python
+"hand_command_mode": "direct",  # "direct" (default) or "filtered"
+"hand_velocity_limit": 2.0,      # rad/s, applied in filtered mode
+```
+
+These settings apply to all OmniHand presets. Restart RoboJuDo after changing them. The bridge validates
+and echoes the robot-owned settings through the executor handshake.
+
+- **Direct:** issue final finger targets within position bounds; device motor settings govern movement.
+- **Filtered:** apply the same robot-side EMA and independent per-joint velocity filter as the arms, using the
+  smaller of `hand_velocity_limit` and each joint's model velocity limit. Both use the existing `ema_alpha`
+  (0.0 in XR presets), position limits, and float32 rounding.
+
+The bridge sends final desired targets in either mode. Filtering advances once per fresh desired frame from
+the completed issued baseline, without accumulating movement allowance during gaps or pending writes. HOME
+holds fingers in both modes; collision checks and recording use actual issued targets after filtering.
+Software target ramps do not guarantee physical finger speed or stopping behavior. Revoking commands does not
+cancel movement toward a target already accepted by the device.
+
+Configure collision checking for all X2 XR presets in `XR_ARM_SETTINGS` in the same file:
+
+```python
+"executor_collision_checking": False,  # Set True to enable collision checking.
+```
+
+Restart RoboJuDo after changing collision checking. The bridge reads the profile identity and collision policy
+from validated robot feedback and initializes the corresponding IK checks before publishing targets.
+
+Model mismatches, malformed policy, or enabled-check initialization failures block commands. Initialization and
+IK time count toward measurement freshness. Large direct finger changes can exceed the bounded collision-sampling
+budget and hold; use gradual trigger movement when checks are enabled. The executor does not search for smaller
+steps. Numeric collision defaults are shared internally. Disabling collision checks retains finite-value,
+position-limit, freshness, authorization and applicable velocity checks.
+
+## Command completion, recovery, and recording
+
+Arm-only commands complete after successful arm submission. OmniHand commands also require both hand writes.
+Both profiles advance the completed-command baseline and retain fresh waiting frames after completion.
+
+On OmniHand hardware, one SDK process owns both adapters and uses a separate I/O thread for each hand.
+Completion reports successful SDK calls. Physical motion can still be in progress. Partial failures revoke
+outstanding authorization. The SDK receive and startup budgets are 200 ms and 15 s, respectively. Feedback
+freshness uses its own deadline.
 
 Tracking loss or stale feedback holds issued targets. Transient recovery rebases XR references; startup, explicit
 mode changes and bridge restarts require grip release. Explicit tracking disable requests bounded arm HOME; if the
 bridge is offline, arms hold until fresh feedback permits return. Whole-robot safety states take priority.
 
-Arm-only commands complete after successful arm submission; OmniHand commands also require both hand writes.
-Both advance the same completed-command baseline, retaining fresh waiting desired frames after completion.
-
 Recording (`--record`, with the configured recorder service) stores fresh acknowledged tracking commands and measured
 positions, excluding HOME and outage holds. Combined command recording uses the completed issued baseline, including
 completion observed between control ticks.
 
-### Pelvis IK on X2 with OmniHand
+## Read the runtime logs
 
-Complete the AimDK and HCAN setup above and enable XR body tracking. Source the AimDK setup file in the RoboJuDo
-environment on the robot host and start the hardware preset.
-
-```bash
-export ROBOJUDO_OMNIHAND_CONFIG="$PWD/.local/omnihand.json"
-python scripts/run_pipeline.py -c x2_xrobotoolkit_omnihand_pelvis_ik_real
-```
-
-Start the pelvis IK bridge in a separate XR environment.
-
-```bash
-conda activate robojudo-xr
-python -m xrobotoolkit_teleop.integrations.robojudo --robot x2_omnihand --ik-backend lerobot \
-  --tracking-reference pelvis-ik
-```
-
-These commands use loopback endpoints. For a bridge on another host, use the following endpoint settings with
-the actual hostnames.
-
-| Stream | Robot controller setting | XR bridge argument |
-|---|---|---|
-| Posture | `LocomanipulationPostureZmqCtrl.endpoint = tcp://XR_HOST:8557` | `--posture-endpoint 'tcp://*:8557'` |
-| Arms and fingers | `UpperBodyOmniHandZmqCtrl.endpoint = tcp://XR_HOST:8559` | `--command-endpoint 'tcp://*:8559'` |
-| Feedback | `UpperBodyOmniHandZmqCtrl.feedback_endpoint = tcp://*:8571` | `--feedback-endpoint tcp://ROBOT_HOST:8571` |
-
-The hardware preset uses the same posture rate limits as the pelvis IK simulation, **0.2 m/s** for height and
-**1.0 rad/s** for waist yaw. With the robot supported and the work area clear, use `RB+Y` to enter `JOINT_DEFAULT`, wait for
-interpolation, then use `RB+X` to enter `RL_DEFAULT`. Release both XR grips and enable XR tracking with
-joystick `L`. For the first hardware check, use small crouch and twist movements with one grip, verify each
-finger trigger independently, then verify grip release, XR `Y` HOME, and the joystick damping command `RB+B`.
-Check tracking and feedback loss before trying larger motions.
-
-## Validation and migration
-
-Run focused controller/executor and bridge tests, then the two-process simulation suite:
-
-```bash
-python -m unittest discover -s tests -p test_install_xr_executor.py
-python -m unittest discover -s tests -p 'test_xr*.py'
-XROBOTOOLKIT_TEST_PYTHON=/path/to/robojudo-xr/bin/python \
-  python -m unittest discover -s tests -p test_xrobotoolkit_integration.py
-# Repeat with XROBOTOOLKIT_TEST_BACKEND=lerobot.
-```
-
-Physical acceptance remains required: verify provisional wrist mounts, joint ordering/signs, exact hand identities,
-low-speed operation, clutch release, HOME finger hold, recording, and XR/bridge/adapter interruptions. Simulation
-has no hand contacts and does not qualify grasp physics, hardware latency or 50 completed commands per second.
-Do not increase freshness timeouts to hide stale hardware measurements.
-
-| Removed setup | Release replacement |
-|---|---|
-| `_omnihand_real_direct`, `_direct_low_latency`, `_direct_executor` presets | `x2_xrobotoolkit_omnihand_real` |
-| `--authoritative-executor`, schema switches | Always robot-authoritative; profile selects optional hands |
-| Trace, queue, completion-observation and advanced timing flags | Internal release defaults |
-| Checked arm/OmniHand proposals (schemas 1/2) | Desired targets (schema 3); update both peers |
-| Bridge `--collision-checking` / launcher `--xr-collision-checking` | `XR_ARM_SETTINGS["executor_collision_checking"]` in `x2_xrobotoolkit_cfg.py` |
-| Hand velocity CLI override | `hand_velocity_limit` in the shared configuration, for filtered fingers |
-| `integrations.robojudo_x2` compatibility entrypoint | `integrations.robojudo` |
-| X2 retargeter/settings compatibility aliases | `ExternalStateRetargeter` and `TeleopSettings` |
-
-Non-XR controller protocols and standalone upstream demos retain their own behavior.
-
-The bridge and RoboJuDo print concise INFO summaries once per second, without extra flags:
+The bridge and RoboJuDo log INFO summaries once per second during operation.
 
 ```text
 XR: send=49.9 Hz | completion RTT=32.4 ms avg / 48.1 ms max | tracking
@@ -295,3 +257,42 @@ session/generation changes; logging does not gate command execution.
 
 RTT does not establish physical arrival or firmware acceptance. One-way publication-to-receipt latency requires
 synchronized clocks and is not reported. These summaries replace the local bridge loop-processing latency log.
+
+## Validate the setup
+
+In the RoboJuDo environment, run the installer and executor tests and the two-process simulation suite.
+
+```bash
+python -m unittest discover -s tests -p test_install_xr_executor.py
+python -m unittest discover -s tests -p 'test_xr*.py'
+XROBOTOOLKIT_TEST_PYTHON=/path/to/robojudo-xr/bin/python \
+  python -m unittest discover -s tests -p test_xrobotoolkit_integration.py
+# Set XROBOTOOLKIT_TEST_BACKEND=placo or lerobot to run every case with one backend.
+```
+
+In the XR environment, run the bridge tests from the RoboJuDo-Plus root.
+
+```bash
+python -m unittest discover -s third_party/xrobotoolkit_teleop/tests -p 'test_robojudo*.py'
+python -m unittest discover -s third_party/xrobotoolkit_teleop/tests -p test_pelvis_ik.py
+```
+
+Physical acceptance remains required: verify provisional wrist mounts, joint ordering/signs, exact hand identities,
+low-speed operation, clutch release, HOME finger hold, recording, and XR/bridge/adapter interruptions. Simulation
+has no hand contacts and does not qualify grasp physics, hardware latency or 50 completed commands per second.
+Do not increase freshness timeouts to hide stale hardware measurements.
+
+## Migrate older configurations
+
+| Removed setup | Release replacement |
+|---|---|
+| `_omnihand_real_direct`, `_direct_low_latency`, `_direct_executor` presets | `x2_xrobotoolkit_omnihand_real` |
+| `--authoritative-executor`, schema switches | Always robot-authoritative; profile selects optional hands |
+| Trace, queue, completion-observation and advanced timing flags | Internal release defaults |
+| Checked arm/OmniHand proposals (schemas 1/2) | Desired targets (schema 3); update both peers |
+| Bridge `--collision-checking` / launcher `--xr-collision-checking` | `XR_ARM_SETTINGS["executor_collision_checking"]` in `x2_xrobotoolkit_cfg.py` |
+| Hand velocity CLI override | `hand_velocity_limit` in the shared configuration, for filtered fingers |
+| `integrations.robojudo_x2` compatibility entrypoint | `integrations.robojudo` |
+| X2 retargeter/settings compatibility aliases | `ExternalStateRetargeter` and `TeleopSettings` |
+
+Non-XR controller protocols and standalone upstream demos retain their own behavior.

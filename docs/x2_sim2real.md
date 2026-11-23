@@ -15,6 +15,8 @@ The `x2`, `x2_real`, and locomanipulation presets use `X2LocomanipulationPipelin
 modes. The `x2_locomimic` presets use `X2LocomanipulationLocoMimicPipeline`, which adds locomotion/mimic policy
 interpolation to the same mode state machine.
 
+For XRoboToolkit presets, tracking modes, and bridge commands, see the [X2 XR teleoperation guide](xrobotoolkit_teleop.md).
+
 ## Deployment CPU Overhead
 
 The locomanipulation command display updates at 5 Hz by default, independently of
@@ -55,8 +57,8 @@ RoboJuDo subscribes to dex teleop's synchronized arm-and-hand stream on port 856
 `X2OmniHandLocomanipulationPipeline` leave the existing arm-only controller, simulation pipeline, and GR00T path
 unchanged. The old per-hand ports 5555/5556 and a standalone OmniHand ZMQ server are not used.
 Finite measured finger angles outside the SDK command limits do not stop startup or reconnection. Raw feedback
-is preserved; only the initial command baseline is clamped. See the
-[OmniHand HCAN guide](xrobotoolkit_teleop.md#omnihand-pro-through-robot-side-hcan) for shared runtime and recovery behavior.
+is preserved; only the initial command baseline is clamped. XRoboToolkit OmniHand presets use robot-local serial
+identities and a separate command stream. See the [XRoboToolkit HCAN setup](xrobotoolkit_teleop.md#omnihand-pro-through-robot-side-hcan).
 
 Verify the native backend explicitly after installation:
 

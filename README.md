@@ -124,7 +124,7 @@ python submodule_install.py ros2_joy_cpp
 # XR/dexterous-hand teleoperation support.
 python submodule_install.py dex_teleop
 
-# XRoboToolkit X2 arm teleoperation and XR SDK (optional; Python 3.11+ on Linux).
+# XRoboToolkit X2 teleoperation bridge (optional; Python 3.11 on Linux).
 python submodule_install.py xrobotoolkit_teleop
 
 # OmniHand Python SDK; selects the active CPython ABI and x86_64/aarch64 wheel.
@@ -137,19 +137,22 @@ python submodule_install.py casiahand_sdk
 python submodule_install.py phc
 ```
 
-XRoboToolkit setup creates a separate, teleop-only **`robojudo-xr`** Conda environment with Python 3.11,
+XRoboToolkit setup creates a separate **`robojudo-xr`** Conda environment with Python 3.11,
 Placo, and LeRobot, including compilation and permanent registration of the native symbolic bindings.
 It requires Linux x86_64/aarch64, Conda, and `g++`. It does not install RoboJuDo, other robot SDKs, or Torch.
 
 ```bash
+# Run from the RoboJuDo environment.
+git submodule update --init --recursive third_party/xrobotoolkit_teleop
+python scripts/install_xr_executor.py
 python scripts/install_xrobotoolkit_teleop.py
 conda activate robojudo-xr
 ```
 
 An existing target is preserved unless `--reuse` is supplied; use `--name NAME` for another environment name.
-The `x2_xrobotoolkit` and `x2_xrobotoolkit_real` presets run in the existing RoboJuDo environment and communicate
-with the XR bridge over ZMQ. Both IK methods run in the same XR environment. OmniHand integration is deferred.
-See the [XRoboToolkit setup guide](docs/xrobotoolkit_teleop.md) for verification and launch commands.
+X2 supports arm-only and OmniHand profiles in simulation and on AimDK hardware. Both profiles support fixed-heading,
+waist-relative, and pelvis IK tracking. See the [X2 XR teleoperation guide](docs/xrobotoolkit_teleop.md) for the
+preset matrix, launch commands, and hardware preparation.
 
 The optional installers may require an active Conda environment and external SDKs. See:
 

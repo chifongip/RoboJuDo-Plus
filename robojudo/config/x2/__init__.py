@@ -19,6 +19,8 @@ from .x2_xrobotoolkit_cfg import (
     x2_xrobotoolkit_omnihand_pelvis_ik,
     x2_xrobotoolkit_omnihand_pelvis_ik_real,
     x2_xrobotoolkit_omnihand_real,
+    x2_xrobotoolkit_pelvis_ik,
+    x2_xrobotoolkit_pelvis_ik_real,
     x2_xrobotoolkit_real,
 )
 
@@ -38,9 +40,11 @@ __all__ = [
     "x2_omnihand_locomanipulation_real",
     "x2_real",
     "x2_xrobotoolkit",
-    "x2_xrobotoolkit_real",
     "x2_xrobotoolkit_omnihand",
     "x2_xrobotoolkit_omnihand_pelvis_ik",
     "x2_xrobotoolkit_omnihand_pelvis_ik_real",
     "x2_xrobotoolkit_omnihand_real",
+    "x2_xrobotoolkit_pelvis_ik",
+    "x2_xrobotoolkit_pelvis_ik_real",
+    "x2_xrobotoolkit_real",
 ]

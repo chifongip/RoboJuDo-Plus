@@ -1,7 +1,10 @@
 """X2 XR teleoperation presets sharing robot-owned arm and finger settings."""
 
+from typing import TypeVar
+
 from robojudo.config import ASSETS_DIR, cfg_registry
 from robojudo.controller.ctrl_cfgs import (
+    CtrlCfg,
     JoystickCtrlCfg,
     KeyboardCtrlCfg,
     LocomanipulationPostureZmqCtrlCfg,
@@ -54,6 +57,8 @@ XRHandControllers = list[
     | LocomanipulationPostureZmqCtrlCfg
 ]
 
+_ControllerCfg = TypeVar("_ControllerCfg", bound=CtrlCfg)
+
 
 def _xr_controllers(base, *, omnihand=False):
     controllers = []
@@ -78,12 +83,12 @@ def _xr_controllers(base, *, omnihand=False):
     return controllers
 
 
-def _pelvis_ik_controllers(base) -> XRHandControllers:
+def _pelvis_ik_controllers(controllers: list[_ControllerCfg]) -> list[_ControllerCfg]:
     return [
         cfg.model_copy(deep=True, update={"xr_authorized": True})
         if isinstance(cfg, LocomanipulationPostureZmqCtrlCfg)
         else cfg.model_copy(deep=True)
-        for cfg in base.ctrl
+        for cfg in controllers
     ]
 
 
@@ -95,10 +100,28 @@ class x2_xrobotoolkit(x2_locomimic_observer):
 
 
 @cfg_registry.register
+class x2_xrobotoolkit_pelvis_ik(x2_xrobotoolkit):
+    """Pelvis-relative XR arms and session-authorized posture in arm-only simulation."""
+
+    loco_policy: X2LocomanipulationPolicyCfg = x2_xrobotoolkit().loco_policy.model_copy(update=PELVIS_IK_POSTURE_RATES)
+    ctrl: XRArmControllers = _pelvis_ik_controllers(x2_xrobotoolkit().ctrl)
+
+
+@cfg_registry.register
 class x2_xrobotoolkit_real(x2_locomimic_real_observer):
     """Arm-only XR hardware deployment through AimDK."""
 
     ctrl: XRArmControllers = _xr_controllers(x2_locomimic_real_observer())
+
+
+@cfg_registry.register
+class x2_xrobotoolkit_pelvis_ik_real(x2_xrobotoolkit_real):
+    """Pelvis-relative XR arms and session-authorized posture through AimDK."""
+
+    loco_policy: X2LocomanipulationPolicyCfg = x2_xrobotoolkit_real().loco_policy.model_copy(
+        update=PELVIS_IK_POSTURE_RATES
+    )
+    ctrl: XRArmControllers = _pelvis_ik_controllers(x2_xrobotoolkit_real().ctrl)
 
 
 @cfg_registry.register
@@ -121,7 +144,7 @@ class x2_xrobotoolkit_omnihand_pelvis_ik(x2_xrobotoolkit_omnihand):
     loco_policy: X2LocomanipulationPolicyCfg = x2_xrobotoolkit_omnihand().loco_policy.model_copy(
         update=PELVIS_IK_POSTURE_RATES
     )
-    ctrl: XRHandControllers = _pelvis_ik_controllers(x2_xrobotoolkit_omnihand())
+    ctrl: XRHandControllers = _pelvis_ik_controllers(x2_xrobotoolkit_omnihand().ctrl)
 
 
 @cfg_registry.register
@@ -138,4 +161,4 @@ class x2_xrobotoolkit_omnihand_pelvis_ik_real(x2_xrobotoolkit_omnihand_real):
     loco_policy: X2LocomanipulationPolicyCfg = x2_xrobotoolkit_omnihand_real().loco_policy.model_copy(
         update=PELVIS_IK_POSTURE_RATES
     )
-    ctrl: XRHandControllers = _pelvis_ik_controllers(x2_xrobotoolkit_omnihand_real())
+    ctrl: XRHandControllers = _pelvis_ik_controllers(x2_xrobotoolkit_omnihand_real().ctrl)
