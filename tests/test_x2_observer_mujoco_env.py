@@ -9,8 +9,9 @@ from robojudo.config.config_manager import ConfigManager
 from robojudo.config.x2 import x2_locomimic, x2_locomimic_observer
 from robojudo.config.x2.observer_parameters import JOINT_NAMES
 from robojudo.environment import env_registry
-from robojudo.pipeline.four_mode_pipeline import ControlMode, FourModePipelineMixin
+from robojudo.pipeline.four_mode_pipeline import ControlMode
 from robojudo.pipeline.rl_loco_mimic_pipeline import PolicyInterpManager
+from robojudo.pipeline.x2_locomanipulation_pipeline import X2FourModePipelineMixin
 from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
 
 
@@ -125,7 +126,7 @@ class InteractiveObserverTests(unittest.TestCase):
         np.testing.assert_array_equal(self.env._observer.observer.kp, self.env.stiffness[self.arms])
 
     def test_pipeline_policy_and_mode_gates(self):
-        pipeline = FourModePipelineMixin.__new__(FourModePipelineMixin)
+        pipeline = X2FourModePipelineMixin.__new__(X2FourModePipelineMixin)
         pipeline.env = self.env
         inner = X2LocomanipulationPolicy.__new__(X2LocomanipulationPolicy)
         pipeline._inner_policy = lambda: inner

@@ -142,9 +142,9 @@ def main():
                             break
     finally:
         try:
-            # Do not leave X2 native publishers alive while other teardown work
-            # runs or raises. This also covers interruption and preparation errors.
-            if cfg.env.env_type == "AgiBotCppEnv":
+            if cfg.env.env_type == "AgiBotCppEnv" or (
+                cfg.env.env_type == "UnitreeCppEnv" and getattr(pipeline.env, "observer_enabled", False)
+            ):
                 pipeline.env.shutdown()
         finally:
             try:
@@ -152,9 +152,14 @@ def main():
                 if close_recording is not None:
                     close_recording()
             finally:
-                ctrl_manager = getattr(pipeline, "ctrl_manager", None)
-                if ctrl_manager is not None:
-                    ctrl_manager.close()
+                try:
+                    ctrl_manager = getattr(pipeline, "ctrl_manager", None)
+                    if ctrl_manager is not None:
+                        ctrl_manager.close()
+                finally:
+                    debug_logger = getattr(pipeline, "debug_logger", None)
+                    if debug_logger is not None:
+                        debug_logger.close()
 
 
 if __name__ == "__main__":

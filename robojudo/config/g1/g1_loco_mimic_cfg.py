@@ -21,6 +21,7 @@ from .ctrl.g1_motion_ctrl_cfg import (  # noqa: F401
 )
 from .ctrl.g1_twist_redis_ctrl_cfg import G1TwistRedisCtrlCfg  # noqa: F401
 from .env.g1_dummy_env_cfg import G1DummyEnvCfg  # noqa: F401
+from .env.g1_env_cfg import G1_23_ARM_JOINT_NAMES
 from .env.g1_mujuco_env_cfg import G1_12MujocoEnvCfg, G1_23MujocoEnvCfg, G1MujocoEnvCfg  # noqa: F401
 from .env.g1_real_env_cfg import G1_23RealEnvCfg, G1RealEnvCfg, G1UnitreeCfg  # noqa: F401
 from .pipeline.g1_loco_mimic_pipeline_cfg import (
@@ -162,7 +163,7 @@ class g1_23_locomanipulation_locomimic(G1Locomanipulation23LocoMimicPipelineCfg)
         elastic_band=ElasticBandCfg(body_name="torso_link"),
     )
     ctrl: list[JoystickCtrlCfg | KeyboardCtrlCfg | UpperBodyZmqCtrlCfg] = (
-        _g1_locomanipulation_locomimic_sim_ctrl(G1Locomanipulation23ObsDoF().joint_names[13:])
+        _g1_locomanipulation_locomimic_sim_ctrl(list(G1_23_ARM_JOINT_NAMES))
     )
     loco_policy: G1Locomanipulation23PolicyCfg = G1Locomanipulation23PolicyCfg()
     mimic_policies: list[G1BeyondMimicPolicyCfg] = _g1_locomanipulation_mimic_policies(True)

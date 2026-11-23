@@ -373,6 +373,10 @@ class AgiBotCppEnv(Environment):
         self._configure_observer_order(self.cfg_env.arm_joint_names)
         logger.warning("Observer %s: nominal model is simulation-derived and not hardware-qualified", cfg.mode)
 
+    @property
+    def observer_enabled(self) -> bool:
+        return getattr(self, "_observer", None) is not None
+
     def get_observer_status(self):
         """Command diagnostics only; issued effort is not measured actuator torque."""
         observer = getattr(self, "_observer", None)

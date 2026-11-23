@@ -11,7 +11,8 @@ Algorithm selection is explicit and independent of the environment.
 | `LinearizedDisturbanceObserver` | `robojudo/utils/observers/linearized.py` | Historical local-gain estimation, symmetric slew and original anti-windup |
 | `NonlinearDisturbanceObserver` | `robojudo/utils/observers/nonlinear.py` | Bounded finite-residual estimation, separate release slew and directional unwinding |
 | X2 parameter preset | `robojudo/config/x2/observer_parameters.py` | Frozen X2 model coefficients and joint order |
-| Environment integration | MuJoCo or AimDK environment | Acquire feedback, issue corrections, acknowledge admitted commands, and enforce safety |
+| G1 parameter preset | `robojudo/config/g1/observer_parameters.py` | Fitted 23-DOF G1 arm model and joint order |
+| Environment integration | MuJoCo, AimDK, or Unitree C++ environment | Acquire feedback, issue corrections, acknowledge admitted commands, and enforce safety |
 
 Both algorithms share the nominal dynamics in `observers/model.py`; neither
 inherits the other's estimator or limiting behavior. The core/runtime import no
@@ -60,12 +61,18 @@ at the growth rate. OFF and SHADOW always return zero issued correction; SHADOW
 still estimates using acknowledged zero effort. Changing a source configuration
 does not reconfigure a running observer: rebuild it and reset its history.
 
-The registered X2 presets use the same nonlinear algorithm and parameters:
+The registered presets share the nonlinear algorithm. Each robot supplies its
+own ordered joint names and nominal dynamics.
 
 | Preset | Algorithm | Mode | Growth / release (Nm/s) |
 | --- | --- | --- | --- |
 | `x2_locomimic_observer` | nonlinear | ACTIVE | 2 / 16 |
 | `x2_locomimic_real_observer` | nonlinear | OFF | 2 / 16 |
+| `g1_23_locomanipulation_locomimic_observer` | nonlinear | ACTIVE | 2 / 16 |
+| `g1_23_locomanipulation_locomimic_real_observer` | nonlinear | OFF | 2 / 16 |
+
+See the [G1 observer guide](g1_observer.md) and [X2 interactive observer guide](x2_interactive_observer.md)
+for robot-specific setup and validation.
 
 Base hardware presets use `observer=None` to disable the feature. A configured
 OFF observer also disables it. Simulation may use its model's actuator bounds
@@ -107,17 +114,20 @@ not share an epoch with `now`. Repeated samples cannot adapt estimates. New
 samples replay accepted target/effort segments over each joint's receive interval.
 Intervals without sufficient history initialize without adaptation. Reset clears
 both sample and command history. Environments choose the allowed interval:
-MuJoCo uses five control periods; AimDK uses the smaller command/state timeout.
+MuJoCo uses five control periods. AimDK and Unitree use the shorter of the
+command and state timeouts.
 
-AimDK additionally restricts observers to exactly its configured arm-joint set
-and maps corrections, bounds and receipts into/out of native arm order. These
-restrictions live in the environment, not the generic runtime. Existing native
-freshness, generation, ownership, watchdog and lifecycle checks remain in place.
-The current X2 pipeline's policy eligibility rules are unchanged; a generic core
-does not automatically enable compensation for other robot/policy combinations.
+AimDK and Unitree enforce their arm-joint allowlists in the environment and
+map corrections, bounds, and receipts to and from native arm order. The
+hardware adapters enforce freshness, reset generations, and watchdog timeouts.
+The shared four-mode pipeline handles mode, interpolation, and policy-change
+resets. Robot mixins opt their supported Locomanipulation policy families in
+through `_supports_observer_policy(policy)`. The environment receives the final
+target after upper-body overrides.
 
-Both environments expose `reset_observer()`, `set_observer_eligible(bool)` and
-`get_observer_status()`. Status includes `algorithm`, configured joint names,
+Observer environments expose `observer_enabled`, `reset_observer()`,
+`set_observer_eligible(bool)` and `get_observer_status()`. Status includes
+`algorithm`, configured joint names,
 estimate, proposed/headroom-limited/issued corrections, prediction, innovation
 and limiting masks. Nonlinear-only diagnostics are present for that algorithm.
 Returned arrays are copied lists. Issued correction is a command diagnostic,

@@ -13,6 +13,7 @@ from robojudo.config.observer_cfg import JointObserverCfg
 from robojudo.config.x2.observer_parameters import JOINT_NAMES, selected_observer_parameters
 from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
 from robojudo.pipeline.four_mode_pipeline import ControlMode, FourModePipelineMixin
+from robojudo.pipeline.x2_locomanipulation_pipeline import X2FourModePipelineMixin
 from robojudo.utils.observers import JointObserver
 
 
@@ -562,7 +563,7 @@ class ObserverPolicyGateTests(unittest.TestCase):
         from robojudo.policy.x2_gr00t_locomanipulation_policy import X2Gr00tLocomanipulationPolicy
         from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
 
-        pipeline = FourModePipelineMixin.__new__(FourModePipelineMixin)
+        pipeline = X2FourModePipelineMixin.__new__(X2FourModePipelineMixin)
         pipeline.env = environment()
         for policy_class in (X2LocomanipulationPolicy, X2Gr00tLocomanipulationPolicy, object):
             inner = policy_class.__new__(policy_class)

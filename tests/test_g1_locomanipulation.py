@@ -179,6 +179,9 @@ class TestG1Locomanipulation(unittest.TestCase):
         with self.assertRaisesRegex(FloatingPointError, "non-finite"):
             env.step(np.full(env.num_dofs, np.nan))
         self.assertEqual(env.unitree.calls[-1], ("damping", 5.0))
+        with self.assertRaisesRegex(ValueError, "PD target must have shape"):
+            env.step(np.zeros((env.num_dofs, 1)))
+        self.assertEqual(env.unitree.calls[-1], ("damping", 5.0))
         with self.assertRaisesRegex(ValueError, "non-negative"):
             env.command_damping(-1.0)
 

@@ -43,6 +43,10 @@ class ObserverMujocoEnv(MujocoEnv):
             self._observer.reset()
         self._last_observer_log_time = float("-inf")
 
+    @property
+    def observer_enabled(self) -> bool:
+        return self._observer is not None
+
     def set_observer_eligible(self, eligible):
         eligible = bool(eligible)
         if eligible != self._observer_eligible:

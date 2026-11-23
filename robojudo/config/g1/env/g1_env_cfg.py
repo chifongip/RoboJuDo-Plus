@@ -121,6 +121,10 @@ class G1_23DoF(G1_29DoF):
     _subset_joint_names: list[str] | None = [G1_29DoF().joint_names[index] for index in G1_23_DOF_INDICES]
 
 
+G1_23_ARM_JOINT_NAMES = tuple(G1_23DoF().joint_names[13:])
+G1_29_ARM_JOINT_NAMES = tuple(G1_29DoF().joint_names[15:])
+
+
 class G1_12DoF(G1_29DoF):
     # num_dofs as 12
     _subset: bool = True  # if True, simplely inheritance & pick

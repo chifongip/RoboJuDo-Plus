@@ -232,10 +232,4 @@ class LocomanipulationLocoMimicPipelineMixin:
             finally:
                 self._sync_observer_eligibility()
         if self.cfg.debug.log_obs:
-            self.debug_logger.log(
-                env_data=env_data,
-                ctrl_data=ctrl_data,
-                extras=extras,
-                pd_target=pd_target,
-                timestep=self.timestep,
-            )
+            self._log_control_step(env_data, ctrl_data, extras, pd_target)
