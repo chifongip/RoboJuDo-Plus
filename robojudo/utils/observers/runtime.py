@@ -27,7 +27,18 @@ class _PreparedHistory:
 
 
 class JointObserver:
-    def __init__(self, cfg, joint_names, stiffness, damping, *, max_dt, actuator_limits=None, control_dt=0.02):
+    def __init__(
+        self,
+        cfg,
+        joint_names,
+        stiffness,
+        damping,
+        *,
+        max_dt,
+        actuator_limits=None,
+        control_dt=0.02,
+        receipt_float32=False,
+    ):
         # Revalidate mutable Pydantic configurations at the runtime boundary.
         cfg = type(cfg).model_validate(cfg.model_dump())
         if not np.isscalar(max_dt) or not np.isfinite(max_dt) or max_dt <= 0:
@@ -39,6 +50,7 @@ class JointObserver:
         if set(cfg.joint_names) - set(joint_names):
             raise ValueError("Observer joints must belong to the environment")
         self._mode = cfg.mode
+        self._receipt_float32 = receipt_float32
         self.algorithm = cfg.algorithm
         self._feedback_shape = (len(joint_names),)
         self.joint_names = list(cfg.joint_names)
@@ -88,6 +100,7 @@ class JointObserver:
         self.proposed_nm = np.zeros(self._shape)
         self.limited_nm = np.zeros(self._shape)
         self.issued_nm = np.zeros(self._shape)
+        self._downstream_limited = np.zeros(self._shape, dtype=bool)
 
     def _prepare_history(self, qd, stamps):
         """Prepare receive-interval geometry once for all candidate disturbances.
@@ -205,6 +218,8 @@ class JointObserver:
                 lower = np.minimum(0.0, -self.observer.torque_limits - pd)
                 upper = np.maximum(0.0, self.observer.torque_limits - pd)
                 self.limited_nm = np.clip(self.proposed_nm, lower, upper)
+                if self._receipt_float32:
+                    self._downstream_limited.fill(False)
             self.last_time = now
         except (TypeError, ValueError, FloatingPointError, OverflowError):
             self.reset()
@@ -218,6 +233,8 @@ class JointObserver:
             issued = np.asarray(effort, dtype=float)
             if issued.shape != self._shape:
                 raise ValueError("Command receipt must match observer joints")
+            if self._receipt_float32 and not np.isfinite(issued).all():
+                raise ValueError("Command receipt effort must be finite")
             issued = issued.copy()
             if self.mode == "ACTIVE" and (
                 np.any(issued < np.minimum(0, self.limited_nm)) or np.any(issued > np.maximum(0, self.limited_nm))
@@ -225,7 +242,10 @@ class JointObserver:
                 raise ValueError("Command receipt exceeds or reverses the requested correction")
             if self.mode != "ACTIVE" and np.any(issued != 0):
                 raise ValueError("Non-active observer cannot acknowledge nonzero torque")
-            self.observer.acknowledge_effort(issued, freeze_limited_estimate=self.mode != "SHADOW")
+            blocked_direction = self._float32_blocked_direction(issued) if self._receipt_float32 else None
+            self.observer.acknowledge_effort(
+                issued, freeze_limited_estimate=self.mode != "SHADOW", blocked_direction=blocked_direction
+            )
             self.issued_nm = issued
             if command_time is not None:
                 if not np.isscalar(command_time) or not np.isfinite(command_time):
@@ -243,10 +263,22 @@ class JointObserver:
             self.reset()
             raise
 
+    def _float32_blocked_direction(self, issued):
+        if self.mode == "ACTIVE":
+            # Unitree encodes the admitted effort without increasing its magnitude.
+            encoded = self.limited_nm.astype(np.float32)
+            rounded_outward = np.abs(encoded) > np.abs(self.limited_nm)
+            encoded[rounded_outward] = np.nextafter(encoded[rounded_outward], np.float32(0))
+            self._downstream_limited = encoded != issued
+        limited = (self.proposed_nm != self.limited_nm) | self._downstream_limited
+        return np.where(limited, np.sign(self.proposed_nm - issued), 0)
+
     def log_effort(self, logger):
         estimate = self.observer.estimated_disturbance_nm
         at_bound = np.isclose(np.abs(estimate), self.observer.limits, rtol=0, atol=1e-3)
-        limited = self.observer.antiwindup | ~np.isclose(self.proposed_nm, self.issued_nm, rtol=0, atol=1e-6)
+        limited = self.observer.antiwindup
+        if not self._receipt_float32:
+            limited = limited | ~np.isclose(self.proposed_nm, self.issued_nm, rtol=0, atol=1e-6)
         logger.info(
             "Observer %s Nm: est=[%s] issued=[%s] bound=%d limited=%d",
             self.mode,
@@ -274,7 +306,9 @@ class JointObserver:
                 abs(model.estimated_disturbance_nm), model.limits, rtol=0, atol=1e-3
             ).tolist(),
             "headroom_limited": (self.proposed_nm != self.limited_nm).tolist(),
-            "downstream_limited": (self.limited_nm != self.issued_nm).tolist(),
+            "downstream_limited": (
+                self._downstream_limited if self._receipt_float32 else self.limited_nm != self.issued_nm
+            ).tolist(),
         }
         for attribute in (
             "desired_nm",

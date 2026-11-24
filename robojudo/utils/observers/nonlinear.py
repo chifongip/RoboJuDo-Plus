@@ -104,15 +104,17 @@ class NonlinearDisturbanceObserver(JointDynamics):
         retained = np.where(old * blocked_direction >= 0, old, 0)
         return -np.where(outward, retained, new)
 
-    def acknowledge_effort(self, issued_effort, *, freeze_limited_estimate=True):
+    def acknowledge_effort(self, issued_effort, *, freeze_limited_estimate=True, blocked_direction=None):
         issued = np.asarray(issued_effort, dtype=float)
         if issued.shape != self.kp.shape or not np.isfinite(issued).all() or np.any(abs(issued) > self.limits):
             self.reset()
             raise ValueError("Issued effort must be finite and within observer bounds")
-        limited = issued != self.effort
+        limited = issued != self.effort if blocked_direction is None else blocked_direction != 0
         if freeze_limited_estimate:
+            if blocked_direction is None:
+                blocked_direction = np.sign(self.effort - issued)
             self.estimated_disturbance_nm = self._allow_unwinding(
-                self._estimate_before_update, self.estimated_disturbance_nm, np.sign(self.effort - issued)
+                self._estimate_before_update, self.estimated_disturbance_nm, blocked_direction
             )
         self.antiwindup |= limited
         self.effort = issued.copy()

@@ -21,16 +21,26 @@ class FakeObserverController:
         self.generation = 0
         self.commands = []
         self.generation_changed = False
+        self.command_time_sec = 10.005
+        self.clip_one_float32_step = False
 
     def get_safety_status(self):
         return SimpleNamespace(reset_generation=self.generation, latched=False)
 
     def step(self, positions, efforts=None, generation=None):
         self.commands.append((positions, efforts, generation))
+        issued = None
+        if efforts is not None:
+            rounded = np.asarray(efforts, dtype=np.float32)
+            toward_zero = np.nextafter(rounded, np.float32(0))
+            issued = np.where(np.abs(rounded) > np.abs(efforts), toward_zero, rounded)
+            if self.clip_one_float32_step:
+                issued[:2] = np.nextafter(issued[:2], np.float32(0))
+            issued = issued.tolist()
         return SimpleNamespace(
-            command_time_sec=10.005,
+            command_time_sec=self.command_time_sec,
             reset_generation=None if generation is None else generation + self.generation_changed,
-            arm_efforts=efforts,
+            arm_efforts=issued,
         )
 
     def clear_arm_effort(self):
@@ -150,6 +160,93 @@ class G1RealObserverTests(unittest.TestCase):
         zeros = ",".join(["0.0"] * len(OBSERVED_SLOTS))
         message = f"Observer SHADOW Nm: est=[{zeros}] issued=[{zeros}] bound=0 limited=0"
         self.assertEqual([record.getMessage() for record in captured.records], [message, message])
+
+    def step_observer_sample(self, env, elapsed, velocity):
+        env._observer_snapshot_started = 20.0 + elapsed
+        env.robot_state.received_time_sec = 10.0 + elapsed
+        env.unitree.command_time_sec = env.robot_state.received_time_sec
+        env._dof_vel[env._observer.indices[:2]] = [-velocity, velocity]
+        with patch.object(unitree_cpp_env.time, "monotonic", return_value=env._observer_snapshot_started):
+            env.step(env._dof_pos)
+
+    def test_active_distinguishes_float32_rounding_from_clipping(self):
+        for algorithm in ("linearized", "nonlinear"):
+            for clipped in (False, True):
+                with self.subTest(algorithm=algorithm, clipped=clipped):
+                    cfg = self.observer_preset().env
+                    cfg.observer.algorithm = algorithm
+                    if algorithm == "linearized":
+                        cfg.observer.release_slew_nm_s = None
+                    env, _ = self.make_environment("ACTIVE", cfg)
+                    self.step_observer_sample(env, 0, 0)
+                    env.unitree.clip_one_float32_step = clipped
+                    env._last_observer_log_time = float("-inf")
+                    with self.assertLogs(unitree_cpp_env.logger, level="INFO") as captured:
+                        self.step_observer_sample(env, 0.02, 0.12)
+
+                    status = env.get_observer_status()
+                    proposed = np.asarray(status["proposed_nm"][:2])
+                    issued = np.asarray(status["issued_nm"][:2])
+                    np.testing.assert_array_equal(np.sign(issued), [1, -1])
+                    self.assertTrue(np.all(np.abs(issued) < np.abs(proposed)))
+                    np.testing.assert_array_equal(status["headroom_limited"], False)
+                    expected_flags = [clipped, clipped, *([False] * (len(OBSERVED_SLOTS) - 2))]
+                    self.assertEqual(status["downstream_limited"], expected_flags)
+                    self.assertEqual(status["antiwindup"], expected_flags)
+                    estimate = status["estimated_disturbance_nm"][:2]
+                    np.testing.assert_array_equal(np.sign(estimate), [0, 0] if clipped else [-1, 1])
+                    np.testing.assert_array_equal(env._observer.command_history[-1][2], status["issued_nm"])
+                    np.testing.assert_array_equal(env._observer.observer.effort, status["issued_nm"])
+                    self.assertTrue(captured.records[0].getMessage().endswith(f"limited={2 if clipped else 0}"))
+
+    def test_shadow_zero_effort_is_not_reported_as_limiting(self):
+        env, _ = self.make_environment("SHADOW")
+        self.step_observer_sample(env, 0, 0)
+        env._last_observer_log_time = float("-inf")
+        with self.assertLogs(unitree_cpp_env.logger, level="INFO") as captured:
+            self.step_observer_sample(env, 0.02, 0.12)
+
+        status = env.get_observer_status()
+        np.testing.assert_array_equal(np.sign(status["estimated_disturbance_nm"][:2]), [-1, 1])
+        np.testing.assert_array_equal(status["issued_nm"], 0)
+        np.testing.assert_array_equal(status["downstream_limited"], False)
+        np.testing.assert_array_equal(status["antiwindup"], False)
+        self.assertTrue(captured.records[0].getMessage().endswith("limited=0"))
+
+    def test_active_nonlinear_estimate_unwinds_under_genuine_clipping(self):
+        env, _ = self.make_environment("ACTIVE")
+        self.step_observer_sample(env, 0, 0)
+        env._observer.observer.estimated_disturbance_nm[:2] = [-0.5, 0.5]
+        env.unitree.clip_one_float32_step = True
+        self.step_observer_sample(env, 0.02, 0)
+
+        status = env.get_observer_status()
+        estimate = np.asarray(status["estimated_disturbance_nm"][:2])
+        np.testing.assert_array_equal(status["downstream_limited"][:2], True)
+        np.testing.assert_array_equal(np.sign(estimate), [-1, 1])
+        self.assertTrue(np.all(np.abs(estimate) < 0.5))
+
+    def test_invalid_active_receipts_enter_damping(self):
+        count = len(OBSERVED_SLOTS)
+        for invalid, reason in (
+            ([0.0], "match observer joints"),
+            ([float("nan")] * count, "must be finite"),
+            ([1.0, *([0.0] * (count - 1))], "exceeds or reverses"),
+            ([-0.01, *([0.0] * (count - 1))], "exceeds or reverses"),
+        ):
+            with self.subTest(reason=reason):
+                env, _ = self.make_environment("ACTIVE")
+                self.step_observer_sample(env, 0, 0)
+                receipt = SimpleNamespace(
+                    arm_efforts=invalid, command_time_sec=10.02, reset_generation=env.unitree.generation
+                )
+                with (
+                    patch.object(env.unitree, "step", return_value=receipt),
+                    self.assertRaisesRegex(ValueError, reason),
+                ):
+                    self.step_observer_sample(env, 0.02, 0.12)
+                self.assertEqual(env.unitree.commands[-1], ("damping", env.cfg_env.unitree.shutdown_damping))
+                self.assertFalse(env._observer.command_history)
 
     def test_full_g1_arm_commands_follow_observer_joint_order(self):
         baseline = ConfigManager("g1_29_locomanipulation_locomimic_real").get_cfg().env

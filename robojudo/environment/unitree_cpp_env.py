@@ -136,6 +136,7 @@ class UnitreeCppEnv(Environment):
             actuator_limits=self.torque_limits,
             control_dt=env_cfg.unitree.control_dt,
             max_dt=min(env_cfg.unitree.command_timeout, env_cfg.unitree.state_timeout),
+            receipt_float32=True,
         )
         slots = self._observer.indices if self._dof_idx is None else self._dof_idx[self._observer.indices]
         native_cfg.update(
