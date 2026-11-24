@@ -2,11 +2,13 @@ import logging
 import time
 
 import numpy as np
+import unitree_cpp  # type: ignore
 from unitree_cpp import RobotState, SportState, UnitreeController  # type: ignore
 
 from robojudo.environment import Environment, env_registry
 from robojudo.environment.env_cfgs import UnitreeEnvCfg
 from robojudo.tools.retarget import HandRetarget
+from robojudo.utils.observers import JointObserver
 from robojudo.utils.rotation import TransformAlignment
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,12 @@ class UnitreeCppEnv(Environment):
         self.enabled: bool = cfg_env.act
         self._control_joint_names: set[str] = set()
         self._last_clamp_log_time = 0.0
+        self._observer = None
+        self._observer_eligible = False
+        self._observer_generation = None
+        self._observer_feedback_time = None
+        self._observer_command_time = None
+        self._observer_snapshot_started = None
         super().__init__(cfg_env=cfg_env, device=device)
         self._motor_dof_count = cfg_env.motor_dof_count or self.num_dofs
         self._dof_idx = None if cfg_env.joint2motor_idx is None else np.asarray(cfg_env.joint2motor_idx, dtype=np.int32)
@@ -32,6 +40,7 @@ class UnitreeCppEnv(Environment):
         cfg_unitree_dict["num_dofs"] = self._motor_dof_count
         cfg_unitree_dict["stiffness"] = self._logical_to_motor(self.stiffness)
         cfg_unitree_dict["damping"] = self._logical_to_motor(self.damping)
+        self._configure_observer(cfg_unitree_dict)
 
         self.robot = cfg_unitree.robot
         self._odometry_type = cfg_env.odometry_type
@@ -90,7 +99,83 @@ class UnitreeCppEnv(Environment):
             raise RuntimeError("UnitreeCppEnv did not receive valid Unitree state")
 
     def reset(self):
+        self.reset_observer()
         self.reset_alignment()
+
+    @property
+    def observer_enabled(self) -> bool:
+        return getattr(self, "_observer", None) is not None
+
+    def _configure_observer(self, native_cfg):
+        cfg = getattr(self.cfg_env, "observer", None)
+        if cfg is None or cfg.mode == "OFF":
+            return
+        # Revalidate mutable overrides before the SDK acquires control of the robot.
+        env_cfg = type(self.cfg_env).model_validate(self.cfg_env.model_dump())
+        cfg = env_cfg.observer
+        required = (
+            "step",
+            "get_safety_status",
+            "clear_arm_effort",
+            "set_damping",
+            "set_passive",
+            "arm_position_control",
+            "state_is_fresh",
+        )
+        if (
+            not hasattr(getattr(unitree_cpp, "UnitreeConfig", None), "arm_motor_indices")
+            or not all(hasattr(UnitreeController, name) for name in required)
+            or not all(hasattr(RobotState, name) for name in ("received_time_sec", "age_sec"))
+        ):
+            raise RuntimeError("Rebuild unitree_cpp for hardware observer motor mapping and command receipts")
+        self._observer = JointObserver(
+            cfg,
+            self.joint_names,
+            self.stiffness.astype(np.float32),
+            self.damping.astype(np.float32),
+            actuator_limits=self.torque_limits,
+            control_dt=env_cfg.unitree.control_dt,
+            max_dt=min(env_cfg.unitree.command_timeout, env_cfg.unitree.state_timeout),
+            receipt_float32=True,
+        )
+        slots = self._observer.indices if self._dof_idx is None else self._dof_idx[self._observer.indices]
+        native_cfg.update(
+            arm_effort_enabled=cfg.mode == "ACTIVE",
+            state_timeout=env_cfg.unitree.state_timeout,
+            arm_motor_indices=slots.tolist(),
+            arm_total_torque_limits=self._observer.observer.torque_limits.tolist(),
+            arm_effort_limits=self._observer.observer.limits.tolist(),
+        )
+
+    def _reset_observer_history(self):
+        if self.observer_enabled:
+            self._observer.reset()
+            self._observer_generation = None
+            self._observer_feedback_time = None
+            self._observer_command_time = None
+
+    def reset_observer(self):
+        self._reset_observer_history()
+        if self.observer_enabled and hasattr(self, "unitree"):
+            self.unitree.clear_arm_effort()
+
+    def set_observer_eligible(self, eligible):
+        if self.observer_enabled and self._observer_eligible != bool(eligible):
+            self.reset_observer()
+            self._observer_eligible = bool(eligible)
+
+    def get_observer_status(self):
+        if not self.observer_enabled:
+            return {"mode": "OFF", "eligible": False}
+        feedback, command = self._observer_feedback_time, self._observer_command_time
+        return {
+            **self._observer.get_status(),
+            "eligible": self._observer_eligible,
+            "reset_generation": self._observer_generation,
+            "feedback_received_time_sec": feedback,
+            "command_time_sec": command,
+            "feedback_age_at_command_sec": command - feedback if command is not None and feedback is not None else None,
+        }
 
     def set_born_place(self, quat: np.ndarray | None = None, pos: np.ndarray | None = None):
         quat_ = self.base_quat if quat is None else quat
@@ -110,6 +195,8 @@ class UnitreeCppEnv(Environment):
             raise RuntimeError("UnitreeCppEnv low state became stale; damping commands were sent")
 
         # robot state
+        if self.observer_enabled:
+            self._observer_snapshot_started = time.monotonic()
         self.robot_state = self.unitree.get_robot_state()
         self._dof_pos = self._motor_to_logical(self.robot_state.motor_state.q, dtype=np.float32)
         self._dof_vel = self._motor_to_logical(self.robot_state.motor_state.dq, dtype=np.float32)
@@ -161,8 +248,10 @@ class UnitreeCppEnv(Environment):
             self.RemoteControllerHandler(self.robot_state.wireless_remote)
 
     def step(self, pd_target, hand_pose=None):
-        assert len(pd_target) == self.num_dofs, "pd_target len should be num_dofs of env"
         positions = np.asarray(pd_target, dtype=np.float64)
+        if positions.shape != (self.num_dofs,):
+            self.command_damping(self.cfg_env.unitree.shutdown_damping)
+            raise ValueError(f"UnitreeCppEnv PD target must have shape ({self.num_dofs},)")
         if not np.isfinite(positions).all():
             self.command_damping(self.cfg_env.unitree.shutdown_damping)
             raise FloatingPointError("UnitreeCppEnv received a non-finite PD target; damping commands were sent")
@@ -180,7 +269,11 @@ class UnitreeCppEnv(Environment):
                 logger.warning("Clamped Unitree PD targets: %s", ", ".join(details))
                 self._last_clamp_log_time = now
         if self.enabled:
-            self.unitree.step(self._logical_to_motor(clipped_positions).tolist())
+            handled = False
+            if self.observer_enabled and self._observer_eligible:
+                handled = self._step_with_observer(clipped_positions, now)
+            if not handled:
+                self.unitree.step(self._logical_to_motor(clipped_positions).tolist())
 
         if hand_pose is not None:
             assert type(hand_pose) is np.ndarray, "hand_pose should be a numpy array"
@@ -193,17 +286,63 @@ class UnitreeCppEnv(Environment):
             if self.enabled:
                 self.unitree.step_hands(hand_pose[0], hand_pose[1])
 
+    def _step_with_observer(self, positions, now) -> bool:
+        observer = self._observer
+        # Match the target precision stored by the Unitree motor command.
+        positions = positions.astype(np.float32)
+        try:
+            safety = self.unitree.get_safety_status()
+            if safety.latched:
+                raise RuntimeError("Unitree arm command watchdog is latched")
+            generation = safety.reset_generation
+            if generation != self._observer_generation:
+                observer.reset()
+            stamp = float(self.robot_state.received_time_sec)
+            age = float(self.robot_state.age_sec)
+            started = self._observer_snapshot_started
+            deadline = started + observer.max_dt - age if started is not None and age >= 0 else float("-inf")
+            if not np.isfinite(stamp) or stamp <= 0 or time.monotonic() > deadline:
+                self.reset_observer()
+                return False
+            timestamps = np.full(self.num_dofs, stamp)
+            efforts = observer.propose(positions, self._dof_pos, self._dof_vel, now, sample_times=timestamps)
+            if time.monotonic() > deadline:
+                self.reset_observer()
+                return False
+            receipt = self.unitree.step(self._logical_to_motor(positions).tolist(), efforts.tolist(), generation)
+            if receipt.reset_generation != generation:
+                self.reset_observer()
+                return True
+            if receipt.command_time_sec < stamp:
+                raise RuntimeError("Unitree observer received an inconsistent command receipt")
+            observer.acknowledge(receipt.arm_efforts, command_time=receipt.command_time_sec)
+            self._observer_generation = generation
+            self._observer_feedback_time = stamp
+            self._observer_command_time = receipt.command_time_sec
+            if now - getattr(self, "_last_observer_log_time", float("-inf")) >= 1.0 and logger.isEnabledFor(
+                logging.INFO
+            ):
+                self._last_observer_log_time = now
+                observer.log_effort(logger)
+            return True
+        except (AttributeError, TypeError, ValueError, RuntimeError, FloatingPointError, OverflowError):
+            self.command_damping(self.cfg_env.unitree.shutdown_damping)
+            raise
+
     def command_passive(self):
         if self.enabled:
             self.unitree.set_passive()
+        self._reset_observer_history()
 
     def command_damping(self, damping=5.0):
         if not np.isfinite(damping) or damping < 0.0:
             raise ValueError("Damping must be finite and non-negative")
         if self.enabled:
             self.unitree.set_damping(float(damping))
+        self._reset_observer_history()
 
     def arm_position_control(self):
+        self._reset_observer_history()
         if self.enabled:
             self.unitree.arm_position_control()
 
@@ -216,19 +355,22 @@ class UnitreeCppEnv(Environment):
     def shutdown(self):
         self.unitree.shutdown()
         self.enabled = False
+        self._reset_observer_history()
 
     def set_gains(self, stiffness, damping):
         stiffness, damping = self._validate_gains(stiffness, damping)
+        if self.enabled and hasattr(self, "unitree"):
+            self.unitree.set_gains(
+                self._logical_to_motor(stiffness).tolist(),
+                self._logical_to_motor(damping).tolist(),
+            )
         self.stiffness = stiffness
         self.damping = damping
-        if not hasattr(self, "unitree"):  # TODO
-            return
-        if not self.enabled:
-            return
-        self.unitree.set_gains(
-            self._logical_to_motor(stiffness).tolist(),
-            self._logical_to_motor(damping).tolist(),
-        )
+        if self.observer_enabled:
+            self._reset_observer_history()
+            indices = self._observer.indices
+            self._observer.observer.kp = stiffness[indices].astype(np.float32).astype(float)
+            self._observer.observer.kd = damping[indices].astype(np.float32).astype(float)
 
     def _logical_to_motor(self, values) -> np.ndarray:
         values = np.asarray(values, dtype=np.float64)

@@ -13,6 +13,7 @@ from robojudo.config.observer_cfg import JointObserverCfg
 from robojudo.config.x2.observer_parameters import JOINT_NAMES, selected_observer_parameters
 from robojudo.environment.agibot_cpp_env import AgiBotCppEnv
 from robojudo.pipeline.four_mode_pipeline import ControlMode, FourModePipelineMixin
+from robojudo.pipeline.x2_locomanipulation_pipeline import X2FourModePipelineMixin
 from robojudo.utils.observers import JointObserver
 
 
@@ -287,6 +288,9 @@ class ArmObserverTests(unittest.TestCase):
         controller.acknowledge(np.zeros(14))
         np.testing.assert_array_equal(controller.observer.effort, 0)
         self.assertTrue(controller.observer.antiwindup.all())
+        status = controller.get_status()
+        np.testing.assert_array_equal(status["headroom_limited"], True)
+        np.testing.assert_array_equal(status["downstream_limited"], False)
         self.assertTrue(np.all(abs(controller.observer.estimated_disturbance_nm) <= 1))
 
     def test_final_clipped_targets_and_unchanged_non_arm_positions(self):
@@ -391,6 +395,30 @@ class ArmObserverTests(unittest.TestCase):
         np.testing.assert_array_equal(env._observer.issued_nm, 0)
         status["estimated_disturbance_nm"][0] = 99
         np.testing.assert_array_equal(env._observer.observer.estimated_disturbance_nm, 0)
+
+    def test_shadow_preserves_deployment_receipt_diagnostics(self):
+        env = environment(config("SHADOW"))
+        with (
+            patch("robojudo.environment.agibot_cpp_env.logger") as log,
+            patch("robojudo.environment.agibot_cpp_env.time.monotonic") as clock,
+        ):
+            log.isEnabledFor.side_effect = (False, True)
+            for now, velocity in ((10.0, 0.0), (10.02, -0.1)):
+                clock.return_value = now
+                env._observer_feedback_time = now
+                env._observer_sample_times[:] = now
+                env._dof_vel[2:] = velocity
+                env._step_with_observer(np.zeros(16), now)
+
+        status = env.get_observer_status()
+        self.assertTrue(np.all(np.asarray(status["proposed_nm"]) > 0))
+        np.testing.assert_array_equal(env.aimdk.effort, 0)
+        np.testing.assert_array_equal(status["headroom_limited"], False)
+        np.testing.assert_array_equal(status["downstream_limited"], True)
+        np.testing.assert_array_equal(status["antiwindup"], True)
+        log.info.assert_called_once()
+        args = log.info.call_args.args
+        self.assertTrue((args[0] % args[1:]).endswith("limited=14"))
 
     def test_observer_logs_once_per_second_after_submission(self):
         for mode in ("SHADOW", "ACTIVE"):
@@ -562,7 +590,7 @@ class ObserverPolicyGateTests(unittest.TestCase):
         from robojudo.policy.x2_gr00t_locomanipulation_policy import X2Gr00tLocomanipulationPolicy
         from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
 
-        pipeline = FourModePipelineMixin.__new__(FourModePipelineMixin)
+        pipeline = X2FourModePipelineMixin.__new__(X2FourModePipelineMixin)
         pipeline.env = environment()
         for policy_class in (X2LocomanipulationPolicy, X2Gr00tLocomanipulationPolicy, object):
             inner = policy_class.__new__(policy_class)

@@ -252,15 +252,15 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
             logger.warning("JOINT_DEFAULT interpolation complete; RL_DEFAULT is now enabled")
         return target
 
+    def _supports_observer_policy(self, policy) -> bool:
+        """Allow a robot pipeline to opt in the policy families it supports."""
+        return False
+
     def _sync_observer_eligibility(self):
         env = getattr(self, "env", None)
-        set_eligible = getattr(env, "set_observer_eligible", None)
-        observer = getattr(env, "_observer", None)
-        if set_eligible is not None and observer is not None:
-            from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
-
+        if getattr(env, "observer_enabled", False):
             inner = self._inner_policy()
-            eligible = self.mode == ControlMode.RL_DEFAULT and isinstance(inner, X2LocomanipulationPolicy)
+            eligible = self.mode == ControlMode.RL_DEFAULT and self._supports_observer_policy(inner)
             manager = getattr(self, "policy_manager", None)
             if manager is not None:
                 eligible = eligible and (
@@ -269,10 +269,9 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
                 )
             identity = id(inner)
             if identity != getattr(self, "_observer_policy_identity", None):
-                reset_observer = getattr(env, "reset_observer", None)
-                reset_observer()
+                env.reset_observer()
                 self._observer_policy_identity = identity
-            set_eligible(eligible)
+            env.set_observer_eligible(eligible)
 
     def _send_policy_target(self, pd_target, hand_pose=None):
         self._sync_observer_eligibility()
@@ -301,15 +300,21 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
         if self.visualizer is not None and rl_active:
             self.policy.debug_viz(self.visualizer, env_data, ctrl_data, extras)
         if self.cfg.debug.log_obs:
-            self.debug_logger.log(
-                env_data=env_data,
-                ctrl_data=ctrl_data,
-                extras=extras,
-                pd_target=pd_target,
-                timestep=self.timestep,
-            )
+            self._log_control_step(env_data, ctrl_data, extras, pd_target)
+
+    def _log_control_step(self, env_data, ctrl_data, extras, pd_target):
+        extras = dict(extras)
+        if self._debug_observer_status is not None:
+            extras["observer"] = self._debug_observer_status
+        extras["control_step_ms"] = 1000 * (time.perf_counter() - self._control_step_started)
+        self.debug_logger.log(
+            env_data=env_data, ctrl_data=ctrl_data, extras=extras, pd_target=pd_target, timestep=self.timestep
+        )
 
     def step(self, dry_run=False):
+        log_observations = getattr(self, "debug_logger", None) is not None
+        if log_observations:
+            self._control_step_started = time.perf_counter()
         self._upper_body_command_submitted = False
         self._upper_body_timing_ms = {}
         try:
@@ -322,13 +327,12 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
 
         env_data = self.env.get_data()
         ctrl_data = self.ctrl_manager.get_ctrl_data(env_data)
-        commands = ctrl_data.get("COMMANDS", [])
-        self._process_commands(commands)
-        self._safety_check_before_command()
 
         extras = {}
         pd_target = self.env.dof_pos
         try:
+            self._process_commands(ctrl_data.get("COMMANDS", []))
+            self._safety_check_before_command()
             if not self._shutdown_requested:
                 if dry_run:
                     pd_target, extras = self._step_rl_policy(env_data, ctrl_data, dry_run=True)
@@ -345,6 +349,9 @@ class FourModePipelineMixin(UpperBodyZmqPipelineMixin):
                 raise
             self._force_damping(str(exc))
 
+        if log_observations:
+            observer_status = getattr(self.env, "get_observer_status", None)
+            self._debug_observer_status = observer_status() if observer_status is not None else None
         self._post_mode_step(
             env_data,
             ctrl_data,

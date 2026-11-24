@@ -373,6 +373,10 @@ class AgiBotCppEnv(Environment):
         self._configure_observer_order(self.cfg_env.arm_joint_names)
         logger.warning("Observer %s: nominal model is simulation-derived and not hardware-qualified", cfg.mode)
 
+    @property
+    def observer_enabled(self) -> bool:
+        return getattr(self, "_observer", None) is not None
+
     def get_observer_status(self):
         """Command diagnostics only; issued effort is not measured actuator torque."""
         observer = getattr(self, "_observer", None)
@@ -443,20 +447,7 @@ class AgiBotCppEnv(Environment):
                 logging.INFO
             ):
                 self._last_observer_log_time = now
-                at_bound = np.isclose(
-                    np.abs(observer.observer.estimated_disturbance_nm), observer.observer.limits, rtol=0, atol=1e-3
-                )
-                limited = observer.observer.antiwindup | ~np.isclose(
-                    observer.proposed_nm, observer.issued_nm, rtol=0, atol=1e-6
-                )
-                logger.info(
-                    "Observer %s Nm: est=[%s] issued=[%s] bound=%d limited=%d",
-                    observer.mode,
-                    ",".join(f"{value:.1f}" for value in observer.observer.estimated_disturbance_nm),
-                    ",".join(f"{value:.1f}" for value in observer.issued_nm),
-                    np.count_nonzero(at_bound),
-                    np.count_nonzero(limited),
-                )
+                observer.log_effort(logger)
         except (TypeError, ValueError, RuntimeError, FloatingPointError):
             self.reset_observer()
             raise

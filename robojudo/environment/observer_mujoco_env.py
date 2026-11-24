@@ -43,6 +43,10 @@ class ObserverMujocoEnv(MujocoEnv):
             self._observer.reset()
         self._last_observer_log_time = float("-inf")
 
+    @property
+    def observer_enabled(self) -> bool:
+        return self._observer is not None
+
     def set_observer_eligible(self, eligible):
         eligible = bool(eligible)
         if eligible != self._observer_eligible:
@@ -103,20 +107,7 @@ class ObserverMujocoEnv(MujocoEnv):
             super().step(target, hand_pose, feedforward_effort=admitted)
             if now - self._last_observer_log_time >= 1.0 and logger.isEnabledFor(logging.INFO):
                 self._last_observer_log_time = now
-                at_bound = np.isclose(
-                    np.abs(observer.observer.estimated_disturbance_nm), observer.observer.limits, rtol=0, atol=1e-3
-                )
-                limited = observer.observer.antiwindup | ~np.isclose(
-                    observer.proposed_nm, observer.issued_nm, rtol=0, atol=1e-6
-                )
-                logger.info(
-                    "Observer %s Nm: est=[%s] issued=[%s] bound=%d limited=%d",
-                    observer.mode,
-                    ",".join(f"{value:.1f}" for value in observer.observer.estimated_disturbance_nm),
-                    ",".join(f"{value:.1f}" for value in observer.issued_nm),
-                    np.count_nonzero(at_bound),
-                    np.count_nonzero(limited),
-                )
+                observer.log_effort(logger)
         except (TypeError, ValueError, RuntimeError, FloatingPointError, OverflowError):
             self.reset_observer()
             raise

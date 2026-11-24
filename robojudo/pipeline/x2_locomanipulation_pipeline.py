@@ -11,6 +11,11 @@ class X2FourModePipelineMixin(FourModePipelineMixin):
     - ``UpperBodyZmqPipelineMixin`` (transitive): filtered upper-body ZMQ targets.
     """
 
+    def _supports_observer_policy(self, policy) -> bool:
+        from robojudo.policy.x2_locomanipulation_policy import X2LocomanipulationPolicy
+
+        return isinstance(policy, X2LocomanipulationPolicy)
+
 
 @pipeline_registry.register
 class X2LocomanipulationPipeline(X2FourModePipelineMixin, RlPipeline):

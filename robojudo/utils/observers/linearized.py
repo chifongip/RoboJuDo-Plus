@@ -6,7 +6,7 @@ from .model import JointDynamics
 
 
 class LinearizedDisturbanceObserver(JointDynamics):
-    def acknowledge_effort(self, issued_effort, *, freeze_limited_estimate=True):
+    def acknowledge_effort(self, issued_effort, *, freeze_limited_estimate=True, blocked_direction=None):
         """Reconcile a downstream limiter (or shadow zero) without inventing applied torque.
 
         Freeze estimate changes on limited joints. The next predictor and slew
@@ -16,7 +16,7 @@ class LinearizedDisturbanceObserver(JointDynamics):
         if issued.shape != self.kp.shape or not np.isfinite(issued).all() or np.any(abs(issued) > self.limits):
             self.reset()
             raise ValueError("Issued effort must be finite and within observer bounds")
-        limited = issued != self.effort
+        limited = issued != self.effort if blocked_direction is None else blocked_direction != 0
         if freeze_limited_estimate:
             self.estimated_disturbance_nm = np.where(
                 limited, self._estimate_before_update, self.estimated_disturbance_nm
