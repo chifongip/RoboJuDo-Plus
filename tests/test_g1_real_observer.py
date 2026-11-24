@@ -136,6 +136,21 @@ class G1RealObserverTests(unittest.TestCase):
         env.step(env._dof_pos)
         self.assertFalse(env._observer.command_history)
 
+    def test_shadow_logs_acknowledged_efforts_once_per_second(self):
+        env, _ = self.make_environment("SHADOW")
+        with (
+            patch.object(unitree_cpp_env.time, "monotonic") as monotonic,
+            self.assertLogs(unitree_cpp_env.logger, level="INFO") as captured,
+        ):
+            for now in (20.0, 20.01, 21.0):
+                monotonic.return_value = now
+                env._observer_snapshot_started = now
+                env.step(env._dof_pos)
+
+        zeros = ",".join(["0.0"] * len(OBSERVED_SLOTS))
+        message = f"Observer SHADOW Nm: est=[{zeros}] issued=[{zeros}] bound=0 limited=0"
+        self.assertEqual([record.getMessage() for record in captured.records], [message, message])
+
     def test_full_g1_arm_commands_follow_observer_joint_order(self):
         baseline = ConfigManager("g1_29_locomanipulation_locomimic_real").get_cfg().env
         names = list(reversed(G1_29_ARM_JOINT_NAMES))

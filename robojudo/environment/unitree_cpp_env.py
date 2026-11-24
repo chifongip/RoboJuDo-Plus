@@ -318,6 +318,11 @@ class UnitreeCppEnv(Environment):
             self._observer_generation = generation
             self._observer_feedback_time = stamp
             self._observer_command_time = receipt.command_time_sec
+            if now - getattr(self, "_last_observer_log_time", float("-inf")) >= 1.0 and logger.isEnabledFor(
+                logging.INFO
+            ):
+                self._last_observer_log_time = now
+                observer.log_effort(logger)
             return True
         except (AttributeError, TypeError, ValueError, RuntimeError, FloatingPointError, OverflowError):
             self.command_damping(self.cfg_env.unitree.shutdown_damping)

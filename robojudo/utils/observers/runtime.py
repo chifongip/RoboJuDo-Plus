@@ -243,6 +243,19 @@ class JointObserver:
             self.reset()
             raise
 
+    def log_effort(self, logger):
+        estimate = self.observer.estimated_disturbance_nm
+        at_bound = np.isclose(np.abs(estimate), self.observer.limits, rtol=0, atol=1e-3)
+        limited = self.observer.antiwindup | ~np.isclose(self.proposed_nm, self.issued_nm, rtol=0, atol=1e-6)
+        logger.info(
+            "Observer %s Nm: est=[%s] issued=[%s] bound=%d limited=%d",
+            self.mode,
+            ",".join(f"{value:.1f}" for value in estimate),
+            ",".join(f"{value:.1f}" for value in self.issued_nm),
+            np.count_nonzero(at_bound),
+            np.count_nonzero(limited),
+        )
+
     def get_status(self):
         """Return copied command diagnostics in configured observer joint order."""
         model = self.observer
