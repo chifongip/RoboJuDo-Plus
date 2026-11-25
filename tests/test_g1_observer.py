@@ -90,15 +90,13 @@ class G1ObserverTests(unittest.TestCase):
         invalid["observer"]["joint_names"][0] = "waist_yaw_joint"
         with self.assertRaisesRegex(ValidationError, "Observer joints must be allowed feedforward joints"):
             type(cfg.env).model_validate(invalid)
-        limits = {"waist_yaw_joint": 1.0, "left_knee_joint": 1.0}
-        baseline_data = baseline.env.model_dump()
-        baseline_data["feedforward_effort_limits"] = limits
-        self.assertEqual(type(baseline.env).model_validate(baseline_data).feedforward_effort_limits, limits)
-
-        observer_data = cfg.env.model_dump()
-        observer_data["feedforward_effort_limits"] = limits
-        with self.assertRaisesRegex(ValidationError, "feedforward is restricted to the 14 arm joints"):
-            type(cfg.env).model_validate(observer_data)
+        for env_cfg in (baseline.env, cfg.env):
+            with self.subTest(env=type(env_cfg).__name__):
+                self.assertEqual(env_cfg.feedforward_joint_names, list(JOINT_NAMES))
+                invalid = env_cfg.model_dump()
+                invalid["feedforward_effort_limits"]["waist_yaw_joint"] = 1.0
+                with self.assertRaisesRegex(ValidationError, "feedforward is restricted to the 14 arm joints"):
+                    type(env_cfg).model_validate(invalid)
 
     def test_29_dof_observer_issues_arm_only_effort_in_simulation(self):
         cfg = ConfigManager("g1_29_locomanipulation_locomimic_observer").get_cfg().env

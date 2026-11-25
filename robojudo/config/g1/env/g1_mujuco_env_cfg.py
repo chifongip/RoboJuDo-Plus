@@ -9,12 +9,7 @@ class G1MujocoEnvCfg(G1EnvCfg, MujocoEnvCfg):
     env_type: str = MujocoEnvCfg.model_fields["env_type"].default
     is_sim: bool = MujocoEnvCfg.model_fields["is_sim"].default
     # ====== ENV CONFIGURATION ======
-
     update_with_fk: bool = True
-
-
-class G1ObserverMujocoEnvCfg(G1MujocoEnvCfg, ObserverMujocoEnvCfg):
-    env_type: str = "ObserverMujocoEnv"
 
     @property
     def feedforward_joint_names(self) -> list[str]:
@@ -25,6 +20,10 @@ class G1ObserverMujocoEnvCfg(G1MujocoEnvCfg, ObserverMujocoEnvCfg):
         if set(self.feedforward_effort_limits) - set(G1_29_ARM_JOINT_NAMES):
             raise ValueError("G1 29-DOF feedforward is restricted to the 14 arm joints")
         return self
+
+
+class G1ObserverMujocoEnvCfg(G1MujocoEnvCfg, ObserverMujocoEnvCfg):
+    env_type: str = "ObserverMujocoEnv"
 
 
 class G1_23MujocoEnvCfg(G1_23EnvCfg, MujocoEnvCfg):
