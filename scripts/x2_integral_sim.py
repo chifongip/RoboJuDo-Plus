@@ -6,36 +6,13 @@ import mujoco
 import numpy as np
 from box import Box
 
+from robojudo.config.x2.carry_pose import X2_CARRY_POSE as POSTURE
 from robojudo.config.x2.env.x2_env_cfg import X2_ARM_JOINT_NAMES
 from robojudo.config.x2.x2_cfg import x2_locomimic
 from robojudo.environment import env_registry
 from robojudo.environment.mujoco_env import MujocoEnv
 from robojudo.pipeline.four_mode_pipeline import FALL_TILT_THRESHOLD_RAD
 from robojudo.utils.bounded_integral import BoundedIntegralCorrection
-
-POSTURE = dict(
-    zip(
-        X2_ARM_JOINT_NAMES,
-        (
-            -0.081,
-            0.026,
-            -0.049,
-            -2.188,
-            0.238,
-            0.326,
-            0.215,
-            -0.081,
-            -0.026,
-            0.049,
-            -2.188,
-            -0.238,
-            0.326,
-            -0.215,
-        ),
-        strict=True,
-    )
-)
-
 
 SIDES = ("left", "right")
 

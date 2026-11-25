@@ -69,6 +69,8 @@ class G1RealObserverTests(unittest.TestCase):
         self.assertEqual(cfg.model_dump(exclude={"env"}), baseline.model_dump(exclude={"env"}))
         self.assertEqual(cfg.env.model_dump(exclude={"observer"}), baseline.env.model_dump())
         self.assertEqual(cfg.env.observer.mode, "OFF")
+        sim = ConfigManager("g1_23_locomanipulation_locomimic_observer").get_cfg()
+        self.assertEqual(cfg.env.observer.model_dump(exclude={"mode"}), sim.env.observer.model_dump(exclude={"mode"}))
         limits = dict(zip(baseline.env.dof.joint_names, baseline.env.dof.torque_limits, strict=True))
         self.assertEqual(cfg.env.observer.actuator_limits_nm, [limits[name] for name in cfg.env.observer.joint_names])
 

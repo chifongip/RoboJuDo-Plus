@@ -181,6 +181,52 @@ No hardware deployment qualification or global walking-stability proof is claime
 
 ## Evidence and verification
 
+### Reproduce the X2 coefficients
+
+```bash
+OPENBLAS_NUM_THREADS=1 python -m scripts.evaluate_joint_observer \
+  --robot x2 --fit --output logs/x2_observer/standing_greybox_fit
+```
+
+Both G1 and X2 calibrate with unloaded default and grasp trials and a carry
+trial with a 20 N downward load per hand. X2 uses `policy_fine_tune` for these
+trials. The calibration probes one arm joint at a time at 50 Hz and subtracts
+a matched zero-probe rollout. The grey-box model fits incremental position and
+velocity across two multisine amplitude blocks. Held-out multisine periods
+select the initialization, and separate bipolar pulses validate the fit.
+
+The selector takes the median inertia across the three conditions and floors
+it at the MJCF armature, 0.03 kg·m² for X2. It uses the armature directly for
+wrist pitch and roll. The friction slope is the nonnegative median of fitted
+damping plus friction slope minus the configured PD derivative gain.
+The preset uses the MJCF friction cap of 0.3 Nm and a bandwidth of 8 rad/s.
+
+Choose a new output directory. Fresh acquisition writes traces and a manifest.
+Use `--traces DIR` to replay a compatible acquisition, including the historical
+X2 CSV format. The report in `summary.json` includes source hashes, fitted and
+registered coefficients, held-out errors, and closed-loop results. Validation
+failure returns exit status 1.
+
+After fitting, both robots run closed-loop load-release checks at the neutral
+arm target in standing and walking. These checks use the observer preset's
+checkpoint to compare the candidate and registered coefficients. The load
+defaults to 10 N per hand. Use `--force` to change the closed-loop evaluation
+load. The allowed increases are the larger of 5% or
+0.05° for carrying arm RMS and the larger of 5% or 2 mm for release hand
+displacement. Actuator saturation must not increase.
+
+The historical replay and fresh 45-trial acquisition reproduced both X2
+coefficient vectors exactly. The local results are under
+`logs/x2_observer/original_calibration_20261124/` and
+`logs/x2_observer/recheck_20261125/`.
+
+### Earlier one-step comparison
+
+The earlier one-step fit used a different checkpoint and probe protocol.
+Held-out velocity RMSE fell from 0.0171 to 0.0124 rad/s standing and from
+0.0147 to 0.0143 rad/s walking. Four joints exceeded the walking pulse
+tolerance, so the preset retained the original coefficients.
+
 The full measured comparison, all-joint errors, plots, source snapshots and user
 selection are retained at:
 

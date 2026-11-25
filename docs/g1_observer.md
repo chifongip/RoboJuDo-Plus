@@ -6,37 +6,53 @@ Unitree interface for 23- and 29-DOF G1 configurations.
 
 ## Stiff 23-DOF simulation
 
-Run the opt-in preset with the existing `policy_23dof_stiff` checkpoint, whose
-arm joints are position-controlled by the pipeline. The observer holds its
-additive command for each 20 ms interval. The validation table below used
-a 2 Nm absolute correction cap. Parameters come from unloaded MuJoCo standing
-and walking trajectories with arm excitation. The fit reduced held-out centered
-velocity prediction RMS from 0.0417 to 0.0362 rad/s. Gravity and joint coupling
-can also contribute to the residual and produce correction during unloaded motion.
+The opt-in preset uses the `policy_23dof_stiff` checkpoint and position-controlled
+arms. The observer holds each additive torque command for 20 ms. Gravity and
+joint coupling can contribute to correction during unloaded motion.
 
 ```bash
 python scripts/run_pipeline.py -c g1_23_locomanipulation_locomimic_observer
-PYTHONPATH=. OPENBLAS_NUM_THREADS=1 python scripts/evaluate_g1_observer.py \
-  --fit --output logs/g1_observer/stiff_fit
-PYTHONPATH=. OPENBLAS_NUM_THREADS=1 python scripts/evaluate_g1_observer.py \
-  --correction-cap 2.0 --output logs/g1_observer/stiff
+OPENBLAS_NUM_THREADS=1 python -m scripts.evaluate_joint_observer \
+  --robot g1 --output logs/g1_observer/stiff_validation
 ```
 
-With a 10 N downward load per hand, the baseline and ACTIVE trials produced
-the following results. Release peaks are measured against each mode's matched
-unloaded trial and include the pose at the instant of release.
+The closed-loop evaluation uses the preset's correction limits and a 10 N
+downward load per hand, the default for both robots. Peak hand displacement
+includes the instant of release and is measured against each mode's matched
+unloaded trial.
 
 | Motion | Carrying arm RMS, OFF → ACTIVE | Release hand peak, OFF → ACTIVE |
 | --- | ---: | ---: |
-| Standing | 0.837° → 0.00045° | 4.56 → 3.10 mm |
-| Walking at 0.25 m/s | 0.865° → 0.346° | 5.93 → 3.98 mm |
+| Standing | 0.837° → 0.00050° | 4.56 → 3.93 mm |
+| Walking at 0.25 m/s | 0.865° → 0.322° | 5.93 → 6.43 mm |
 
-SHADOW reproduced the OFF trajectories exactly and issued zero torque.
-The selected settings produced no actuator saturation, and the longest ACTIVE
-loop took 3.73 ms in the headless run. Unloaded peak standing tilt rose from
-1.87° to 2.12°.
-Omit `--correction-cap` to use the current preset's fraction-only bounds. That
-run produced 1.98° of unloaded peak standing tilt against the same 1.87° baseline.
+SHADOW matched OFF and issued zero torque. No actuator saturation occurred.
+
+## Additive-torque calibration
+
+```bash
+OPENBLAS_NUM_THREADS=1 python -m scripts.evaluate_joint_observer \
+  --robot g1 --fit --output logs/g1_observer/standing_greybox_fit
+```
+
+G1 uses the [shared torque-probe procedure](x2_upper_body_integral.md#reproduce-the-x2-coefficients).
+Both robots fit coefficients from unloaded default and grasp trials and a
+carry trial with a 20 N downward load per hand.
+In the pelvis frame, G1 shifts both X2 hand centers of mass 10 cm backward
+along x and 15 cm down along z. Inverse kinematics matches those targets
+and minimizes hand orientation error within G1's joint limits. Calibration and
+the ZMQ publisher share the resulting targets in `robojudo/config/g1/carry_pose.py`.
+Run `python scripts/test_upper_body_zmq.py --robot g1-23` and press `7`
+(`custom_arms`) to select this pose.
+The fit seeds friction at 0.10 N·m and fixes wrist-roll inertia at
+0.01020 kg·m², the rounded joint-space inertia at the nominal default pose.
+The search-bound check applies to the free parameters.
+
+All ten joints passed standing validation across 33 acquisitions with the
+updated pose. With both models ACTIVE in the 10 N-per-hand check, the walking
+release peak rose from 6.38 mm with the previous coefficients to 6.43 mm with
+the current fit. Neither model saturated. The traces and comparison are in
+`logs/g1_observer/updated_carry_20261125/`.
 
 ## Real-robot deployment
 

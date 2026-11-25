@@ -17,10 +17,12 @@ from dataclasses import dataclass
 
 import zmq
 
+from robojudo.config.g1.carry_pose import G1_CARRY_POSE
 from robojudo.config.g1.policy.g1_locomanipulation_policy_cfg import (
     G1Locomanipulation23ObsDoF,
     G1Locomanipulation29ObsDoF,
 )
+from robojudo.config.x2.carry_pose import X2_CARRY_POSE
 from robojudo.config.x2.env.x2_env_cfg import X2_ARM_JOINT_NAMES, X2_POSITION_LIMITS_BY_NAME
 from robojudo.config.x2.policy.x2_locomanipulation_policy_cfg import X2_LOCOMANIPULATION_DEFAULT_POS
 
@@ -90,10 +92,7 @@ def make_poses(default_pose: dict[str, float], elbow_sign: float) -> dict[str, d
 def make_profile(label: str, joint_names: list[str], default_pos: list[float], position_limits) -> TestProfile:
     names = tuple(joint_names)
     default_pose = dict(zip(names, default_pos, strict=True))
-    limits = {
-        name: (float(limit[0]), float(limit[1]))
-        for name, limit in zip(names, position_limits, strict=True)
-    }
+    limits = {name: (float(limit[0]), float(limit[1])) for name, limit in zip(names, position_limits, strict=True)}
     elbow_sign = -1.0 if label == "X2" else 1.0
     poses = make_poses(default_pose, elbow_sign)
     if label == "X2":
@@ -117,6 +116,9 @@ def make_profile(label: str, joint_names: list[str], default_pos: list[float], p
             "right_wrist_roll_joint": 1.384599,
             "right_wrist_yaw_joint": 1.959332,
         }
+        poses["custom_arms"] = default_pose | X2_CARRY_POSE
+    elif label == "G1 23-DOF":
+        poses["custom_arms"] = default_pose | G1_CARRY_POSE
     return TestProfile(
         label=label,
         joint_names=names,
@@ -154,6 +156,7 @@ KEY_TO_POSE = {
     "4": "carry",
     "5": "wave_left",
     "6": "mirrored_arms",
+    "7": "custom_arms",
 }
 
 
@@ -167,9 +170,7 @@ def validate_profile(profile: TestProfile):
                 raise ValueError(f"Pose {pose_name!r} contains a non-finite value for {joint_name}")
             lower, upper = profile.position_limits[joint_name]
             if not lower <= value <= upper:
-                raise ValueError(
-                    f"Pose {pose_name!r} value {joint_name}={value} is outside [{lower}, {upper}]"
-                )
+                raise ValueError(f"Pose {pose_name!r} value {joint_name}={value} is outside [{lower}, {upper}]")
 
 
 def parse_args():
