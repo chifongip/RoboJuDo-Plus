@@ -26,6 +26,8 @@ class G1ObserverTests(unittest.TestCase):
         return env
 
     def test_observer_preset_uses_stiff_baseline_and_arm_joints(self):
+        from robojudo.config.g1.observer_parameters_23 import JOINT_NAMES, selected_observer_parameters
+
         cfg = self.make_config()
         baseline = ConfigManager("g1_23_locomanipulation_locomimic").get_cfg()
         self.assertEqual(cfg.model_dump(exclude={"env"}), baseline.model_dump(exclude={"env"}))
@@ -34,6 +36,9 @@ class G1ObserverTests(unittest.TestCase):
         self.assertEqual(cfg.env.xml, baseline.env.xml)
         self.assertEqual(cfg.env.sim_dt * cfg.env.sim_decimation, 0.02)
         self.assertEqual(cfg.env.observer.joint_names, cfg.env.dof.joint_names[-10:])
+        self.assertEqual(cfg.env.observer.joint_names, list(JOINT_NAMES))
+        self.assertEqual(cfg.env.observer.inertia, selected_observer_parameters()["inertia"])
+        self.assertEqual(cfg.env.observer.friction_viscosity, selected_observer_parameters()["friction_viscosity"])
         self.assertEqual(set(cfg.env.feedforward_effort_limits), set(cfg.env.observer.joint_names))
         self.assertEqual(
             cfg.env.observer.actuator_limits_nm,
@@ -62,6 +67,50 @@ class G1ObserverTests(unittest.TestCase):
         cfg.feedforward_effort_limits = {"left_knee_joint": 1.0}
         with self.assertRaisesRegex(ValueError, "disallowed"):
             env.step(env.dof_pos, feedforward_effort=np.ones(env.num_dofs))
+
+    def test_29_dof_preset_uses_stiff_baseline_and_limits_feedforward_to_arms(self):
+        from robojudo.config.g1.observer_parameters import JOINT_NAMES, selected_observer_parameters
+
+        cfg = ConfigManager("g1_29_locomanipulation_locomimic_observer").get_cfg()
+        baseline = ConfigManager("g1_29_locomanipulation_locomimic").get_cfg()
+        self.assertEqual(cfg.model_dump(exclude={"env"}), baseline.model_dump(exclude={"env"}))
+        self.assertEqual(cfg.env.dof, baseline.env.dof)
+        self.assertEqual(cfg.env.xml, baseline.env.xml)
+        self.assertEqual(cfg.loco_policy.policy_name, "policy_29dof_stiff")
+        self.assertEqual(cfg.env.observer.joint_names, list(JOINT_NAMES))
+        self.assertEqual(cfg.env.feedforward_joint_names, list(JOINT_NAMES))
+        self.assertEqual(cfg.env.observer.inertia, selected_observer_parameters()["inertia"])
+        self.assertEqual(cfg.env.observer.friction_viscosity, selected_observer_parameters()["friction_viscosity"])
+        limits = dict(zip(cfg.env.dof.joint_names, cfg.env.dof.torque_limits, strict=True))
+        self.assertEqual(cfg.env.observer.actuator_limits_nm, [limits[name] for name in JOINT_NAMES])
+        self.assertEqual(cfg.env.feedforward_effort_limits, {name: limits[name] for name in JOINT_NAMES})
+        self.assertEqual(cfg.env.observer.mode, "ACTIVE")
+
+        invalid = cfg.env.model_dump()
+        invalid["observer"]["joint_names"][0] = "waist_yaw_joint"
+        with self.assertRaisesRegex(ValidationError, "Observer joints must be allowed feedforward joints"):
+            type(cfg.env).model_validate(invalid)
+        limits = {"waist_yaw_joint": 1.0, "left_knee_joint": 1.0}
+        baseline_data = baseline.env.model_dump()
+        baseline_data["feedforward_effort_limits"] = limits
+        self.assertEqual(type(baseline.env).model_validate(baseline_data).feedforward_effort_limits, limits)
+
+        observer_data = cfg.env.model_dump()
+        observer_data["feedforward_effort_limits"] = limits
+        with self.assertRaisesRegex(ValidationError, "feedforward is restricted to the 14 arm joints"):
+            type(cfg.env).model_validate(observer_data)
+
+    def test_29_dof_observer_issues_arm_only_effort_in_simulation(self):
+        cfg = ConfigManager("g1_29_locomanipulation_locomimic_observer").get_cfg().env
+        cfg.headless = True
+        env = env_registry.get(cfg.env_type)(cfg)
+        self.addCleanup(env.shutdown)
+        env.set_observer_eligible(True)
+        for _ in range(15):
+            env.step(np.asarray(env.default_pos))
+        np.testing.assert_array_equal(env.last_feedforward_effort[:-14], 0.0)
+        self.assertGreater(np.max(np.abs(env.last_feedforward_effort[-14:])), 0.0)
+        np.testing.assert_array_equal(env.get_observer_status()["issued_nm"], env.last_feedforward_effort[-14:])
 
     def test_applied_correction_is_arm_only_and_shadow_issues_zero(self):
         for mode in ("OFF", "SHADOW", "ACTIVE"):

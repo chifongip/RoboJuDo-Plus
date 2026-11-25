@@ -11,7 +11,7 @@ Algorithm selection is explicit and independent of the environment.
 | `LinearizedDisturbanceObserver` | `robojudo/utils/observers/linearized.py` | Historical local-gain estimation, symmetric slew and original anti-windup |
 | `NonlinearDisturbanceObserver` | `robojudo/utils/observers/nonlinear.py` | Bounded finite-residual estimation, separate release slew and directional unwinding |
 | X2 parameter preset | `robojudo/config/x2/observer_parameters.py` | Frozen X2 model coefficients and joint order |
-| G1 parameter preset | `robojudo/config/g1/observer_parameters.py` | Fitted 23-DOF G1 arm model and joint order |
+| G1 parameter presets | `robojudo/config/g1/observer_parameters_23.py`, `robojudo/config/g1/observer_parameters.py` | Fitted 23- and 29-DOF G1 arm models and joint orders |
 | Environment integration | MuJoCo, AimDK, or Unitree C++ environment | Acquire feedback, issue corrections, acknowledge admitted commands, and enforce safety |
 
 Both algorithms share the nominal dynamics in `observers/model.py`; neither
@@ -70,6 +70,8 @@ own ordered joint names and nominal dynamics.
 | `x2_locomimic_real_observer` | nonlinear | OFF | 2 / 16 |
 | `g1_23_locomanipulation_locomimic_observer` | nonlinear | ACTIVE | 2 / 16 |
 | `g1_23_locomanipulation_locomimic_real_observer` | nonlinear | OFF | 2 / 16 |
+| `g1_29_locomanipulation_locomimic_observer` | nonlinear | ACTIVE | 2 / 16 |
+| `g1_29_locomanipulation_locomimic_real_observer` | nonlinear | OFF | 2 / 16 |
 
 See the [G1 observer guide](g1_observer.md) and [X2 interactive observer guide](x2_interactive_observer.md)
 for robot-specific setup and validation.

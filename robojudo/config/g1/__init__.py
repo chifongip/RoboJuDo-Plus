@@ -10,3 +10,9 @@ from .g1_locomimic_observer_cfg import (
 from .g1_locomimic_observer_cfg import (
     g1_23_locomanipulation_locomimic_real_observer as g1_23_locomanipulation_locomimic_real_observer,
 )
+from .g1_locomimic_observer_cfg import (
+    g1_29_locomanipulation_locomimic_observer as g1_29_locomanipulation_locomimic_observer,
+)
+from .g1_locomimic_observer_cfg import (
+    g1_29_locomanipulation_locomimic_real_observer as g1_29_locomanipulation_locomimic_real_observer,
+)

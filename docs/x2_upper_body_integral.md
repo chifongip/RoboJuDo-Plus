@@ -207,8 +207,9 @@ X2 CSV format. The report in `summary.json` includes source hashes, fitted and
 registered coefficients, held-out errors, and closed-loop results. Validation
 failure returns exit status 1.
 
-After fitting, both robots run closed-loop load-release checks at the neutral
-arm target in standing and walking. These checks use the observer preset's
+After fitting, both robots run closed-loop load-release checks in standing and
+walking. Each robot uses its configured carry pose in both loaded and
+unloaded trials. These checks use the observer preset's
 checkpoint to compare the candidate and registered coefficients. The load
 defaults to 10 N per hand. Use `--force` to change the closed-loop evaluation
 load. The allowed increases are the larger of 5% or

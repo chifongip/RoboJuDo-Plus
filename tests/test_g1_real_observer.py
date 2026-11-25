@@ -74,6 +74,21 @@ class G1RealObserverTests(unittest.TestCase):
         limits = dict(zip(baseline.env.dof.joint_names, baseline.env.dof.torque_limits, strict=True))
         self.assertEqual(cfg.env.observer.actuator_limits_nm, [limits[name] for name in cfg.env.observer.joint_names])
 
+    def test_29_dof_deployment_preset_matches_sim_and_uses_all_arm_slots(self):
+        baseline = ConfigManager("g1_29_locomanipulation_locomimic_real").get_cfg()
+        cfg = ConfigManager("g1_29_locomanipulation_locomimic_real_observer").get_cfg()
+        sim = ConfigManager("g1_29_locomanipulation_locomimic_observer").get_cfg()
+        self.assertEqual(cfg.model_dump(exclude={"env"}), baseline.model_dump(exclude={"env"}))
+        self.assertEqual(cfg.env.model_dump(exclude={"observer"}), baseline.env.model_dump())
+        self.assertEqual(cfg.env.observer.mode, "OFF")
+        self.assertEqual(cfg.env.observer.model_dump(exclude={"mode"}), sim.env.observer.model_dump(exclude={"mode"}))
+        self.assertEqual(cfg.env.observer.joint_names, list(G1_29_ARM_JOINT_NAMES))
+        env, native_cfg = self.make_environment("SHADOW", cfg.env)
+        self.assertEqual(native_cfg["arm_motor_indices"], list(range(15, 29)))
+        self.assertFalse(native_cfg["arm_effort_enabled"])
+        env.step(env._dof_pos)
+        np.testing.assert_array_equal(env.unitree.commands[-1][1], np.zeros(14))
+
     def test_active_uses_shared_observer_limits(self):
         cfg = self.observer_preset().env
         cfg.observer.mode = "ACTIVE"

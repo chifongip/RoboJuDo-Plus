@@ -13,8 +13,11 @@ import numpy as np
 from box import Box
 from scipy.optimize import least_squares
 
-from robojudo.config.g1.carry_pose import G1_CARRY_POSE
-from robojudo.config.g1.g1_locomimic_observer_cfg import g1_23_locomanipulation_locomimic_observer
+from robojudo.config.g1.carry_pose import G1_23_CARRY_POSE, G1_CARRY_POSE
+from robojudo.config.g1.g1_locomimic_observer_cfg import (
+    g1_23_locomanipulation_locomimic_observer,
+    g1_29_locomanipulation_locomimic_observer,
+)
 from robojudo.config.x2.carry_pose import X2_CARRY_POSE
 from robojudo.config.x2.x2_locomimic_observer_cfg import x2_locomimic_observer
 from robojudo.controller.ctrl_cfgs import UpperBodyZmqCtrlCfg
@@ -34,10 +37,15 @@ PROBE_SEED = 0
 PROBE_SLEW_NM_S = 2.0
 CARRY_FORCE_PER_HAND_N = 20.0
 CLOSED_LOOP_FORCE_PER_HAND_N = 10.0
+G1_29_SMALL_WRIST_PROBE_FRACTION = 0.025
+
+
 ROBOTS = {
-    "g1": (g1_23_locomanipulation_locomimic_observer, G1LocomanipulationLocoMimicPipeline, "wrist_roll_rubber_hand"),
+    "g1-23": (g1_23_locomanipulation_locomimic_observer, G1LocomanipulationLocoMimicPipeline, "wrist_roll_rubber_hand"),
+    "g1-29": (g1_29_locomanipulation_locomimic_observer, G1LocomanipulationLocoMimicPipeline, "wrist_yaw_link"),
     "x2": (x2_locomimic_observer, X2LocomanipulationLocoMimicPipeline, "wrist_roll_link"),
 }
+CARRY_POSES = {"g1-23": G1_23_CARRY_POSE, "g1-29": G1_CARRY_POSE, "x2": X2_CARRY_POSE}
 
 
 def configure_headless(cfg):
@@ -82,7 +90,7 @@ def enter_unassisted_rl(pipeline):
     band.apply()
 
 
-def run_trial(mode, speed, force_n=0.0, *, tuning=None, robot="g1"):
+def run_trial(mode, speed, force_n=0.0, *, tuning=None, robot="g1-23"):
     config_type, pipeline_type, hand_body = ROBOTS[robot]
     cfg = config_type()
     upper_body_cfg = next(ctrl for ctrl in cfg.ctrl if isinstance(ctrl, UpperBodyZmqCtrlCfg))
@@ -98,11 +106,10 @@ def run_trial(mode, speed, force_n=0.0, *, tuning=None, robot="g1"):
     torso = env.model.body("torso_link").id
     pelvis = env.model.body("pelvis").id
     speed_cmd = 0.0
-    upper_offset = env.num_dofs - cfg.upper_dof_num
-    neutral_arm_goal = [cfg.upper_dof_pos_default[index - upper_offset] for index in indices]
+    arm_goal = [CARRY_POSES[robot][name] for name in names]
 
     def control_data(_):
-        return synthetic_controls(speed_cmd, names, neutral_arm_goal)
+        return synthetic_controls(speed_cmd, names, arm_goal)
 
     step = env.step
     sample = {}
@@ -299,11 +306,10 @@ def calibration_setup(robot):
         from scripts.x2_integral_sim import evaluation_config
 
         cfg = evaluation_config()
-        carrying = np.array([X2_CARRY_POSE[name] for name in names])
     else:
         cfg = observer_cfg
-        carrying = np.array([G1_CARRY_POSE[name] for name in names])
 
+    carrying = np.array([CARRY_POSES[robot][name] for name in names])
     dof = cfg.env.dof
     indices = [dof.joint_names.index(name) for name in names]
     defaults = np.asarray(dof.default_pos)[indices]
@@ -320,6 +326,13 @@ def calibration_setup(robot):
     return cfg, pipeline_type, upper_body, hand_body, names, defaults, carrying, CARRY_FORCE_PER_HAND_N
 
 
+def probe_amplitude(robot, joint_name, torque_limit):
+    fraction = 0.01
+    if robot == "g1-29" and joint_name.endswith(("_wrist_pitch_joint", "_wrist_yaw_joint")):
+        fraction = G1_29_SMALL_WRIST_PROBE_FRACTION
+    return min(0.25, fraction * torque_limit)
+
+
 def acquire_probe(robot, condition, joint, output, *, scale=1.0):
     cfg, pipeline_type, upper_body, hand_body, names, defaults, carrying, load_n = calibration_setup(robot)
     np.random.seed(PROBE_SEED)
@@ -330,7 +343,7 @@ def acquire_probe(robot, condition, joint, output, *, scale=1.0):
     amplitude = 0.0
     if joint is not None:
         env.probe_joint = indices[joint]
-        amplitude = scale * min(0.25, 0.01 * env.torque_limits[env.probe_joint])
+        amplitude = scale * probe_amplitude(robot, names[joint], env.torque_limits[env.probe_joint])
 
     arm_target = defaults
 
@@ -399,7 +412,8 @@ VALIDATE = np.r_[
 LOWER = np.log([0.005, 0.05, 0.1, 0.001, 0.1])
 UPPER = np.log([5.0, 100.0, 300.0, 2.0, 5000.0])
 G1_FRICTION_SEED_NM = 0.10
-G1_WRIST_ROLL_INERTIA_KG_M2 = 0.01020
+G1_23_WRIST_ROLL_INERTIA_KG_M2 = 0.01020
+G1_29_WRIST_ROLL_INERTIA_KG_M2 = 0.01037
 
 
 def rollout(log_parameters, effort):
@@ -493,12 +507,15 @@ def acquire_trial(robot, stance, joint, output):
             return stance, joint, None, f"{first_error}; half-amplitude retry: {retry_error}"
 
 
-def probe_metadata(names, carry_pose):
-    return {
+def probe_metadata(names, carry_pose, *, robot=None):
+    metadata = {
         **PROBE_PROTOCOL,
         "carry_force_per_hand_n": CARRY_FORCE_PER_HAND_N,
         "carry_target_rad": dict(zip(names, carry_pose.tolist(), strict=True)),
     }
+    if robot == "g1-29":
+        metadata["small_wrist_probe_fraction"] = G1_29_SMALL_WRIST_PROBE_FRACTION
+    return metadata
 
 
 def acquire_traces(robot, output, names, jobs, carry_pose):
@@ -509,7 +526,7 @@ def acquire_traces(robot, output, names, jobs, carry_pose):
         "joint_names": names,
         "traces": traces,
         "failures": failures,
-        "probe": probe_metadata(names, carry_pose),
+        "probe": probe_metadata(names, carry_pose, robot=robot),
     }
     manifest_path = output / "manifest.json"
     pending = manifest_path.with_suffix(".tmp")
@@ -554,6 +571,8 @@ def read_manifest(root, robot, names, carry_pose):
         # protocol for fields that are present in the manifest or its summary.
         if any(probe.get(key, expected) != expected for key, expected in PROBE_PROTOCOL.items()):
             raise ValueError("Calibration traces do not match the configured probe protocol")
+        if robot == "g1-29" and probe.get("small_wrist_probe_fraction") != G1_29_SMALL_WRIST_PROBE_FRACTION:
+            raise ValueError("Calibration traces do not match the configured small-wrist probe amplitude")
         return manifest
 
     posture = manifest.get("posture_rad", {})
@@ -637,7 +656,7 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def fit_parameters(output, force_n=CLOSED_LOOP_FORCE_PER_HAND_N, *, robot="g1", jobs=3, traces=None):
+def fit_parameters(output, force_n=CLOSED_LOOP_FORCE_PER_HAND_N, *, robot="g1-23", jobs=3, traces=None):
     cfg, _, _, _, names, _, carrying, _ = calibration_setup(robot)
     observer = ROBOTS[robot][0]().env.observer
     dof = cfg.env.dof
@@ -664,7 +683,7 @@ def fit_parameters(output, force_n=CLOSED_LOOP_FORCE_PER_HAND_N, *, robot="g1", 
             for key, path in (("mjcf", cfg.env.xml), ("policy", cfg.loco_policy.policy_file), ("runner", __file__))
         },
         "mujoco_version": mujoco.__version__,
-        "probe": probe_metadata(names, carrying),
+        "probe": probe_metadata(names, carrying, robot=robot),
         "joints": joints,
         "failures": failures,
     }
@@ -675,10 +694,10 @@ def fit_parameters(output, force_n=CLOSED_LOOP_FORCE_PER_HAND_N, *, robot="g1", 
         joints[name] = entry
         fixed_inertia = None
         fit_options = {}
-        if robot == "g1":
+        if robot in ("g1-23", "g1-29"):
             fit_options["friction_seed_nm"] = G1_FRICTION_SEED_NM
             if name.endswith("_wrist_roll_joint"):
-                fixed_inertia = G1_WRIST_ROLL_INERTIA_KG_M2
+                fixed_inertia = G1_29_WRIST_ROLL_INERTIA_KG_M2 if robot == "g1-29" else G1_23_WRIST_ROLL_INERTIA_KG_M2
                 fit_options["fixed_inertia"] = fixed_inertia
                 entry["fixed_inertia_kg_m2"] = fixed_inertia
         for stance in OPERATING_TIMES:
@@ -752,7 +771,7 @@ def summarize(trace, unloaded):
     }
 
 
-def compare_closed_loop(output, force_n, tuning, failures, *, robot="g1"):
+def compare_closed_loop(output, force_n, tuning, failures, *, robot="g1-23"):
     results = {}
     for motion, speed in MOTIONS:
         results[motion] = scores = {}
@@ -785,7 +804,12 @@ def compare_closed_loop(output, force_n, tuning, failures, *, robot="g1"):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--robot", choices=ROBOTS, default="g1", help="Select the simulation preset (default: g1).")
+    parser.add_argument(
+        "--robot",
+        choices=ROBOTS,
+        default="g1-23",
+        help="Select the simulation preset (default: g1-23).",
+    )
     parser.add_argument("--fit", action="store_true", help="Fit from additive torque and run validation checks.")
     parser.add_argument("--jobs", type=int, default=3, help="Parallel simulation workers during fitting.")
     parser.add_argument("--traces", type=Path, help="Reuse recorded calibration traces with --fit.")

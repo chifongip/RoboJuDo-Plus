@@ -4,11 +4,34 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import mujoco
 import numpy as np
 
 from scripts import evaluate_joint_observer as calibration
-from scripts.observer_carry_pose import G1_HAND_AXES, X2_HAND_AXES, hand_pose, retarget_g1_carry, standing_state
 from scripts.test_upper_body_zmq import PROFILES, validate_profile
+
+G1_HAND_AXES = np.eye(3)
+X2_HAND_AXES = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]])
+
+
+def standing_state(xml, dof, arm_targets):
+    model = mujoco.MjModel.from_xml_path(xml)
+    data = mujoco.MjData(model)
+    targets = dict(zip(dof.joint_names, dof.default_pos, strict=True)) | arm_targets
+    for name, value in targets.items():
+        data.qpos[model.joint(name).qposadr[0]] = value
+    mujoco.mj_fwdPosition(model, data)
+    return model, data
+
+
+def hand_pose(data, body_name, local_axes):
+    pelvis = data.body("pelvis")
+    hand = data.body(body_name)
+    world_to_pelvis = pelvis.xmat.reshape(3, 3).T
+    return (
+        world_to_pelvis @ (hand.xipos - pelvis.xpos),
+        world_to_pelvis @ hand.xmat.reshape(3, 3) @ local_axes,
+    )
 
 
 class JointObserverCalibrationTests(unittest.TestCase):
@@ -62,7 +85,7 @@ class JointObserverCalibrationTests(unittest.TestCase):
                 effort,
                 response,
                 friction_seed_nm=calibration.G1_FRICTION_SEED_NM,
-                fixed_inertia=calibration.G1_WRIST_ROLL_INERTIA_KG_M2,
+                fixed_inertia=calibration.G1_23_WRIST_ROLL_INERTIA_KG_M2,
             )
         optimize.assert_called_once()
         np.testing.assert_array_equal(optimize.call_args.args[1], np.log(parameters[1:]))
@@ -71,7 +94,11 @@ class JointObserverCalibrationTests(unittest.TestCase):
         self.assertFalse(result["parameter_at_search_boundary"])
 
     def test_setup_uses_calibration_checkpoint_and_registered_arm_order(self):
-        for robot, policy, count in (("x2", "policy_fine_tune", 14), ("g1", "policy_23dof_stiff", 10)):
+        for robot, policy, count in (
+            ("x2", "policy_fine_tune", 14),
+            ("g1-23", "policy_23dof_stiff", 10),
+            ("g1-29", "policy_29dof_stiff", 14),
+        ):
             with self.subTest(robot=robot):
                 cfg, _, _, _, names, neutral, carry, force = calibration.calibration_setup(robot)
                 self.assertEqual(cfg.loco_policy.policy_name, policy)
@@ -81,31 +108,94 @@ class JointObserverCalibrationTests(unittest.TestCase):
                 self.assertEqual(neutral.shape, carry.shape)
                 self.assertEqual(set(cfg.env.feedforward_effort_limits), set(names))
 
-    def test_retargeted_g1_carry_shifts_hand_load_points_back_and_down(self):
-        setups = {}
+    def test_29_dof_calibration_uses_wrist_yaw_load_bodies_and_carry_pose(self):
+        from robojudo.config.g1.carry_pose import G1_CARRY_POSE
+        from robojudo.config.g1.env.g1_env_cfg import G1_29_ARM_JOINT_NAMES
+        from robojudo.config.g1.observer_parameters import selected_observer_parameters
+
+        cfg, _, _, body, names, _, carry, _ = calibration.calibration_setup("g1-29")
+        self.assertEqual(names, list(G1_29_ARM_JOINT_NAMES))
+        self.assertEqual(body, "wrist_yaw_link")
+        self.assertEqual(dict(zip(names, carry, strict=True)), G1_CARRY_POSE)
+        self.assertEqual(cfg.env.observer.joint_names, names)
+        self.assertEqual(cfg.env.dof.num_dofs, 29)
+        self.assertEqual(cfg.env.observer.inertia, selected_observer_parameters()["inertia"])
+        self.assertEqual(cfg.env.observer.friction_viscosity, selected_observer_parameters()["friction_viscosity"])
+        parameters = selected_observer_parameters()
+        parameters["inertia"][0] = 0
+        self.assertGreater(selected_observer_parameters()["inertia"][0], 0)
+
+    def test_29_dof_manifest_requires_current_small_wrist_excitation(self):
+        names = ["left_wrist_yaw_joint"]
+        carry = np.array([0.1])
+        manifest = {
+            "robot": "g1-29",
+            "joint_names": names,
+            "traces": {},
+            "probe": calibration.probe_metadata(names, carry, robot="g1-29"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "manifest.json"
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(calibration.read_manifest(root, "g1-29", names, carry), manifest)
+            manifest["probe"].pop("small_wrist_probe_fraction")
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "small-wrist probe amplitude"):
+                calibration.read_manifest(root, "g1-29", names, carry)
+
+    def test_29_dof_small_wrist_probe_exceeds_friction(self):
+        for side in ("left", "right"):
+            for axis in ("pitch", "yaw"):
+                name = f"{side}_wrist_{axis}_joint"
+                self.assertEqual(calibration.probe_amplitude("g1-29", name, 5.0), 0.125)
+        self.assertEqual(calibration.probe_amplitude("g1-29", "left_wrist_roll_joint", 25.0), 0.25)
+        self.assertEqual(calibration.probe_amplitude("x2", "left_wrist_yaw_joint", 5.0), 0.05)
+
+    def test_g1_carry_shifts_hand_load_points_back_and_down_from_x2(self):
         points = {}
-        for robot, axes in (("g1", G1_HAND_AXES), ("x2", X2_HAND_AXES)):
+        for robot, axes in (("g1-23", G1_HAND_AXES), ("x2", X2_HAND_AXES)):
             cfg, _, _, body, names, _, carry, _ = calibration.calibration_setup(robot)
             targets = dict(zip(names, carry, strict=True))
-            setups[robot] = cfg.env, targets
             _, data = standing_state(cfg.env.xml, cfg.env.dof, targets)
             points[robot] = [hand_pose(data, f"{side}_{body}", axes)[0] for side in ("left", "right")]
-        np.testing.assert_allclose(points["g1"], np.asarray(points["x2"]) + [-0.10, 0, -0.15], rtol=0, atol=1e-5)
+        np.testing.assert_allclose(points["g1-23"], np.asarray(points["x2"]) + [-0.05, 0, -0.15], rtol=0, atol=1e-5)
 
-        g1, targets = setups["g1"]
-        x2, x2_targets = setups["x2"]
-        solution = retarget_g1_carry(g1.xml, g1.dof, list(targets), x2.xml, x2.dof, x2_targets)
-        np.testing.assert_allclose(solution, list(targets.values()), rtol=0, atol=1e-6)
+        from robojudo.config.g1.carry_pose import G1_23_CARRY_POSE
+
         profile = PROFILES["g1-23"]
         validate_profile(profile)
-        self.assertEqual(profile.poses["custom_arms"], targets)
+        self.assertEqual(profile.poses["custom_arms"], G1_23_CARRY_POSE)
+
+    def test_g1_29_carry_is_5cm_forward_of_23_with_same_hand_orientations(self):
+        from robojudo.config.g1.carry_pose import G1_23_CARRY_POSE, G1_CARRY_POSE
+        from robojudo.config.g1.env.g1_env_cfg import G1_23DoF, G1_29DoF
+
+        model23, data23 = standing_state("assets/robots/g1/g1_23dof_rev_1_0.xml", G1_23DoF(), G1_23_CARRY_POSE)
+        model29, data29 = standing_state("assets/robots/g1/g1_29dof_rev_1_0.xml", G1_29DoF(), G1_CARRY_POSE)
+        for side in ("left", "right"):
+            with self.subTest(side=side):
+                point23, orientation23 = hand_pose(data23, f"{side}_wrist_roll_rubber_hand", G1_HAND_AXES)
+                point29, orientation29 = hand_pose(data29, f"{side}_wrist_yaw_link", G1_HAND_AXES)
+                np.testing.assert_allclose(point29 - point23, [0.05, 0, 0], rtol=0, atol=1e-5)
+                np.testing.assert_allclose(orientation29, orientation23, rtol=0, atol=1e-5)
+        for model, data in ((model23, data23), (model29, data29)):
+            self.assertFalse(
+                any(
+                    contact.dist < 0 and model.geom_bodyid[contact.geom1] and model.geom_bodyid[contact.geom2]
+                    for contact in data.contact
+                )
+            )
+        profile = PROFILES["g1-29"]
+        validate_profile(profile)
+        self.assertEqual(profile.poses["custom_arms"], G1_CARRY_POSE)
 
     def test_probe_retries_excited_trace_once_at_half_amplitude(self):
         with patch.object(calibration, "acquire_probe", side_effect=[ValueError("clipped"), "half.npz"]) as acquire:
-            self.assertEqual(calibration.acquire_trial("g1", "grasp", 1, Path(".")), ("grasp", 1, "half.npz", None))
+            self.assertEqual(calibration.acquire_trial("g1-23", "grasp", 1, Path(".")), ("grasp", 1, "half.npz", None))
             self.assertEqual(acquire.call_args.kwargs, {"scale": 0.5})
         with patch.object(calibration, "acquire_probe", side_effect=ValueError("clipped")) as acquire:
-            self.assertIn("clipped", calibration.acquire_trial("g1", "grasp", None, Path("."))[-1])
+            self.assertIn("clipped", calibration.acquire_trial("g1-23", "grasp", None, Path("."))[-1])
             acquire.assert_called_once()
 
     def test_trace_reader_requires_correct_robot_and_all_samples(self):
@@ -113,23 +203,25 @@ class JointObserverCalibrationTests(unittest.TestCase):
             root = Path(directory)
             (root / "manifest.json").write_text(json.dumps({"robot": "x2", "joint_names": ["a"], "traces": {}}))
             with self.assertRaisesRegex(ValueError, "robot or joint order"):
-                calibration.read_manifest(root, "g1", ["a"], np.array([0.1]))
+                calibration.read_manifest(root, "g1-23", ["a"], np.array([0.1]))
             probe = {"carry_force_per_hand_n": 10.0, "carry_target_rad": {"a": 0.1}}
-            manifest = {"robot": "g1", "joint_names": ["a"], "traces": {}, "probe": probe}
+            manifest = {"robot": "g1-23", "joint_names": ["a"], "traces": {}, "probe": probe}
             for force, angle in ((10.0, 0.1), (20.0, 0.2)):
                 with self.subTest(force=force, angle=angle):
                     probe.update(carry_force_per_hand_n=force, carry_target_rad={"a": angle})
                     (root / "manifest.json").write_text(json.dumps(manifest))
                     with self.assertRaisesRegex(ValueError, "carry load and pose"):
-                        calibration.read_manifest(root, "g1", ["a"], np.array([0.1]))
+                        calibration.read_manifest(root, "g1-23", ["a"], np.array([0.1]))
 
             probe.update(carry_force_per_hand_n=20.0, carry_target_rad={"a": 0.1})
             (root / "manifest.json").write_text(json.dumps(manifest))
-            self.assertEqual(calibration.read_manifest(root, "g1", ["a"], np.array([0.1])), manifest)
+            self.assertEqual(calibration.read_manifest(root, "g1-23", ["a"], np.array([0.1])), manifest)
+            with self.assertRaisesRegex(ValueError, "robot or joint order"):
+                calibration.read_manifest(root, "g1-29", ["a"], np.array([0.1]))
             probe["control_dt_s"] = 0.01
             (root / "manifest.json").write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, "probe protocol"):
-                calibration.read_manifest(root, "g1", ["a"], np.array([0.1]))
+                calibration.read_manifest(root, "g1-23", ["a"], np.array([0.1]))
 
             trace = root / "incomplete.npz"
             np.savez(trace, q=np.zeros((4, 1)), dq=np.zeros((4, 1)), effort=np.zeros(4))

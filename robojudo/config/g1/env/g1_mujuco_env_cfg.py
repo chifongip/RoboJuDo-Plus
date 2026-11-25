@@ -2,7 +2,7 @@ from pydantic import model_validator
 
 from robojudo.environment.env_cfgs import MujocoEnvCfg, ObserverMujocoEnvCfg
 
-from .g1_env_cfg import G1_23_ARM_JOINT_NAMES, G1_12EnvCfg, G1_23EnvCfg, G1EnvCfg
+from .g1_env_cfg import G1_23_ARM_JOINT_NAMES, G1_29_ARM_JOINT_NAMES, G1_12EnvCfg, G1_23EnvCfg, G1EnvCfg
 
 
 class G1MujocoEnvCfg(G1EnvCfg, MujocoEnvCfg):
@@ -11,6 +11,20 @@ class G1MujocoEnvCfg(G1EnvCfg, MujocoEnvCfg):
     # ====== ENV CONFIGURATION ======
 
     update_with_fk: bool = True
+
+
+class G1ObserverMujocoEnvCfg(G1MujocoEnvCfg, ObserverMujocoEnvCfg):
+    env_type: str = "ObserverMujocoEnv"
+
+    @property
+    def feedforward_joint_names(self) -> list[str]:
+        return list(G1_29_ARM_JOINT_NAMES)
+
+    @model_validator(mode="after")
+    def check_arm_feedforward_limits(self):
+        if set(self.feedforward_effort_limits) - set(G1_29_ARM_JOINT_NAMES):
+            raise ValueError("G1 29-DOF feedforward is restricted to the 14 arm joints")
+        return self
 
 
 class G1_23MujocoEnvCfg(G1_23EnvCfg, MujocoEnvCfg):

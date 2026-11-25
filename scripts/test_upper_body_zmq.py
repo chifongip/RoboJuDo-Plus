@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import zmq
 
-from robojudo.config.g1.carry_pose import G1_CARRY_POSE
+from robojudo.config.g1.carry_pose import G1_23_CARRY_POSE, G1_CARRY_POSE
 from robojudo.config.g1.policy.g1_locomanipulation_policy_cfg import (
     G1Locomanipulation23ObsDoF,
     G1Locomanipulation29ObsDoF,
@@ -118,6 +118,8 @@ def make_profile(label: str, joint_names: list[str], default_pos: list[float], p
         }
         poses["custom_arms"] = default_pose | X2_CARRY_POSE
     elif label == "G1 23-DOF":
+        poses["custom_arms"] = default_pose | G1_23_CARRY_POSE
+    elif label == "G1 29-DOF":
         poses["custom_arms"] = default_pose | G1_CARRY_POSE
     return TestProfile(
         label=label,
